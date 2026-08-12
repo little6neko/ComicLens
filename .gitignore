@@ -2,8 +2,15 @@
 .venv/
 __pycache__/
 *.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
 node_modules/
 web/dist/
+web/.vite/
+web/.tanstack/
 data/
 logs/
 .superpowers/
