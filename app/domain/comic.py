@@ -88,6 +88,7 @@ class ReaderPage(ComicModel):
     index: int = Field(ge=0)
     original_url: str
     translated_url: str | None = None
+    translated_part_urls: list[str] = Field(default_factory=list)
     translated_version: str | None = None
     width: int | None = None
     height: int | None = None

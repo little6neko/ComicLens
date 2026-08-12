@@ -571,11 +571,17 @@ class TranslationRepository:
         rows = self.database.fetchall(
             """
             SELECT pages.*, active.translated_path active_path,
-                active.translated_version active_version
+                active.translated_version active_version,
+                active_pages.width active_width,
+                active_pages.height active_height,
+                active_pages.display_parts_json active_display_parts_json
             FROM translation_pages pages
             LEFT JOIN active_translation_pages active
               ON active.comic_id = ? AND active.chapter_id = ?
              AND active.page_index = pages.page_index
+            LEFT JOIN translation_pages active_pages
+              ON active_pages.generation_id = active.generation_id
+             AND active_pages.page_index = active.page_index
             WHERE pages.generation_id = ? ORDER BY pages.page_index
             """,
             (comic_id, chapter_id, generation_id),
@@ -594,9 +600,20 @@ class TranslationRepository:
                     if row["active_path"] and row["active_version"]
                     else None
                 ),
+                translated_part_urls=(
+                    self.translated_part_urls(
+                        comic_id,
+                        chapter_id,
+                        int(row["page_index"]),
+                        str(row["active_version"]),
+                        len(self.decode_display_parts(row["active_display_parts_json"])),
+                    )
+                    if row["active_path"] and row["active_version"]
+                    else []
+                ),
                 translated_version=(str(row["active_version"]) if row["active_version"] else None),
-                width=int(row["width"]) if row["width"] is not None else None,
-                height=int(row["height"]) if row["height"] is not None else None,
+                width=int(row["active_width"]) if row["active_width"] is not None else None,
+                height=int(row["active_height"]) if row["active_height"] is not None else None,
                 attempts=int(row["attempts"]),
                 error=(
                     TranslationError(
@@ -622,6 +639,32 @@ class TranslationRepository:
             f"/api/media/comics/{comic_id}/chapters/{chapter_id}/pages/"
             f"{page_index}/translated?v={version}"
         )
+
+    @staticmethod
+    def translated_part_urls(
+        comic_id: str,
+        chapter_id: str,
+        page_index: int,
+        version: str,
+        part_count: int,
+    ) -> list[str]:
+        base = (
+            f"/api/media/comics/{comic_id}/chapters/{chapter_id}/pages/"
+            f"{page_index}/translated/parts"
+        )
+        return [f"{base}/{part_index}?v={version}" for part_index in range(part_count)]
+
+    @staticmethod
+    def decode_display_parts(value: object) -> list[str]:
+        if value is None:
+            return []
+        try:
+            decoded = json.loads(str(value))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return []
+        if not isinstance(decoded, list):
+            return []
+        return [str(path) for path in decoded if isinstance(path, str)]
 
     @staticmethod
     def decode_semantic_settings(row: sqlite3.Row) -> dict[str, Any]:

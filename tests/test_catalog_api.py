@@ -129,11 +129,12 @@ class FastPipeline:
         rendered.putpixel((0, 0), (1, 2, 3))
         buffer = io.BytesIO()
         rendered.save(buffer, format="PNG")
+        rendered_bytes = buffer.getvalue()
         return RenderOutput(
-            translated_bytes=buffer.getvalue(),
+            translated_bytes=rendered_bytes,
             width=rendered.width,
             height=rendered.height,
-            display_parts=[],
+            display_parts=[rendered_bytes],
         )
 
 
@@ -342,7 +343,9 @@ def test_translation_api_polls_manifest_and_serves_immutable_version(
             time.sleep(0.01)
         manifest = api_client.get("/api/comics/alpha-comic/chapters/chapter-12/manifest")
         translated_url = manifest.json()["pages"][0]["translatedUrl"]
+        translated_part_urls = manifest.json()["pages"][0]["translatedPartUrls"]
         translated = api_client.get(translated_url)
+        translated_part = api_client.get(translated_part_urls[0])
         wrong_version = api_client.get(
             "/api/media/comics/alpha-comic/chapters/chapter-12/pages/0/translated",
             params={"v": "0000000000000000"},
@@ -356,8 +359,12 @@ def test_translation_api_polls_manifest_and_serves_immutable_version(
     assert started.status_code == 200
     assert state is not None and state.json()["status"] == "completed"
     assert state.json()["pages"][0]["translatedUrl"] == translated_url
+    assert state.json()["pages"][0]["translatedPartUrls"] == translated_part_urls
+    assert len(translated_part_urls) == 1
     assert "?v=" in translated_url
     assert translated.status_code == 200
     assert translated.headers["cache-control"].endswith("immutable")
+    assert translated_part.status_code == 200
+    assert translated_part.headers["cache-control"].endswith("immutable")
     assert wrong_version.status_code == 404
     assert unconfirmed.status_code == 422

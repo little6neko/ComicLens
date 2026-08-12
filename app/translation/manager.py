@@ -249,6 +249,7 @@ class TranslationManager:
             update: dict[str, object] = {}
             if active is not None:
                 version = str(active["translated_version"])
+                display_parts = self.repository.decode_display_parts(active["display_parts_json"])
                 update.update(
                     {
                         "translated_url": self.repository.translated_url(
@@ -256,6 +257,13 @@ class TranslationManager:
                             manifest.chapter_id,
                             page.index,
                             version,
+                        ),
+                        "translated_part_urls": self.repository.translated_part_urls(
+                            manifest.comic_id,
+                            manifest.chapter_id,
+                            page.index,
+                            version,
+                            len(display_parts),
                         ),
                         "translated_version": version,
                         "width": (int(active["width"]) if active["width"] is not None else None),
@@ -288,6 +296,30 @@ class TranslationManager:
         )
         if media is None:
             raise AppError("TRANSLATION_MEDIA_NOT_FOUND", "译图缓存已失效", 404, True)
+        return media
+
+    def translated_part_media(
+        self,
+        comic_id: str,
+        chapter_id: str,
+        page_index: int,
+        part_index: int,
+        version: str,
+    ):
+        active = self.repository.active_page(comic_id, chapter_id, page_index)
+        if active is None or str(active["translated_version"]) != version:
+            raise AppError("TRANSLATION_MEDIA_NOT_FOUND", "译图版本不存在", 404, False)
+        display_parts = self.repository.decode_display_parts(active["display_parts_json"])
+        if part_index >= len(display_parts):
+            raise AppError("TRANSLATION_MEDIA_NOT_FOUND", "译图分片不存在", 404, False)
+        media = self.cache.read_bytes(
+            display_parts[part_index],
+            media_type="image/png",
+            protect=True,
+            verify_image=True,
+        )
+        if media is None:
+            raise AppError("TRANSLATION_MEDIA_NOT_FOUND", "译图分片缓存已失效", 404, True)
         return media
 
     def _ensure_worker(self, comic_id: str, chapter_id: str) -> None:

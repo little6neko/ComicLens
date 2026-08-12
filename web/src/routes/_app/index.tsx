@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { ArrowRightIcon, ScanSearchIcon } from "lucide-react";
+import { ArrowRightIcon, BookOpenIcon, ScanSearchIcon } from "lucide-react";
 
 import { AppPage } from "@/components/app-page";
 import { ComicGrid, FeaturedCard } from "@/components/comic-card";
@@ -16,6 +16,8 @@ export const Route = createFileRoute("/_app/")({
 
 function HomePage() {
   const home = useQuery({ queryKey: queryKeys.home, queryFn: api.home, ...queryTimes.catalog });
+  const history = useQuery({ queryKey: queryKeys.history, queryFn: api.history });
+  const recent = history.data?.[0];
 
   return (
     <AppPage>
@@ -37,6 +39,38 @@ function HomePage() {
           探索 Comic <ArrowRightIcon className="size-4" />
         </Link>
       </header>
+
+      {recent && (
+        <section className="space-y-4">
+          <SectionHeading title="继续阅读" />
+          <a
+            href={`/reader/${encodeURIComponent(recent.comic.comicId)}/${encodeURIComponent(recent.chapterId)}?page=${recent.pageIndex + 1}`}
+            className="group flex items-center gap-4 rounded-3xl border bg-card p-4 shadow-sm transition-shadow hover:shadow-md"
+          >
+            <img
+              src={recent.comic.coverUrl}
+              alt={recent.comic.title}
+              className="h-28 w-21 shrink-0 rounded-2xl object-cover"
+            />
+            <div className="min-w-0 flex-1">
+              <p className="truncate font-semibold sm:text-lg">{recent.comic.title}</p>
+              <p className="mt-1 truncate text-sm text-muted-foreground">{recent.chapterTitle}</p>
+              <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-muted">
+                <div
+                  className="h-full rounded-full bg-primary"
+                  style={{ width: `${((recent.pageIndex + 1) / recent.totalPages) * 100}%` }}
+                />
+              </div>
+              <p className="mt-1.5 text-xs text-muted-foreground">
+                第 {recent.pageIndex + 1} / {recent.totalPages} 页
+              </p>
+            </div>
+            <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground">
+              <BookOpenIcon className="size-4" />
+            </span>
+          </a>
+        </section>
+      )}
 
       {home.isPending ? (
         <LoadingState />

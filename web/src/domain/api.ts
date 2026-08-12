@@ -78,6 +78,7 @@ export interface ReaderPage {
   index: number;
   originalUrl: string;
   translatedUrl: string | null;
+  translatedPartUrls: string[];
   translatedVersion: string | null;
   width: number | null;
   height: number | null;
@@ -185,6 +186,7 @@ export interface TranslationPageState {
   pageIndex: number;
   status: TranslationPageStatus;
   translatedUrl: string | null;
+  translatedPartUrls: string[];
   translatedVersion: string | null;
   width: number | null;
   height: number | null;

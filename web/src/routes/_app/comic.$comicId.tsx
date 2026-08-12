@@ -30,6 +30,7 @@ function ComicDetailPage() {
     ...queryTimes.detail,
   });
   const favorites = useQuery({ queryKey: queryKeys.favorites, queryFn: api.favorites });
+  const history = useQuery({ queryKey: queryKeys.history, queryFn: api.history });
   const readChapters = useQuery({
     queryKey: queryKeys.readChapters(comicId),
     queryFn: () => api.readChapters(comicId),
@@ -66,6 +67,16 @@ function ComicDetailPage() {
 
   const detail = comic.data;
   const firstChapter = detail.chapters[0];
+  const progress = history.data?.find((item) => item.comic.comicId === comicId);
+  const readingTarget = progress
+    ? {
+        chapterId: progress.chapterId,
+        page: progress.pageIndex + 1,
+        label: "继续阅读",
+      }
+    : firstChapter
+      ? { chapterId: firstChapter.chapterId, page: 1, label: "开始阅读" }
+      : null;
   const readSet = new Set(readChapters.data?.chapterIds ?? []);
 
   return (
@@ -107,12 +118,12 @@ function ComicDetailPage() {
           </div>
 
           <div className="flex flex-wrap gap-2">
-            {firstChapter && (
+            {readingTarget && (
               <a
-                href={`/reader/${encodeURIComponent(comicId)}/${encodeURIComponent(firstChapter.chapterId)}`}
+                href={`/reader/${encodeURIComponent(comicId)}/${encodeURIComponent(readingTarget.chapterId)}?page=${readingTarget.page}`}
                 className={buttonVariants({ size: "lg" })}
               >
-                <BookOpenIcon className="size-4" /> 开始阅读
+                <BookOpenIcon className="size-4" /> {readingTarget.label}
               </a>
             )}
             <Button
@@ -129,6 +140,12 @@ function ComicDetailPage() {
               {isFavorite ? "已收藏" : "收藏"}
             </Button>
           </div>
+
+          {progress && (
+            <p className="text-sm text-muted-foreground">
+              {progress.chapterTitle} · 第 {progress.pageIndex + 1} / {progress.totalPages} 页
+            </p>
+          )}
 
           {detail.genres.length > 0 && (
             <div className="flex flex-wrap gap-2">

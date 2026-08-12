@@ -141,6 +141,7 @@ function ReaderPageView() {
   }, [manifest.data, task.data?.pages]);
   const totalPages = effectivePages.length;
   const clampedCurrent = clamp(currentPageIndex, 0, Math.max(0, totalPages - 1));
+  const completionPageIndex = Math.max(0, totalPages - (readingMode === "double" ? 2 : 1));
   const activePage = task.data?.currentPageIndex;
   const taskProgress = task.data?.totalPages
     ? Math.round(((task.data.completedPages + task.data.failedPages) / task.data.totalPages) * 100)
@@ -212,14 +213,14 @@ function ReaderPageView() {
   useEffect(() => {
     if (
       totalPages === 0 ||
-      clampedCurrent < totalPages - 1 ||
+      clampedCurrent < completionPageIndex ||
       markedReadChapter.current === chapterKey
     ) {
       return;
     }
     markedReadChapter.current = chapterKey;
     markRead.mutate();
-  }, [chapterKey, clampedCurrent, totalPages]);
+  }, [chapterKey, clampedCurrent, completionPageIndex, totalPages]);
 
   useEffect(() => {
     if (readingMode === "strip") return;
@@ -375,7 +376,7 @@ function ReaderPageView() {
               variant="ghost"
               size="icon"
               className="rounded-full text-zinc-100 hover:bg-white/10 hover:text-white"
-              disabled={clampedCurrent >= totalPages - 1}
+              disabled={clampedCurrent >= completionPageIndex}
               onClick={() => movePage(1)}
               aria-label="下一页"
             >
@@ -385,38 +386,37 @@ function ReaderPageView() {
         </section>
       )}
 
-      {readingMode === "strip" && (
-        <footer className="border-t border-white/10 px-4 py-12">
-          <div className="mx-auto flex max-w-3xl items-center justify-between gap-4">
-            {olderChapter ? (
-              <a
-                href={`/reader/${encodeURIComponent(comicId)}/${encodeURIComponent(olderChapter.chapterId)}`}
-                className="min-w-0 rounded-2xl border border-white/10 px-4 py-3 hover:bg-white/5"
-              >
-                <span className="block text-xs text-zinc-500">较早章节</span>
-                <span className="mt-1 block truncate text-sm">{olderChapter.title}</span>
-              </a>
-            ) : (
-              <span />
-            )}
-            {newerChapter && (
-              <a
-                href={`/reader/${encodeURIComponent(comicId)}/${encodeURIComponent(newerChapter.chapterId)}`}
-                className="min-w-0 rounded-2xl border border-white/10 px-4 py-3 text-right hover:bg-white/5"
-              >
-                <span className="block text-xs text-zinc-500">较新章节</span>
-                <span className="mt-1 block truncate text-sm">{newerChapter.title}</span>
-              </a>
-            )}
-          </div>
-        </footer>
-      )}
+      <footer className="border-t border-white/10 px-4 py-12">
+        <div className="mx-auto flex max-w-3xl items-center justify-between gap-4">
+          {olderChapter ? (
+            <a
+              href={`/reader/${encodeURIComponent(comicId)}/${encodeURIComponent(olderChapter.chapterId)}`}
+              className="min-w-0 rounded-2xl border border-white/10 px-4 py-3 hover:bg-white/5"
+            >
+              <span className="block text-xs text-zinc-500">较早章节</span>
+              <span className="mt-1 block truncate text-sm">{olderChapter.title}</span>
+            </a>
+          ) : (
+            <span />
+          )}
+          {newerChapter && (
+            <a
+              href={`/reader/${encodeURIComponent(comicId)}/${encodeURIComponent(newerChapter.chapterId)}`}
+              className="min-w-0 rounded-2xl border border-white/10 px-4 py-3 text-right hover:bg-white/5"
+            >
+              <span className="block text-xs text-zinc-500">较新章节</span>
+              <span className="mt-1 block truncate text-sm">{newerChapter.title}</span>
+            </a>
+          )}
+        </div>
+      </footer>
     </main>
   );
 }
 
 interface EffectivePage extends ReaderPage {
   effectiveTranslatedUrl: string | null;
+  effectiveTranslatedPartUrls: string[];
   effectiveStatus: TranslationPageStatus;
   effectiveError: TranslationPageState["error"];
 }
@@ -427,6 +427,9 @@ function mergePage(page: ReaderPage, taskPage: TranslationPageState | undefined)
     width: taskPage?.width ?? page.width,
     height: taskPage?.height ?? page.height,
     effectiveTranslatedUrl: taskPage?.translatedUrl ?? page.translatedUrl,
+    effectiveTranslatedPartUrls: taskPage?.translatedPartUrls.length
+      ? taskPage.translatedPartUrls
+      : page.translatedPartUrls,
     effectiveStatus: taskPage?.status ?? page.translationStatus,
     effectiveError: taskPage?.error ?? page.error,
   };
@@ -450,6 +453,8 @@ function ReaderImage({
   elementRef?: (element: HTMLElement | null) => void;
 }) {
   const showTranslated = translationEnabled && !!page.effectiveTranslatedUrl;
+  const showTranslatedParts =
+    showTranslated && !paged && page.effectiveTranslatedPartUrls.length > 0;
   const source = showTranslated
     ? (page.effectiveTranslatedUrl ?? page.originalUrl)
     : page.originalUrl;
@@ -474,15 +479,29 @@ function ReaderImage({
           paged && "max-h-[calc(100dvh-10rem)] rounded-xl",
         )}
       >
-        <img
-          src={source}
-          alt={`第 ${page.index + 1} 页${showTranslated ? "译图" : "原图"}`}
-          loading={page.index < 2 ? "eager" : "lazy"}
-          className={cn(
-            "block max-w-full object-contain",
-            paged ? "max-h-[calc(100dvh-10rem)] w-auto" : "h-auto w-full",
-          )}
-        />
+        {showTranslatedParts ? (
+          <div className="flex w-full flex-col">
+            {page.effectiveTranslatedPartUrls.map((partUrl, partIndex) => (
+              <img
+                key={partIndex}
+                src={partUrl}
+                alt={`第 ${page.index + 1} 页译图分片 ${partIndex + 1}`}
+                loading={page.index < 2 && partIndex === 0 ? "eager" : "lazy"}
+                className="block h-auto w-full max-w-full object-contain"
+              />
+            ))}
+          </div>
+        ) : (
+          <img
+            src={source}
+            alt={`第 ${page.index + 1} 页${showTranslated ? "译图" : "原图"}`}
+            loading={page.index < 2 ? "eager" : "lazy"}
+            className={cn(
+              "block max-w-full object-contain",
+              paged ? "max-h-[calc(100dvh-10rem)] w-auto" : "h-auto w-full",
+            )}
+          />
+        )}
         {translationEnabled && active && page.effectiveStatus !== "completed" && (
           <span className="absolute top-3 right-3 flex items-center gap-2 rounded-full bg-black/70 px-3 py-1.5 text-xs text-white backdrop-blur">
             <LoaderCircleIcon className="size-3.5 animate-spin" />
@@ -585,6 +604,23 @@ function ReaderToolbar({
             <Columns2Icon className="size-4" />
           </ModeButton>
         </div>
+        <button
+          type="button"
+          onClick={() =>
+            onMode(readingMode === "strip" ? "page" : readingMode === "page" ? "double" : "strip")
+          }
+          className="flex size-9 shrink-0 items-center justify-center rounded-full text-zinc-300 hover:bg-white/10 hover:text-white md:hidden"
+          aria-label={`当前${modeLabel(readingMode)}，点击切换阅读模式`}
+          title={`阅读模式：${modeLabel(readingMode)}`}
+        >
+          {readingMode === "strip" ? (
+            <ImagesIcon className="size-4" />
+          ) : readingMode === "page" ? (
+            <PanelTopIcon className="size-4" />
+          ) : (
+            <Columns2Icon className="size-4" />
+          )}
+        </button>
 
         <Button
           variant={translationEnabled ? "default" : "outline"}
@@ -726,4 +762,8 @@ function getVisiblePages(
 
 function clamp(value: number, minimum: number, maximum: number) {
   return Math.min(Math.max(value, minimum), maximum);
+}
+
+function modeLabel(mode: ReadingMode) {
+  return { strip: "条漫", page: "单页", double: "双页" }[mode];
 }

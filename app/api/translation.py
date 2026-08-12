@@ -106,3 +106,32 @@ async def translated_comic_page(
             "ETag": f'"{media.etag}"',
         },
     )
+
+
+@router.get(
+    "/api/media/comics/{comic_id}/chapters/{chapter_id}/pages/"
+    "{page_index}/translated/parts/{part_index}"
+)
+async def translated_comic_page_part(
+    comic_id: ComicId,
+    chapter_id: ChapterId,
+    page_index: Annotated[int, Path(ge=0)],
+    part_index: Annotated[int, Path(ge=0)],
+    manager: ManagerDependency,
+    v: Annotated[str, Query(min_length=16, max_length=128)],
+) -> Response:
+    media = manager.translated_part_media(
+        comic_id,
+        chapter_id,
+        page_index,
+        part_index,
+        v,
+    )
+    return Response(
+        content=media.content,
+        media_type=media.media_type,
+        headers={
+            "Cache-Control": "private, max-age=31536000, immutable",
+            "ETag": f'"{media.etag}"',
+        },
+    )
