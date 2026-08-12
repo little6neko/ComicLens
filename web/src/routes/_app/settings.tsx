@@ -422,7 +422,7 @@ function SettingsPage() {
           </div>
         </SettingsSection>
 
-        <div className="sticky bottom-24 z-20 flex justify-end">
+        <div className="flex justify-end">
           <Button
             type="submit"
             size="lg"

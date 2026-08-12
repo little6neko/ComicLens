@@ -33,7 +33,7 @@ export function Pagination({
           key={value}
           onClick={() => onPage(value)}
           className={cn(
-            "size-9 rounded-lg text-sm font-medium transition-colors",
+            "size-9 rounded-full text-sm font-medium transition-colors",
             value === page ? "bg-primary text-primary-foreground" : "hover:bg-muted",
           )}
         >

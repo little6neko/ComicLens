@@ -52,7 +52,10 @@ function ExplorePage() {
         <p className="text-muted-foreground">搜索、全部分类、三种排序和 Manga18fx 一周热门。</p>
       </header>
 
-      <form onSubmit={submit} className="flex gap-2 rounded-2xl border bg-card p-2 shadow-sm">
+      <form
+        onSubmit={submit}
+        className="flex items-center gap-2 rounded-2xl border bg-card p-2 shadow-sm"
+      >
         <Input
           value={term}
           onChange={(event) => setTerm(event.target.value)}
@@ -92,7 +95,7 @@ function ExplorePage() {
                 params={{ categoryId: category.categoryId }}
                 search={{ page: 1, order: "latest" }}
                 className={buttonVariants({
-                  variant: category.kind === "source_special" ? "default" : "outline",
+                  variant: "outline",
                   size: "sm",
                 })}
               >

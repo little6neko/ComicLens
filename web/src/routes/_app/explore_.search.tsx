@@ -57,7 +57,10 @@ function SearchPage() {
         </div>
       </header>
 
-      <form onSubmit={submit} className="flex gap-2 rounded-2xl border bg-card p-2 shadow-sm">
+      <form
+        onSubmit={submit}
+        className="flex items-center gap-2 rounded-2xl border bg-card p-2 shadow-sm"
+      >
         <Input
           value={term}
           onChange={(event) => setTerm(event.target.value)}

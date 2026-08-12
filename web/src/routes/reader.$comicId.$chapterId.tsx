@@ -315,7 +315,12 @@ function ReaderPageView() {
           <a href="/settings" className="shrink-0 underline underline-offset-4">
             设置
           </a>
-          <button type="button" onClick={() => setActionError(null)} aria-label="关闭提示">
+          <button
+            type="button"
+            onClick={() => setActionError(null)}
+            className="flex size-7 shrink-0 items-center justify-center rounded-full hover:bg-white/10"
+            aria-label="关闭提示"
+          >
             <XIcon className="size-4" />
           </button>
         </div>
@@ -627,7 +632,6 @@ function ReaderToolbar({
           onClick={onToggleTranslation}
           disabled={translationBusy}
           className={cn(
-            "rounded-xl",
             translationEnabled
               ? "bg-white text-zinc-950 hover:bg-zinc-200"
               : "border-white/15 bg-transparent text-zinc-100 hover:bg-white/10 hover:text-white",
