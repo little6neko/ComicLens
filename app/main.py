@@ -23,6 +23,8 @@ from app.sources.manga18fx import Manga18fxSource
 from app.translation.manager import TranslationManager
 from app.web import SpaStaticFiles
 
+logger = logging.getLogger("comiclens")
+
 
 def create_app(
     config: AppConfig | None = None, *, comic_source: ComicSource | None = None
@@ -45,6 +47,10 @@ def create_app(
             cipher.derive_key("access-session"),
         )
         app.state.login_rate_limiter = LoginRateLimiter()
+        if settings_service.public_settings().public_listener_warning:
+            logger.warning(
+                "ComicLens is listening on a public interface without an access password"
+            )
         source = comic_source or Manga18fxSource(
             base_url=resolved_config.upstream_base_url,
             timeout=resolved_config.request_timeout,
