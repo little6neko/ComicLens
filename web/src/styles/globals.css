@@ -75,6 +75,23 @@
     min-width: 320px;
     background: var(--background);
     color: var(--foreground);
+    background-image:
+      radial-gradient(
+        circle at 18% 0%,
+        color-mix(in oklab, var(--accent) 65%, transparent),
+        transparent 28rem
+      ),
+      radial-gradient(
+        circle at 90% 12%,
+        color-mix(in oklab, var(--muted) 70%, transparent),
+        transparent 24rem
+      );
+    background-attachment: fixed;
+  }
+
+  ::selection {
+    background: var(--primary);
+    color: var(--primary-foreground);
   }
 
   button,

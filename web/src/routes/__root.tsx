@@ -1,7 +1,13 @@
 import { createRootRoute, Outlet } from "@tanstack/react-router";
 
+import { AuthBoundary } from "@/components/auth-boundary";
+
 export const Route = createRootRoute({
-  component: () => <Outlet />,
+  component: () => (
+    <AuthBoundary>
+      <Outlet />
+    </AuthBoundary>
+  ),
   notFoundComponent: () => (
     <main className="flex min-h-dvh items-center justify-center bg-muted px-4">
       <div className="text-center">

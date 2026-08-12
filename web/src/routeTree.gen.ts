@@ -16,6 +16,10 @@ import { Route as AppExploreRouteImport } from './routes/_app/explore'
 import { Route as AppFavoritesRouteImport } from './routes/_app/favorites'
 import { Route as AppHistoryRouteImport } from './routes/_app/history'
 import { Route as AppSettingsRouteImport } from './routes/_app/settings'
+import { Route as AppComicComicIdRouteImport } from './routes/_app/comic.$comicId'
+import { Route as AppExploreRankingRouteImport } from './routes/_app/explore_.ranking'
+import { Route as AppExploreSearchRouteImport } from './routes/_app/explore_.search'
+import { Route as AppExploreCategoryCategoryIdRouteImport } from './routes/_app/explore_.category.$categoryId'
 
 const AppRoute = AppRouteImport.update({
   id: '/_app',
@@ -51,6 +55,27 @@ const AppSettingsRoute = AppSettingsRouteImport.update({
   path: '/settings',
   getParentRoute: () => AppRoute,
 } as any)
+const AppComicComicIdRoute = AppComicComicIdRouteImport.update({
+  id: '/comic/$comicId',
+  path: '/comic/$comicId',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppExploreRankingRoute = AppExploreRankingRouteImport.update({
+  id: '/explore_/ranking',
+  path: '/explore/ranking',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppExploreSearchRoute = AppExploreSearchRouteImport.update({
+  id: '/explore_/search',
+  path: '/explore/search',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppExploreCategoryCategoryIdRoute =
+  AppExploreCategoryCategoryIdRouteImport.update({
+    id: '/explore_/category/$categoryId',
+    path: '/explore/category/$categoryId',
+    getParentRoute: () => AppRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
@@ -59,6 +84,10 @@ export interface FileRoutesByFullPath {
   '/favorites': typeof AppFavoritesRoute
   '/history': typeof AppHistoryRoute
   '/settings': typeof AppSettingsRoute
+  '/comic/$comicId': typeof AppComicComicIdRoute
+  '/explore/ranking': typeof AppExploreRankingRoute
+  '/explore/search': typeof AppExploreSearchRoute
+  '/explore/category/$categoryId': typeof AppExploreCategoryCategoryIdRoute
 }
 export interface FileRoutesByTo {
   '/login': typeof LoginRoute
@@ -67,6 +96,10 @@ export interface FileRoutesByTo {
   '/history': typeof AppHistoryRoute
   '/settings': typeof AppSettingsRoute
   '/': typeof AppIndexRoute
+  '/comic/$comicId': typeof AppComicComicIdRoute
+  '/explore/ranking': typeof AppExploreRankingRoute
+  '/explore/search': typeof AppExploreSearchRoute
+  '/explore/category/$categoryId': typeof AppExploreCategoryCategoryIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -77,13 +110,36 @@ export interface FileRoutesById {
   '/_app/history': typeof AppHistoryRoute
   '/_app/settings': typeof AppSettingsRoute
   '/_app/': typeof AppIndexRoute
+  '/_app/comic/$comicId': typeof AppComicComicIdRoute
+  '/_app/explore_/ranking': typeof AppExploreRankingRoute
+  '/_app/explore_/search': typeof AppExploreSearchRoute
+  '/_app/explore_/category/$categoryId': typeof AppExploreCategoryCategoryIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
-    '/' | '/login' | '/explore' | '/favorites' | '/history' | '/settings'
+    | '/'
+    | '/login'
+    | '/explore'
+    | '/favorites'
+    | '/history'
+    | '/settings'
+    | '/comic/$comicId'
+    | '/explore/ranking'
+    | '/explore/search'
+    | '/explore/category/$categoryId'
   fileRoutesByTo: FileRoutesByTo
-  to: '/login' | '/explore' | '/favorites' | '/history' | '/settings' | '/'
+  to:
+    | '/login'
+    | '/explore'
+    | '/favorites'
+    | '/history'
+    | '/settings'
+    | '/'
+    | '/comic/$comicId'
+    | '/explore/ranking'
+    | '/explore/search'
+    | '/explore/category/$categoryId'
   id:
     | '__root__'
     | '/_app'
@@ -93,6 +149,10 @@ export interface FileRouteTypes {
     | '/_app/history'
     | '/_app/settings'
     | '/_app/'
+    | '/_app/comic/$comicId'
+    | '/_app/explore_/ranking'
+    | '/_app/explore_/search'
+    | '/_app/explore_/category/$categoryId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -151,6 +211,34 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppSettingsRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/comic/$comicId': {
+      id: '/_app/comic/$comicId'
+      path: '/comic/$comicId'
+      fullPath: '/comic/$comicId'
+      preLoaderRoute: typeof AppComicComicIdRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/explore_/ranking': {
+      id: '/_app/explore_/ranking'
+      path: '/explore/ranking'
+      fullPath: '/explore/ranking'
+      preLoaderRoute: typeof AppExploreRankingRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/explore_/search': {
+      id: '/_app/explore_/search'
+      path: '/explore/search'
+      fullPath: '/explore/search'
+      preLoaderRoute: typeof AppExploreSearchRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/explore_/category/$categoryId': {
+      id: '/_app/explore_/category/$categoryId'
+      path: '/explore/category/$categoryId'
+      fullPath: '/explore/category/$categoryId'
+      preLoaderRoute: typeof AppExploreCategoryCategoryIdRouteImport
+      parentRoute: typeof AppRoute
+    }
   }
 }
 
@@ -160,6 +248,10 @@ interface AppRouteChildren {
   AppHistoryRoute: typeof AppHistoryRoute
   AppSettingsRoute: typeof AppSettingsRoute
   AppIndexRoute: typeof AppIndexRoute
+  AppComicComicIdRoute: typeof AppComicComicIdRoute
+  AppExploreRankingRoute: typeof AppExploreRankingRoute
+  AppExploreSearchRoute: typeof AppExploreSearchRoute
+  AppExploreCategoryCategoryIdRoute: typeof AppExploreCategoryCategoryIdRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
@@ -168,6 +260,10 @@ const AppRouteChildren: AppRouteChildren = {
   AppHistoryRoute: AppHistoryRoute,
   AppSettingsRoute: AppSettingsRoute,
   AppIndexRoute: AppIndexRoute,
+  AppComicComicIdRoute: AppComicComicIdRoute,
+  AppExploreRankingRoute: AppExploreRankingRoute,
+  AppExploreSearchRoute: AppExploreSearchRoute,
+  AppExploreCategoryCategoryIdRoute: AppExploreCategoryCategoryIdRoute,
 }
 
 const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)
