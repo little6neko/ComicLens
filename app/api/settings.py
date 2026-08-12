@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 
 from app.api.dependencies import get_settings_service
 from app.application.settings import SettingsService
@@ -21,9 +21,14 @@ async def get_settings(settings: SettingsDependency) -> ServerSettings:
 
 @router.patch("", response_model=ServerSettings)
 async def patch_settings(
-    payload: ServerSettingsPatch, settings: SettingsDependency
+    payload: ServerSettingsPatch,
+    settings: SettingsDependency,
+    request: Request,
 ) -> ServerSettings:
     try:
-        return settings.patch(payload)
+        updated = settings.patch(payload)
+        request.app.state.media_cache.max_bytes = updated.cache_max_mb * 1024 * 1024
+        request.app.state.media_cache.enforce_limit()
+        return updated
     except ValueError as exc:
         raise AppError("VALIDATION_ERROR", str(exc), 422, False) from exc

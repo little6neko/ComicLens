@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from app import __version__
 from app.api.router import router as api_router
 from app.application.settings import SettingsService
+from app.cache.storage import MediaCache
 from app.config import AppConfig
 from app.errors import install_error_handlers
 from app.media.registry import SourceMediaRegistry
@@ -35,7 +36,8 @@ def create_app(
         app.state.database = database
         app.state.library_repository = LibraryRepository(database)
         app.state.secret_cipher = cipher
-        app.state.settings_service = SettingsService(database, cipher, resolved_config)
+        settings_service = SettingsService(database, cipher, resolved_config)
+        app.state.settings_service = settings_service
         app.state.access_gate = AccessGate(
             resolved_config.access_password,
             cipher.derive_key("access-session"),
@@ -46,7 +48,12 @@ def create_app(
             timeout=resolved_config.request_timeout,
         )
         app.state.comic_source = source
-        app.state.media_registry = SourceMediaRegistry()
+        app.state.media_registry = SourceMediaRegistry(database)
+        app.state.media_cache = MediaCache(
+            resolved_config.cache_dir,
+            database,
+            settings_service.public_settings().cache_max_mb * 1024 * 1024,
+        )
         try:
             yield
         finally:

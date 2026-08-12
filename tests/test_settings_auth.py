@@ -47,7 +47,7 @@ def test_database_runs_all_migrations_with_wal_and_foreign_keys(tmp_path: Path) 
     finally:
         database.close()
 
-    assert {row["version"] for row in versions} == {1, 2, 3}
+    assert {row["version"] for row in versions} == {1, 2, 3, 4}
     assert {
         "app_settings",
         "favorites",
@@ -58,6 +58,7 @@ def test_database_runs_all_migrations_with_wal_and_foreign_keys(tmp_path: Path) 
         "active_translation_pages",
         "cache_bundles",
         "cache_entries",
+        "media_sources",
     }.issubset(tables)
     assert journal_mode == "wal"
     assert foreign_keys == 1

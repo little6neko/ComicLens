@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from app.config import AppConfig
 from app.domain.comic import (
@@ -81,7 +83,9 @@ class FakeComicSource:
 
     async def fetch_media(self, source_url: str) -> tuple[bytes, str]:
         self.calls.append(("media", source_url))
-        return b"image", "image/jpeg"
+        buffer = io.BytesIO()
+        Image.new("RGB", (1, 1), "white").save(buffer, format="PNG")
+        return buffer.getvalue(), "image/png"
 
     async def aclose(self) -> None:
         return None
@@ -149,14 +153,21 @@ def test_manifest_registers_only_discovered_page_media(tmp_path: Path) -> None:
         )
         manifest = api_client.get("/api/comics/alpha-comic/chapters/chapter-12/manifest")
         page = api_client.get("/api/media/comics/alpha-comic/chapters/chapter-12/pages/0/original")
+        cached_page = api_client.get(
+            "/api/media/comics/alpha-comic/chapters/chapter-12/pages/0/original"
+        )
+        cache_stats = api_client.get("/api/system/cache")
 
     assert before_manifest.status_code == 404
     assert manifest.status_code == 200
     assert manifest.json()["pages"][0]["originalUrl"].endswith("/0/original")
     assert page.status_code == 200
-    assert page.content == b"image"
-    assert page.headers["content-type"] == "image/jpeg"
-    assert ("media", "https://img01.manga18fx.com/online/1/12/1.jpg") in source.calls
+    assert page.content.startswith(b"\x89PNG")
+    assert page.headers["content-type"] == "image/png"
+    assert cached_page.content == page.content
+    assert cached_page.headers["etag"] == page.headers["etag"]
+    assert cache_stats.json()["entryCount"] == 1
+    assert source.calls.count(("media", "https://img01.manga18fx.com/online/1/12/1.jpg")) == 1
 
 
 def test_catalog_validation_rejects_invalid_parameters_before_source_call(

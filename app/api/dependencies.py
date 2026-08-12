@@ -5,6 +5,7 @@ from typing import cast
 from fastapi import Request
 
 from app.application.settings import SettingsService
+from app.cache.storage import MediaCache
 from app.media.registry import SourceMediaRegistry
 from app.repositories.database import Database
 from app.repositories.library import LibraryRepository
@@ -18,6 +19,10 @@ def get_comic_source(request: Request) -> ComicSource:
 
 def get_media_registry(request: Request) -> SourceMediaRegistry:
     return cast(SourceMediaRegistry, request.app.state.media_registry)
+
+
+def get_media_cache(request: Request) -> MediaCache:
+    return cast(MediaCache, request.app.state.media_cache)
 
 
 def get_database(request: Request) -> Database:

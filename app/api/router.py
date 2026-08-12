@@ -6,9 +6,11 @@ from fastapi import APIRouter, Depends, Path, Query, Response
 
 from app import __version__
 from app.api.auth import router as auth_router
-from app.api.dependencies import get_comic_source, get_media_registry
+from app.api.cache import router as cache_router
+from app.api.dependencies import get_comic_source, get_media_cache, get_media_registry
 from app.api.library import router as library_router
 from app.api.settings import router as settings_router
+from app.cache.storage import CachedMedia, MediaCache
 from app.domain.comic import (
     ChapterManifest,
     ComicCategory,
@@ -25,9 +27,11 @@ router = APIRouter()
 router.include_router(auth_router)
 router.include_router(settings_router)
 router.include_router(library_router)
+router.include_router(cache_router)
 
 ComicSourceDependency = Annotated[ComicSource, Depends(get_comic_source)]
 MediaRegistryDependency = Annotated[SourceMediaRegistry, Depends(get_media_registry)]
+MediaCacheDependency = Annotated[MediaCache, Depends(get_media_cache)]
 
 
 @router.get("/health", tags=["system"])
@@ -110,20 +114,37 @@ async def comic_detail(
 async def chapter_manifest(
     source: ComicSourceDependency,
     registry: MediaRegistryDependency,
+    cache: MediaCacheDependency,
     comic_id: Annotated[str, Path(min_length=1, max_length=160)],
     chapter_id: Annotated[str, Path(min_length=1, max_length=160)],
 ) -> ChapterManifest:
-    return registry.localize_manifest(await source.chapter(comic_id, chapter_id))
+    manifest = registry.localize_manifest(await source.chapter(comic_id, chapter_id))
+    cache.lease_chapter(comic_id, chapter_id)
+    return manifest
 
 
 @router.get("/api/media/covers/{comic_id}", tags=["media"])
 async def comic_cover(
     source: ComicSourceDependency,
     registry: MediaRegistryDependency,
+    cache: MediaCacheDependency,
     comic_id: Annotated[str, Path(min_length=1, max_length=160)],
 ) -> Response:
     source_url = registry.covers.get(comic_id)
-    return await _media_response(source, source_url)
+    if source_url is None:
+        raise AppError("MEDIA_NOT_FOUND", "媒体尚未登记或已失效", 404, False)
+    digest = _cache_digest("cover", comic_id)
+    media = await cache.get_or_create(
+        bundle_key=f"cover:{digest}",
+        bundle_kind="cover",
+        comic_id=comic_id,
+        chapter_id=None,
+        relative_path=f"covers/{digest}.img",
+        entry_kind="cover",
+        loader=lambda: source.fetch_media(source_url),
+        protect=False,
+    )
+    return _cached_media_response(media)
 
 
 @router.get(
@@ -133,20 +154,41 @@ async def comic_cover(
 async def original_comic_page(
     source: ComicSourceDependency,
     registry: MediaRegistryDependency,
+    cache: MediaCacheDependency,
     comic_id: Annotated[str, Path(min_length=1, max_length=160)],
     chapter_id: Annotated[str, Path(min_length=1, max_length=160)],
     page_index: Annotated[int, Path(ge=0)],
 ) -> Response:
     source_url = registry.pages.get((comic_id, chapter_id, page_index))
-    return await _media_response(source, source_url)
-
-
-async def _media_response(source: ComicSource, source_url: str | None) -> Response:
     if source_url is None:
         raise AppError("MEDIA_NOT_FOUND", "媒体尚未登记或已失效", 404, False)
-    content, media_type = await source.fetch_media(source_url)
-    return Response(
-        content=content,
-        media_type=media_type,
-        headers={"Cache-Control": "private, max-age=3600"},
+    chapter_digest = _cache_digest("chapter", comic_id, chapter_id)
+    media = await cache.get_or_create(
+        bundle_key=f"chapter:{chapter_digest}",
+        bundle_kind="chapter",
+        comic_id=comic_id,
+        chapter_id=chapter_id,
+        relative_path=(f"chapters/{chapter_digest}/originals/{page_index:05d}.img"),
+        entry_kind="original",
+        loader=lambda: source.fetch_media(source_url),
+        protect=True,
     )
+    return _cached_media_response(media)
+
+
+def _cached_media_response(media: CachedMedia) -> Response:
+    return Response(
+        content=media.content,
+        media_type=media.media_type,
+        headers={
+            "Cache-Control": "private, max-age=3600",
+            "ETag": f'"{media.etag}"',
+        },
+    )
+
+
+def _cache_digest(*parts: object) -> str:
+    import hashlib
+
+    identity = "\0".join(str(part) for part in parts).encode("utf-8")
+    return hashlib.sha256(identity).hexdigest()
