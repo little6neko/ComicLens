@@ -1,0 +1,95 @@
+from __future__ import annotations
+
+from typing import Literal
+
+from pydantic import Field, model_validator
+
+from app.domain.comic import ComicModel
+
+
+class SensitiveSettingState(ComicModel):
+    configured: bool
+    masked: str | None = None
+
+
+class SensitiveSettingPatch(ComicModel):
+    action: Literal["keep", "replace", "clear"]
+    value: str | None = None
+
+    @model_validator(mode="after")
+    def validate_action_value(self) -> SensitiveSettingPatch:
+        if self.action == "replace" and not (self.value and self.value.strip()):
+            raise ValueError("replace 操作必须提供非空 value")
+        if self.action != "replace" and self.value is not None:
+            raise ValueError("只有 replace 操作可以提供 value")
+        return self
+
+
+class ServerSettings(ComicModel):
+    theme: Literal["system", "light", "dark"]
+    reading_mode: Literal["strip", "page", "double"]
+    page_direction: Literal["ltr", "rtl"]
+    realtime_translation_default: bool
+    source_language: str
+    target_language: Literal["ZH"] = "ZH"
+    ocr_mode: Literal["auto", "direct", "job"]
+    ocr_auth_mode: Literal["none", "bearer", "basic"]
+    ocr_api_url: SensitiveSettingState
+    ocr_token: SensitiveSettingState
+    ocr_basic_username: str
+    ocr_basic_password: SensitiveSettingState
+    ocr_model: str
+    ocr_poll_interval_seconds: float
+    ocr_timeout_seconds: float
+    ocr_concurrency: int
+    deeplx_url: SensitiveSettingState
+    deeplx_timeout_seconds: float
+    translation_concurrency: int
+    fallback_proxy_url: SensitiveSettingState
+    long_image_threshold: int
+    ocr_slice_height: int
+    ocr_slice_overlap: int
+    reading_slice_height: int
+    cache_max_mb: int
+    access_password_enabled: bool
+    public_listener_warning: bool
+
+
+class ServerSettingsPatch(ComicModel):
+    theme: Literal["system", "light", "dark"] | None = None
+    reading_mode: Literal["strip", "page", "double"] | None = None
+    page_direction: Literal["ltr", "rtl"] | None = None
+    realtime_translation_default: bool | None = None
+    source_language: str | None = Field(default=None, min_length=2, max_length=12)
+    ocr_mode: Literal["auto", "direct", "job"] | None = None
+    ocr_auth_mode: Literal["none", "bearer", "basic"] | None = None
+    ocr_api_url: SensitiveSettingPatch | None = None
+    ocr_token: SensitiveSettingPatch | None = None
+    ocr_basic_username: str | None = Field(default=None, max_length=200)
+    ocr_basic_password: SensitiveSettingPatch | None = None
+    ocr_model: str | None = Field(default=None, max_length=200)
+    ocr_poll_interval_seconds: float | None = Field(default=None, ge=0.2, le=60)
+    ocr_timeout_seconds: float | None = Field(default=None, ge=1, le=3600)
+    ocr_concurrency: int | None = Field(default=None, ge=1, le=16)
+    deeplx_url: SensitiveSettingPatch | None = None
+    deeplx_timeout_seconds: float | None = Field(default=None, ge=1, le=600)
+    translation_concurrency: int | None = Field(default=None, ge=1, le=16)
+    fallback_proxy_url: SensitiveSettingPatch | None = None
+    long_image_threshold: int | None = Field(default=None, ge=1000, le=100000)
+    ocr_slice_height: int | None = Field(default=None, ge=500, le=50000)
+    ocr_slice_overlap: int | None = Field(default=None, ge=0, le=5000)
+    reading_slice_height: int | None = Field(default=None, ge=500, le=50000)
+    cache_max_mb: int | None = Field(default=None, ge=128, le=102400)
+
+
+class AuthConfig(ComicModel):
+    enabled: bool
+
+
+class AuthSession(ComicModel):
+    enabled: bool
+    authenticated: bool
+
+
+class LoginRequest(ComicModel):
+    password: str = Field(min_length=1, max_length=1024)

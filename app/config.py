@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +42,7 @@ class AppConfig:
     upstream_base_url: str
     request_timeout: float
     log_level: str
+    initial_settings: Mapping[str, object] = field(default_factory=dict)
 
     @property
     def database_path(self) -> Path:
@@ -68,6 +70,19 @@ class AppConfig:
             os.getenv("COMICLENS_STATIC_DIR", PROJECT_ROOT / "web" / "dist")
         )
         access_password = os.getenv("COMICLENS_ACCESS_PASSWORD", "")
+        initial_settings = {
+            key: value
+            for key, value in {
+                "ocr_api_url": os.getenv("COMICLENS_OCR_API_URL"),
+                "ocr_token": os.getenv("COMICLENS_OCR_TOKEN"),
+                "ocr_basic_username": os.getenv("COMICLENS_OCR_BASIC_USERNAME"),
+                "ocr_basic_password": os.getenv("COMICLENS_OCR_BASIC_PASSWORD"),
+                "ocr_model": os.getenv("COMICLENS_OCR_MODEL"),
+                "deeplx_url": os.getenv("COMICLENS_DEEPLX_URL"),
+                "fallback_proxy_url": os.getenv("COMICLENS_PROXY_URL"),
+            }.items()
+            if value not in {None, ""}
+        }
         return cls(
             app_name="ComicLens",
             host=os.getenv("COMICLENS_HOST", "0.0.0.0").strip() or "0.0.0.0",
@@ -81,6 +96,7 @@ class AppConfig:
             ).rstrip("/"),
             request_timeout=_read_float("COMICLENS_REQUEST_TIMEOUT", 30.0),
             log_level=os.getenv("COMICLENS_LOG_LEVEL", "INFO").strip().upper() or "INFO",
+            initial_settings=initial_settings,
         )
 
     def ensure_directories(self) -> None:
