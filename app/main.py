@@ -9,17 +9,32 @@ from app import __version__
 from app.api.router import router as api_router
 from app.config import AppConfig
 from app.errors import install_error_handlers
+from app.media.registry import SourceMediaRegistry
+from app.sources.base import ComicSource
+from app.sources.manga18fx import Manga18fxSource
 from app.web import SpaStaticFiles
 
 
-def create_app(config: AppConfig | None = None) -> FastAPI:
+def create_app(
+    config: AppConfig | None = None, *, comic_source: ComicSource | None = None
+) -> FastAPI:
     resolved_config = config or AppConfig.from_env()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         resolved_config.ensure_directories()
         app.state.config = resolved_config
-        yield
+        source = comic_source or Manga18fxSource(
+            base_url=resolved_config.upstream_base_url,
+            timeout=resolved_config.request_timeout,
+        )
+        app.state.comic_source = source
+        app.state.media_registry = SourceMediaRegistry()
+        try:
+            yield
+        finally:
+            if comic_source is None:
+                await source.aclose()
 
     app = FastAPI(
         title="ComicLens",

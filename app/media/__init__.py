@@ -1,0 +1,1 @@
+"""Trusted media source registry."""
