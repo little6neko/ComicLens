@@ -143,6 +143,36 @@ class ImageTranslationPipeline:
             segment_count=len(slices),
         )
 
+    async def run_segment_ocr(
+        self,
+        original_bytes: bytes,
+        *,
+        job_id: str | None = None,
+        on_job_submitted=None,
+    ) -> OCROutput:
+        image, sanitized_bytes = await asyncio.to_thread(sanitize_image, original_bytes)
+        payload = await self.ocr.analyze_image(  # type: ignore[call-arg]
+            sanitized_bytes,
+            job_id=job_id,
+            on_job_submitted=on_job_submitted,
+        )
+        return self.parse_segment_ocr(image, payload, sanitized_bytes=sanitized_bytes)
+
+    @staticmethod
+    def parse_segment_ocr(
+        image: Image.Image,
+        payload: dict[str, Any],
+        *,
+        sanitized_bytes: bytes = b"",
+    ) -> OCROutput:
+        return OCROutput(
+            image=image,
+            sanitized_bytes=sanitized_bytes,
+            payload=payload,
+            blocks=extract_text_blocks(payload, image_size=image.size),
+            segment_count=1,
+        )
+
     async def translate_blocks(self, blocks: list[TextBlock]) -> TranslationOutput:
         translations = await self.translator.translate_many(
             [block.text for block in blocks],

@@ -6,7 +6,7 @@ import math
 import re
 import time
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import urlparse
 
 import httpx
@@ -49,6 +49,14 @@ class OCRJobFailedError(ValueError):
     """Raised when the cloud OCR service reports a failed job."""
 
 
+class OCRJobNotFoundError(ValueError):
+    """Raised when a persisted cloud OCR job no longer exists."""
+
+
+class OCRJobObserver(Protocol):
+    def __call__(self, job_id: str) -> None: ...
+
+
 class OCRClient:
     def __init__(
         self,
@@ -71,40 +79,66 @@ class OCRClient:
         self.request_timeout = max(1.0, request_timeout)
         self.semaphore = asyncio.Semaphore(self.concurrency)
 
-    async def analyze_image(self, image_bytes: bytes) -> dict[str, Any]:
+    async def analyze_image(
+        self,
+        image_bytes: bytes,
+        *,
+        job_id: str | None = None,
+        on_job_submitted: OCRJobObserver | None = None,
+    ) -> dict[str, Any]:
         async with self.semaphore:
-            return await self._analyze_image_by_job(image_bytes)
+            return await self._analyze_image_by_job(
+                image_bytes,
+                job_id=job_id,
+                on_job_submitted=on_job_submitted,
+            )
 
-    async def _analyze_image_by_job(self, image_bytes: bytes) -> dict[str, Any]:
+    async def _analyze_image_by_job(
+        self,
+        image_bytes: bytes,
+        *,
+        job_id: str | None = None,
+        on_job_submitted: OCRJobObserver | None = None,
+    ) -> dict[str, Any]:
         optional_payload = {
             "useDocOrientationClassify": False,
             "useDocUnwarping": False,
             "useChartRecognition": False,
+            "useOcrForImageBlock": True,
         }
         headers = self._request_headers()
-        data = {
-            "model": self.job_model,
-            "optionalPayload": json.dumps(optional_payload, ensure_ascii=False),
-        }
-        files = {"file": ("image.png", image_bytes, "image/png")}
-        submit_response = await self._request(
-            "POST",
-            self.api_url,
-            headers=headers,
-            data=data,
-            files=files,
-        )
-        submit_payload = self._response_object(submit_response, "OCR 异步任务提交响应")
-        submit_data = submit_payload.get("data")
-        job_id = submit_data.get("jobId") if isinstance(submit_data, dict) else None
         if not job_id:
-            raise OCRProtocolError("OCR 异步任务提交响应缺少 jobId")
+            data = {
+                "model": self.job_model,
+                "optionalPayload": json.dumps(optional_payload, ensure_ascii=False),
+            }
+            files = {"file": ("image.png", image_bytes, "image/png")}
+            submit_response = await self._request(
+                "POST",
+                self.api_url,
+                headers=headers,
+                data=data,
+                files=files,
+            )
+            submit_payload = self._response_object(submit_response, "OCR 异步任务提交响应")
+            submit_data = submit_payload.get("data")
+            candidate = submit_data.get("jobId") if isinstance(submit_data, dict) else None
+            job_id = str(candidate) if candidate else None
+            if not job_id:
+                raise OCRProtocolError("OCR 异步任务提交响应缺少 jobId")
+            if on_job_submitted is not None:
+                on_job_submitted(job_id)
 
         deadline = time.monotonic() + self.job_timeout
         result_url: str | None = None
         job_url = f"{self.api_url}/{job_id}"
         while time.monotonic() < deadline:
-            job_response = await self._request("GET", job_url, headers=headers)
+            try:
+                job_response = await self._request("GET", job_url, headers=headers)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in {404, 410}:
+                    raise OCRJobNotFoundError("OCR 异步任务已失效") from exc
+                raise
             response_payload = self._response_object(job_response, "OCR 异步任务状态响应")
             payload = response_payload.get("data")
             if not isinstance(payload, dict):

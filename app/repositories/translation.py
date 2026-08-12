@@ -78,7 +78,15 @@ class TranslationRepository:
         }
         repaired = 0
         affected_generations: set[str] = set()
-        rows = self.database.fetchall("SELECT * FROM translation_pages")
+        rows = self.database.fetchall(
+            """
+            SELECT pages.* FROM translation_pages pages
+            JOIN translation_generations generations
+              ON generations.generation_id = pages.generation_id
+            WHERE generations.semantic_settings_json NOT LIKE
+                  '%"pipelineVersion":"progressive-segment-v1"%'
+            """
+        )
         for row in rows:
             generation_id = str(row["generation_id"])
             page_index = int(row["page_index"])
@@ -200,6 +208,140 @@ class TranslationRepository:
             )
             if pending:
                 self.set_generation_status(generation_id, "paused", stop_requested=False)
+        return repaired + self._recover_invalid_segment_checkpoints(indexed_paths)
+
+    def _recover_invalid_segment_checkpoints(self, indexed_paths: set[str]) -> int:
+        repaired = 0
+        affected_generations: set[str] = set()
+        for row in self.database.fetchall("SELECT * FROM translation_segments"):
+            generation_id = str(row["generation_id"])
+            page_index = int(row["page_index"])
+            segment_index = int(row["segment_index"])
+            status = str(row["status"])
+
+            clear_columns: list[str] = []
+            rollback_stage: str | None = None
+            ocr_ok = bool(row["ocr_path"] and str(row["ocr_path"]) in indexed_paths)
+            blocks_ok = bool(row["blocks_path"] and str(row["blocks_path"]) in indexed_paths)
+            translations_ok = bool(
+                row["translations_path"] and str(row["translations_path"]) in indexed_paths
+            )
+            translated_ok = bool(
+                row["translated_path"] and str(row["translated_path"]) in indexed_paths
+            )
+            if status == "completed" and translated_ok:
+                # Published output is self-contained. Missing intermediate files do
+                # not invalidate a completed segment and can wait for normal LRU
+                # eviction of the whole chapter bundle.
+                continue
+            if status == "completed" and not translated_ok:
+                clear_columns = ["translated_path"]
+                rollback_stage = "rendering"
+            elif (row["ocr_path"] or row["blocks_path"]) and not (ocr_ok and blocks_ok):
+                clear_columns = [
+                    "ocr_path",
+                    "blocks_path",
+                    "translations_path",
+                    "translated_path",
+                ]
+                rollback_stage = "ocr"
+            elif row["translations_path"] and not translations_ok:
+                clear_columns = ["translations_path", "translated_path"]
+                rollback_stage = "translating"
+            elif row["translated_path"] and not translated_ok:
+                clear_columns = ["translated_path"]
+                rollback_stage = "rendering"
+            if rollback_stage is None:
+                continue
+            assignments = [f"{column} = NULL" for column in clear_columns]
+            assignments.extend(
+                [
+                    "translated_version = NULL",
+                    "status = 'pending'",
+                    "error_stage = NULL",
+                    "error_code = NULL",
+                    "error_summary = NULL",
+                    "updated_at = ?",
+                ]
+            )
+            with self.database.transaction() as connection:
+                connection.execute(
+                    f"""
+                    UPDATE translation_segments SET {", ".join(assignments)}
+                    WHERE generation_id = ? AND page_index = ? AND segment_index = ?
+                    """,
+                    (self._timestamp(), generation_id, page_index, segment_index),
+                )
+                connection.execute(
+                    """
+                    DELETE FROM active_translation_segments
+                    WHERE generation_id = ? AND page_index = ? AND segment_index = ?
+                    """,
+                    (generation_id, page_index, segment_index),
+                )
+            repaired += 1
+            affected_generations.add(generation_id)
+
+        invalid_layers = self.database.fetchall(
+            """
+            SELECT generation_id, page_index, segment_index
+            FROM active_translation_segments
+            WHERE translated_path NOT IN (SELECT relative_path FROM cache_entries)
+            """
+        )
+        for row in invalid_layers:
+            generation_id = str(row["generation_id"])
+            page_index = int(row["page_index"])
+            segment_index = int(row["segment_index"])
+            with self.database.transaction() as connection:
+                connection.execute(
+                    """
+                    DELETE FROM active_translation_segments
+                    WHERE generation_id = ? AND page_index = ? AND segment_index = ?
+                    """,
+                    (generation_id, page_index, segment_index),
+                )
+                connection.execute(
+                    """
+                    UPDATE translation_segments SET status = 'pending',
+                        translated_path = NULL, translated_version = NULL,
+                        updated_at = ?
+                    WHERE generation_id = ? AND page_index = ?
+                      AND segment_index = ? AND status = 'completed'
+                    """,
+                    (self._timestamp(), generation_id, page_index, segment_index),
+                )
+            repaired += 1
+            affected_generations.add(generation_id)
+
+        self.database.execute(
+            """
+            DELETE FROM active_translation_pages
+            WHERE generation_id IN (
+                SELECT generation_id FROM translation_generations
+                WHERE semantic_settings_json LIKE
+                      '%"pipelineVersion":"progressive-segment-v1"%'
+            )
+              AND translated_path NOT IN (SELECT relative_path FROM cache_entries)
+            """
+        )
+
+        for generation_id in affected_generations:
+            with self.database.transaction() as connection:
+                self._refresh_segment_counts(connection, generation_id, self._timestamp())
+                connection.execute(
+                    """
+                    UPDATE translation_generations SET status = CASE
+                            WHEN status IN ('preparing', 'queued', 'running')
+                                THEN 'queued'
+                            ELSE 'paused'
+                        END,
+                        stop_requested = 0, current_page_index = NULL,
+                        current_segment_index = NULL, updated_at = ?
+                    WHERE generation_id = ?
+                    """,
+                    (self._timestamp(), generation_id),
+                )
         return repaired
 
     def create_generation(
@@ -270,7 +412,7 @@ class TranslationRepository:
             """
             SELECT * FROM translation_generations
             WHERE comic_id = ? AND chapter_id = ?
-            ORDER BY created_at DESC, generation_id DESC LIMIT 1
+            ORDER BY created_at DESC, rowid DESC LIMIT 1
             """,
             (comic_id, chapter_id),
         )
@@ -287,7 +429,7 @@ class TranslationRepository:
             SELECT * FROM translation_generations
             WHERE comic_id = ? AND chapter_id = ?
               AND status IN ('preparing', 'queued')
-            ORDER BY created_at ASC, generation_id ASC LIMIT 1
+            ORDER BY created_at ASC, rowid ASC LIMIT 1
             """,
             (comic_id, chapter_id),
         )
@@ -303,7 +445,7 @@ class TranslationRepository:
             SELECT * FROM translation_generations
             WHERE comic_id = ? AND chapter_id = ?
               AND semantic_fingerprint = ? AND kind = 'normal'
-            ORDER BY created_at DESC, generation_id DESC LIMIT 1
+            ORDER BY created_at DESC, rowid DESC LIMIT 1
             """,
             (comic_id, chapter_id, semantic_fingerprint),
         )
@@ -317,7 +459,7 @@ class TranslationRepository:
                   'preparing', 'queued', 'running', 'stopping_after_page',
                   'stopping_after_segment'
               )
-            ORDER BY created_at ASC, generation_id ASC LIMIT 1
+            ORDER BY created_at ASC, rowid ASC LIMIT 1
             """,
             (comic_id, chapter_id),
         )
@@ -357,14 +499,19 @@ class TranslationRepository:
         if row is None:
             return None
         status = str(row["status"])
-        if status in {"preparing", "queued"}:
+        if status == "queued":
             self.set_generation_status(generation_id, "paused", stop_requested=False)
             return "paused"
+        if status == "preparing":
+            self.set_generation_status(
+                generation_id,
+                "stopping_after_segment",
+                stop_requested=True,
+            )
+            return "stopping_after_segment"
         if status == "running":
             progressive = bool(row["planning_complete"]) or int(row["total_segments"]) > 0
-            stopping_status = (
-                "stopping_after_segment" if progressive else "stopping_after_page"
-            )
+            stopping_status = "stopping_after_segment" if progressive else "stopping_after_page"
             self.set_generation_status(
                 generation_id,
                 stopping_status,
@@ -560,6 +707,21 @@ class TranslationRepository:
             tuple(parameters),
         )
 
+    def set_segment_job_id(
+        self,
+        generation_id: str,
+        page_index: int,
+        segment_index: int,
+        job_id: str | None,
+    ) -> None:
+        self.database.execute(
+            """
+            UPDATE translation_segments SET ocr_job_id = ?, updated_at = ?
+            WHERE generation_id = ? AND page_index = ? AND segment_index = ?
+            """,
+            (job_id, self._timestamp(), generation_id, page_index, segment_index),
+        )
+
     def complete_segment(
         self,
         generation_id: str,
@@ -691,6 +853,15 @@ class TranslationRepository:
                 WHERE generation_id = ? AND page_index = ? AND segment_index = ?
                 """,
                 (self._timestamp(), generation_id, page_index, segment_index),
+            )
+            connection.execute(
+                """
+                UPDATE translation_pages SET status = 'pending',
+                    error_stage = NULL, error_code = NULL,
+                    error_summary = NULL, updated_at = ?
+                WHERE generation_id = ? AND page_index = ?
+                """,
+                (self._timestamp(), generation_id, page_index),
             )
             self._refresh_segment_counts(connection, generation_id, self._timestamp())
         return paths
@@ -942,6 +1113,56 @@ class TranslationRepository:
             return "failed"
         return "ready"
 
+    def publish_completed_segment_page(
+        self,
+        generation_id: str,
+        comic_id: str,
+        chapter_id: str,
+        page_index: int,
+    ) -> bool:
+        timestamp = self._timestamp()
+        with self.database.transaction() as connection:
+            counts = connection.execute(
+                """
+                SELECT COUNT(*) total,
+                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) completed
+                FROM translation_segments
+                WHERE generation_id = ? AND page_index = ?
+                """,
+                (generation_id, page_index),
+            ).fetchone()
+            total = int(counts["total"] or 0) if counts else 0
+            completed = int(counts["completed"] or 0) if counts else 0
+            if total == 0 or completed != total:
+                return False
+            connection.execute(
+                """
+                UPDATE translation_pages SET status = 'completed',
+                    translated_path = NULL, translated_version = NULL,
+                    display_parts_json = '[]', error_stage = NULL,
+                    error_code = NULL, error_summary = NULL, updated_at = ?
+                WHERE generation_id = ? AND page_index = ?
+                """,
+                (timestamp, generation_id, page_index),
+            )
+            connection.execute(
+                """
+                DELETE FROM active_translation_segments
+                WHERE comic_id = ? AND chapter_id = ? AND page_index = ?
+                  AND generation_id != ?
+                """,
+                (comic_id, chapter_id, page_index, generation_id),
+            )
+            connection.execute(
+                """
+                DELETE FROM active_translation_pages
+                WHERE comic_id = ? AND chapter_id = ? AND page_index = ?
+                """,
+                (comic_id, chapter_id, page_index),
+            )
+        self.refresh_counts(generation_id)
+        return True
+
     def discard_older_active_segments(
         self,
         comic_id: str,
@@ -1040,13 +1261,14 @@ class TranslationRepository:
     ) -> list[TranslationLayer]:
         segment_rows = self.database.fetchall(
             """
-            SELECT active.*, generations.created_at generation_created_at
+            SELECT active.*, generations.created_at generation_created_at,
+                generations.rowid generation_order
             FROM active_translation_segments active
             JOIN translation_generations generations
               ON generations.generation_id = active.generation_id
             WHERE active.comic_id = ? AND active.chapter_id = ?
               AND active.page_index = ?
-            ORDER BY generations.created_at, active.published_at,
+            ORDER BY generations.created_at, generations.rowid, active.published_at,
                 active.generation_id, active.segment_index
             """,
             (comic_id, chapter_id, page_index),

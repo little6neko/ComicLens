@@ -31,15 +31,23 @@ from app.translation.translator import (
 )
 
 
-def make_png(color: tuple[int, int, int]) -> bytes:
+def make_png(
+    color: tuple[int, int, int],
+    size: tuple[int, int] = (120, 180),
+) -> bytes:
     buffer = io.BytesIO()
-    Image.new("RGB", (120, 180), color).save(buffer, format="PNG")
+    Image.new("RGB", size, color).save(buffer, format="PNG")
     return buffer.getvalue()
 
 
 class FakeTranslationSource:
-    def __init__(self, page_count: int = 3) -> None:
+    def __init__(
+        self,
+        page_count: int = 3,
+        image_size: tuple[int, int] = (120, 180),
+    ) -> None:
         self.page_count = page_count
+        self.image_size = image_size
         self.media_calls: list[str] = []
 
     async def chapter(self, comic_id: str, chapter_id: str) -> SourceChapterManifest:
@@ -59,7 +67,7 @@ class FakeTranslationSource:
     async def fetch_media(self, source_url: str) -> tuple[bytes, str]:
         self.media_calls.append(source_url)
         index = int(source_url.rsplit("/", 1)[1].split(".", 1)[0])
-        return make_png((30 + index, 60, 90)), "image/png"
+        return make_png((30 + index, 60, 90), self.image_size), "image/png"
 
     async def aclose(self) -> None:
         return None
@@ -133,7 +141,20 @@ class ManagerHarness:
         self.database.close()
 
 
-def create_harness(tmp_path: Path, *, page_count: int = 3) -> ManagerHarness:
+def create_harness(
+    tmp_path: Path,
+    *,
+    page_count: int = 3,
+    image_size: tuple[int, int] = (120, 180),
+    translation_settings: dict[str, object] | None = None,
+) -> ManagerHarness:
+    initial_settings: dict[str, object] = {
+        "ocr_api_url": "https://ocr.example/api",
+        "ocr_token": "test-ocr-token",
+        "translation_service": "deeplx",
+        "deeplx_url": "https://translate.example/api",
+    }
+    initial_settings.update(translation_settings or {})
     config = AppConfig(
         app_name="ComicLens",
         host="0.0.0.0",
@@ -145,18 +166,13 @@ def create_harness(tmp_path: Path, *, page_count: int = 3) -> ManagerHarness:
         upstream_base_url="https://manga18fx.com",
         request_timeout=30,
         log_level="INFO",
-        initial_settings={
-            "ocr_api_url": "https://ocr.example/api",
-            "ocr_token": "test-ocr-token",
-            "translation_service": "deeplx",
-            "deeplx_url": "https://translate.example/api",
-        },
+        initial_settings=initial_settings,
     )
     config.ensure_directories()
     database = Database(config.database_path)
     cipher = SecretCipher(config.secrets_path, database)
     settings = SettingsService(database, cipher, config)
-    source = FakeTranslationSource(page_count)
+    source = FakeTranslationSource(page_count, image_size)
     registry = SourceMediaRegistry(database)
     cache = MediaCache(config.cache_dir, database, 5120 * 1024 * 1024)
     repository = TranslationRepository(database)
@@ -274,7 +290,7 @@ def test_repository_commits_segment_plan_and_publishes_atomic_layer(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_pause_finishes_current_source_image_then_resumes_next(
+async def test_pause_finishes_current_segment_then_resumes_next(
     tmp_path: Path,
 ) -> None:
     harness = create_harness(tmp_path)
@@ -282,11 +298,17 @@ async def test_pause_finishes_current_source_image_then_resumes_next(
     try:
         started = await harness.manager.start("alpha", "chapter-1")
         await wait_for(harness.pipeline.ocr_started.is_set)
+        during_ocr = harness.manager.state("alpha", "chapter-1")
+        assert len(harness.source.media_calls) == 3
+        assert during_ocr.total_segments == 3
+        assert during_ocr.completed_segments == 0
 
         stopping = await harness.manager.pause("alpha", "chapter-1")
         assert started.generation_id == stopping.generation_id
-        assert stopping.status == "stopping_after_page"
+        assert stopping.status == "stopping_after_segment"
         assert stopping.current_page_index == 0
+        assert stopping.current_segment is not None
+        assert stopping.current_segment.segment_index == 0
 
         harness.pipeline.ocr_release.set()
         await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "paused")
@@ -310,6 +332,47 @@ async def test_pause_finishes_current_source_image_then_resumes_next(
 
 
 @pytest.mark.asyncio
+async def test_long_page_has_exact_segment_total_before_first_ocr_and_publishes_in_order(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(
+        tmp_path,
+        page_count=1,
+        image_size=(300, 2400),
+        translation_settings={
+            "long_image_threshold": 1000,
+            "ocr_slice_height": 700,
+            "ocr_slice_overlap": 100,
+        },
+    )
+    harness.pipeline.block_first_ocr = True
+    try:
+        await harness.manager.start("alpha", "chapter-1")
+        await wait_for(harness.pipeline.ocr_started.is_set)
+
+        planned = harness.manager.state("alpha", "chapter-1")
+        assert planned.planning_complete is True
+        assert planned.total_segments == 4
+        assert planned.completed_segments == 0
+        assert [segment.global_index for segment in planned.pages[0].segments] == [0, 1, 2, 3]
+        assert planned.pages[0].segments[-1].display_bottom == 2400
+
+        harness.pipeline.ocr_release.set()
+        await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
+        completed = harness.manager.state("alpha", "chapter-1")
+        assert completed.completed_segments == 4
+        assert [layer.segment_index for layer in completed.pages[0].translation_layers] == [
+            0,
+            1,
+            2,
+            3,
+        ]
+        assert harness.pipeline.ocr_calls == 4
+    finally:
+        await harness.close()
+
+
+@pytest.mark.asyncio
 async def test_page_failure_continues_and_retry_reuses_ocr_checkpoint(
     tmp_path: Path,
 ) -> None:
@@ -323,11 +386,13 @@ async def test_page_failure_continues_and_retry_reuses_ocr_checkpoint(
         failed = harness.manager.state("alpha", "chapter-1")
         assert [page.status for page in failed.pages] == ["failed", "completed"]
         assert failed.pages[0].error is not None
-        assert failed.pages[0].error.code == "TRANSLATION_TIMEOUT"
+        assert failed.pages[0].error.code == "SEGMENTS_FAILED"
+        assert failed.pages[0].segments[0].error is not None
+        assert failed.pages[0].segments[0].error.code == "TRANSLATION_TIMEOUT"
         assert harness.pipeline.ocr_calls == 2
         assert harness.pipeline.translation_calls == 2
 
-        await harness.manager.retry_page("alpha", "chapter-1", 0)
+        await harness.manager.retry_segment("alpha", "chapter-1", 0, 0)
         await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
         retried = harness.manager.state("alpha", "chapter-1")
         assert [page.status for page in retried.pages] == [
@@ -336,7 +401,7 @@ async def test_page_failure_continues_and_retry_reuses_ocr_checkpoint(
         ]
         assert harness.pipeline.ocr_calls == 2
         assert harness.pipeline.translation_calls == 3
-        assert retried.pages[0].attempts == 2
+        assert retried.pages[0].segments[0].attempts == 2
     finally:
         await harness.close()
 
@@ -350,8 +415,10 @@ async def test_retranslate_keeps_old_page_until_new_atomic_publish(
         first = await harness.manager.start("alpha", "chapter-1")
         await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
         first_active = harness.repository.active_page("alpha", "chapter-1", 0)
-        assert first_active is not None
-        first_version = str(first_active["translated_version"])
+        assert first_active is None
+        first_layers = harness.repository.translation_layers("alpha", "chapter-1", 0)
+        assert len(first_layers) == 1
+        first_version = first_layers[0].version
 
         harness.pipeline.block_next_render = True
         second = await harness.manager.retranslate("alpha", "chapter-1")
@@ -360,16 +427,15 @@ async def test_retranslate_keeps_old_page_until_new_atomic_publish(
         assert duplicate.generation_id == second.generation_id
         await wait_for(harness.pipeline.render_started.is_set)
 
-        during = harness.repository.active_page("alpha", "chapter-1", 0)
-        assert during is not None
-        assert str(during["translated_version"]) == first_version
+        during = harness.repository.translation_layers("alpha", "chapter-1", 0)
+        assert [layer.version for layer in during] == [first_version]
 
         harness.pipeline.render_release.set()
         await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
-        after = harness.repository.active_page("alpha", "chapter-1", 0)
-        assert after is not None
-        assert str(after["generation_id"]) == second.generation_id
-        assert str(after["translated_version"]) != first_version
+        after = harness.repository.translation_layers("alpha", "chapter-1", 0)
+        assert len(after) == 1
+        assert after[0].generation_id == second.generation_id
+        assert after[0].version != first_version
     finally:
         await harness.close()
 

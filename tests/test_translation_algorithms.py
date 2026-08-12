@@ -15,7 +15,12 @@ from app.translation.image_segments import (
     shift_text_blocks,
 )
 from app.translation.models import TextBlock
-from app.translation.ocr import OCRClient, OCRProtocolError, extract_text_blocks
+from app.translation.ocr import (
+    OCRClient,
+    OCRJobNotFoundError,
+    OCRProtocolError,
+    extract_text_blocks,
+)
 from app.translation.pipeline import ImageTranslationPipeline, PipelineSettings
 from app.translation.translator import (
     DEEPL_FREE_URL,
@@ -211,11 +216,60 @@ async def test_async_ocr_submits_polls_merges_jsonl_and_isolates_token() -> None
     assert b'name="model"' in requests[0].content
     assert b"PaddleOCR-VL-1.6" in requests[0].content
     assert b'name="optionalPayload"' in requests[0].content
+    assert b'"useOcrForImageBlock": true' in requests[0].content
     assert b'name="file"; filename="image.png"' in requests[0].content
     assert requests[0].extensions["timeout"]["read"] == 7
     assert requests[1].headers["authorization"] == "Bearer secret"
     assert requests[2].headers["authorization"] == "Bearer secret"
     assert "authorization" not in requests[3].headers
+
+
+@pytest.mark.asyncio
+async def test_async_ocr_resumes_persisted_job_without_resubmitting() -> None:
+    requests: list[httpx.Request] = []
+    submitted: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/jobs/persisted-job":
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "state": "done",
+                        "resultUrl": {"jsonUrl": "https://files.example/result.jsonl"},
+                    }
+                },
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            text='{"result":{"layoutParsingResults":[]}}\n',
+            request=request,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        ocr = OCRClient(client, "https://ocr.example/jobs", token="secret")
+        result = await ocr.analyze_image(
+            image_bytes(20, 20),
+            job_id="persisted-job",
+            on_job_submitted=submitted.append,
+        )
+
+    assert result == {"result": {"layoutParsingResults": []}}
+    assert [request.method for request in requests] == ["GET", "GET"]
+    assert submitted == []
+
+
+@pytest.mark.asyncio
+async def test_async_ocr_reports_expired_persisted_job() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text="gone", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        ocr = OCRClient(client, "https://ocr.example/jobs", token="secret")
+        with pytest.raises(OCRJobNotFoundError, match="已失效"):
+            await ocr.analyze_image(image_bytes(20, 20), job_id="expired-job")
 
 
 @pytest.mark.asyncio

@@ -349,8 +349,8 @@ def test_translation_api_polls_manifest_and_serves_immutable_version(
         manifest = api_client.get("/api/comics/alpha-comic/chapters/chapter-12/manifest")
         translated_url = manifest.json()["pages"][0]["translatedUrl"]
         translated_part_urls = manifest.json()["pages"][0]["translatedPartUrls"]
-        translated = api_client.get(translated_url)
-        translated_part = api_client.get(translated_part_urls[0])
+        translation_layers = manifest.json()["pages"][0]["translationLayers"]
+        translated_segment = api_client.get(translation_layers[0]["url"])
         wrong_version = api_client.get(
             "/api/media/comics/alpha-comic/chapters/chapter-12/pages/0/translated",
             params={"v": "0000000000000000"},
@@ -363,13 +363,14 @@ def test_translation_api_polls_manifest_and_serves_immutable_version(
     assert initial.json()["status"] == "idle"
     assert started.status_code == 200
     assert state is not None and state.json()["status"] == "completed"
-    assert state.json()["pages"][0]["translatedUrl"] == translated_url
-    assert state.json()["pages"][0]["translatedPartUrls"] == translated_part_urls
-    assert len(translated_part_urls) == 1
-    assert "?v=" in translated_url
-    assert translated.status_code == 200
-    assert translated.headers["cache-control"].endswith("immutable")
-    assert translated_part.status_code == 200
-    assert translated_part.headers["cache-control"].endswith("immutable")
+    assert state.json()["pages"][0]["translatedUrl"] is None
+    assert state.json()["pages"][0]["translatedPartUrls"] == []
+    assert translated_url is None
+    assert translated_part_urls == []
+    assert len(translation_layers) == 1
+    assert translation_layers[0]["kind"] == "segment"
+    assert "?v=" in translation_layers[0]["url"]
+    assert translated_segment.status_code == 200
+    assert translated_segment.headers["cache-control"].endswith("immutable")
     assert wrong_version.status_code == 404
     assert unconfirmed.status_code == 422

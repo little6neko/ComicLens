@@ -30,8 +30,15 @@ from app.translation.image_renderer import (
     sanitize_image,
 )
 from app.translation.models import TextBlock
-from app.translation.ocr import OCRClient, OCRJobFailedError, OCRProtocolError
+from app.translation.ocr import (
+    OCRClient,
+    OCRJobFailedError,
+    OCRJobNotFoundError,
+    OCRProtocolError,
+)
 from app.translation.pipeline import ImageTranslationPipeline, PipelineSettings
+from app.translation.segment_planner import SegmentPlanner
+from app.translation.segment_runner import SegmentRunner
 from app.translation.translator import (
     DeepLAuthenticationError,
     DeepLClient,
@@ -45,6 +52,7 @@ from app.translation.translator import (
 logger = logging.getLogger(__name__)
 
 PipelineFactory = Callable[[dict[str, Any], dict[str, Any]], ImageTranslationPipeline]
+PROGRESSIVE_PIPELINE_VERSION = "progressive-segment-v1"
 
 
 class TranslationManager:
@@ -67,8 +75,15 @@ class TranslationManager:
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._http_client = httpx.AsyncClient(timeout=httpx.Timeout(60.0))
         self._pipeline_factory = pipeline_factory or self._build_pipeline
+        self._planner = SegmentPlanner(repository=repository, cache=cache, source=source)
+        self._segment_runner = SegmentRunner(
+            repository=repository,
+            cache=cache,
+            source=source,
+        )
         self.repository.recover_interrupted()
         self.repository.recover_invalid_checkpoints()
+        self._resume_recovered_workers()
 
     async def shutdown(self) -> None:
         active_tasks = [task for task in self._tasks.values() if not task.done()]
@@ -99,15 +114,27 @@ class TranslationManager:
 
         if active is not None and str(active["semantic_fingerprint"]) == fingerprint:
             if bool(active["stop_requested"]):
+                current_page_index = (
+                    int(active["current_page_index"])
+                    if active["current_page_index"] is not None
+                    else None
+                )
+                current_segment_index = (
+                    int(active["current_segment_index"])
+                    if active["current_segment_index"] is not None
+                    else None
+                )
+                resumed_status = (
+                    "running"
+                    if current_segment_index is not None
+                    else ("queued" if bool(active["planning_complete"]) else "preparing")
+                )
                 self.repository.set_generation_status(
                     str(active["generation_id"]),
-                    "running",
+                    resumed_status,
                     stop_requested=False,
-                    current_page_index=(
-                        int(active["current_page_index"])
-                        if active["current_page_index"] is not None
-                        else None
-                    ),
+                    current_page_index=current_page_index,
+                    current_segment_index=current_segment_index,
                 )
             self._ensure_worker(comic_id, chapter_id)
             return self.repository.task_state(comic_id, chapter_id, str(active["generation_id"]))
@@ -133,6 +160,8 @@ class TranslationManager:
             semantic_settings=semantic,
             page_indexes=sorted(source_pages),
             kind="normal",
+            source_pages=source_pages,
+            progressive=True,
         )
         if active is not None:
             self.repository.request_stop(str(active["generation_id"]))
@@ -144,8 +173,11 @@ class TranslationManager:
             """
             SELECT generation_id FROM translation_generations
             WHERE comic_id = ? AND chapter_id = ?
-              AND status IN ('queued', 'running', 'stopping_after_page')
-            ORDER BY created_at ASC, generation_id ASC
+              AND status IN (
+                  'preparing', 'queued', 'running', 'stopping_after_page',
+                  'stopping_after_segment'
+              )
+            ORDER BY created_at ASC, rowid ASC
             """,
             (comic_id, chapter_id),
         )
@@ -164,10 +196,14 @@ class TranslationManager:
             """
             SELECT * FROM translation_generations
             WHERE comic_id = ? AND chapter_id = ? AND kind = 'retranslate'
-              AND status IN ('queued', 'running', 'stopping_after_page', 'paused')
-            ORDER BY created_at ASC LIMIT 1
+              AND semantic_fingerprint = ?
+              AND status IN (
+                  'preparing', 'queued', 'running', 'stopping_after_page',
+                  'stopping_after_segment', 'paused'
+              )
+            ORDER BY created_at ASC, rowid ASC LIMIT 1
             """,
-            (comic_id, chapter_id),
+            (comic_id, chapter_id, fingerprint),
         )
         if rows:
             generation_id = str(rows[0]["generation_id"])
@@ -184,6 +220,8 @@ class TranslationManager:
             semantic_settings=semantic,
             page_indexes=sorted(source_pages),
             kind="retranslate",
+            source_pages=source_pages,
+            progressive=True,
         )
         if active is not None:
             self.repository.request_stop(str(active["generation_id"]))
@@ -244,6 +282,51 @@ class TranslationManager:
         self._ensure_worker(comic_id, chapter_id)
         return self.repository.task_state(comic_id, chapter_id, generation_id)
 
+    async def retry_segment(
+        self,
+        comic_id: str,
+        chapter_id: str,
+        page_index: int,
+        segment_index: int,
+    ) -> TranslationTaskState:
+        generation = self.repository.latest_generation(comic_id, chapter_id)
+        if generation is None:
+            raise AppError("TRANSLATION_NOT_FOUND", "本话还没有翻译任务", 404, False)
+        generation_id = str(generation["generation_id"])
+        segment = self.repository.segment(generation_id, page_index, segment_index)
+        if segment is None:
+            raise AppError("SEGMENT_NOT_FOUND", "翻译分片不存在", 404, False)
+        if str(segment["status"]) != "failed":
+            raise AppError("SEGMENT_NOT_FAILED", "只有失败的分片可以重试", 409, False)
+        stage = str(segment["error_stage"] or "ocr")
+        clear_by_stage = {
+            "ocr": ["ocr_path", "blocks_path", "translations_path", "translated_path"],
+            "translation": ["translations_path", "translated_path"],
+            "translating": ["translations_path", "translated_path"],
+            "render": ["translated_path"],
+            "rendering": ["translated_path"],
+            "cache": ["translated_path"],
+        }
+        paths = self.repository.prepare_segment_retry(
+            generation_id,
+            page_index,
+            segment_index,
+            clear_columns=clear_by_stage.get(stage, ["translated_path"]),
+            clear_job_id=stage == "ocr"
+            and str(segment["error_code"])
+            in {"OCR_JOB_FAILED", "OCR_JOB_NOT_FOUND", "OCR_PROTOCOL_ERROR"},
+        )
+        self.cache.delete_entries(paths)
+        if str(generation["status"]) not in {
+            "preparing",
+            "queued",
+            "running",
+            "stopping_after_segment",
+        }:
+            self.repository.resume(generation_id)
+        self._ensure_worker(comic_id, chapter_id)
+        return self.repository.task_state(comic_id, chapter_id, generation_id)
+
     def state(self, comic_id: str, chapter_id: str) -> TranslationTaskState:
         return self.repository.task_state(comic_id, chapter_id)
 
@@ -283,6 +366,9 @@ class TranslationManager:
                 update["error"] = (
                     task_page.error.model_dump(by_alias=True) if task_page.error else None
                 )
+                update["translation_layers"] = [
+                    layer.model_dump(by_alias=True) for layer in task_page.translation_layers
+                ]
             pages.append(page.model_copy(update=update))
         return manifest.model_copy(update={"pages": pages})
 
@@ -330,6 +416,43 @@ class TranslationManager:
             raise AppError("TRANSLATION_MEDIA_NOT_FOUND", "译图分片缓存已失效", 404, True)
         return media
 
+    def translated_segment_media(
+        self,
+        comic_id: str,
+        chapter_id: str,
+        page_index: int,
+        segment_index: int,
+        version: str,
+    ):
+        active = self.repository.active_segment(
+            comic_id,
+            chapter_id,
+            page_index,
+            segment_index,
+            version,
+        )
+        if active is None:
+            raise AppError("TRANSLATION_MEDIA_NOT_FOUND", "译图片段版本不存在", 404, False)
+        media = self.cache.read_bytes(
+            str(active["translated_path"]),
+            media_type="image/png",
+            protect=True,
+            verify_image=True,
+        )
+        if media is None:
+            raise AppError("TRANSLATION_MEDIA_NOT_FOUND", "译图片段缓存已失效", 404, True)
+        return media
+
+    def _resume_recovered_workers(self) -> None:
+        rows = self.repository.database.fetchall(
+            """
+            SELECT DISTINCT comic_id, chapter_id FROM translation_generations
+            WHERE status IN ('preparing', 'queued')
+            """
+        )
+        for row in rows:
+            self._ensure_worker(str(row["comic_id"]), str(row["chapter_id"]))
+
     def _ensure_worker(self, comic_id: str, chapter_id: str) -> None:
         key = (comic_id, chapter_id)
         existing = self._tasks.get(key)
@@ -363,11 +486,27 @@ class TranslationManager:
         async with lock:
             while generation := self.repository.next_queued_generation(comic_id, chapter_id):
                 generation_id = str(generation["generation_id"])
-                self.repository.set_generation_status(
-                    generation_id, "running", stop_requested=False
-                )
                 self.cache.set_chapter_active(comic_id, chapter_id, True)
                 try:
+                    if not bool(generation["planning_complete"]):
+                        self.repository.set_generation_status(
+                            generation_id,
+                            "preparing",
+                            stop_requested=False,
+                        )
+                        prepared = await self._prepare_generation(generation_id)
+                        if not prepared:
+                            self.repository.set_generation_status(
+                                generation_id,
+                                "paused",
+                                stop_requested=False,
+                            )
+                            continue
+                    self.repository.set_generation_status(
+                        generation_id,
+                        "running",
+                        stop_requested=False,
+                    )
                     await self._run_generation(generation_id)
                 except asyncio.CancelledError:
                     raise
@@ -396,9 +535,53 @@ class TranslationManager:
                             generation_id,
                         ),
                     )
+                    self.repository.database.execute(
+                        """
+                        UPDATE translation_segments SET error_stage = 'chapter',
+                            error_code = ?, error_summary = ?, updated_at = ?
+                        WHERE generation_id = ? AND status = 'pending'
+                        """,
+                        (
+                            code,
+                            message,
+                            self.repository._timestamp(),
+                            generation_id,
+                        ),
+                    )
                 finally:
                     self.cache.set_chapter_active(comic_id, chapter_id, False)
                     self.cache.enforce_limit()
+
+    async def _prepare_generation(self, generation_id: str) -> bool:
+        generation = self.repository.generation(generation_id)
+        if generation is None:
+            return False
+        semantic = self.repository.decode_semantic_settings(generation)
+        pages = self.repository.database.fetchall(
+            """
+            SELECT page_index, source_url FROM translation_pages
+            WHERE generation_id = ? ORDER BY page_index
+            """,
+            (generation_id,),
+        )
+        source_pages = {
+            int(row["page_index"]): str(row["source_url"]) for row in pages if row["source_url"]
+        }
+        if len(source_pages) != int(generation["total_pages"]):
+            source_pages = await self._ensure_source_pages(
+                str(generation["comic_id"]),
+                str(generation["chapter_id"]),
+            )
+        return await self._planner.prepare(
+            generation_id,
+            str(generation["comic_id"]),
+            str(generation["chapter_id"]),
+            source_pages,
+            semantic,
+            should_stop=lambda: bool(
+                (current := self.repository.generation(generation_id)) and current["stop_requested"]
+            ),
+        )
 
     async def _run_generation(self, generation_id: str) -> None:
         generation = self.repository.generation(generation_id)
@@ -415,6 +598,156 @@ class TranslationManager:
         )
         pipeline = self._pipeline_factory(semantic, runtime)
 
+        if semantic.get("pipelineVersion") == PROGRESSIVE_PIPELINE_VERSION:
+            await self._run_progressive_generation(
+                generation_id,
+                comic_id,
+                chapter_id,
+                pipeline,
+            )
+            return
+
+        await self._run_legacy_generation(
+            generation_id,
+            comic_id,
+            chapter_id,
+            pipeline,
+        )
+
+    async def _run_progressive_generation(
+        self,
+        generation_id: str,
+        comic_id: str,
+        chapter_id: str,
+        pipeline: ImageTranslationPipeline,
+    ) -> None:
+        while True:
+            current = self.repository.generation(generation_id)
+            if current is None:
+                return
+            if bool(current["stop_requested"]) and current["current_segment_index"] is None:
+                self.repository.set_generation_status(
+                    generation_id,
+                    "paused",
+                    stop_requested=False,
+                )
+                return
+            pending = self.repository.pending_segments(generation_id)
+            if not pending:
+                await self._finalize_progressive_pages(
+                    generation_id,
+                    comic_id,
+                    chapter_id,
+                )
+                self.repository.refresh_counts(generation_id)
+                finished = self.repository.generation(generation_id)
+                if finished is None:
+                    return
+                status = (
+                    "completed_with_errors" if int(finished["failed_segments"]) > 0 else "completed"
+                )
+                self.repository.set_generation_status(
+                    generation_id,
+                    status,
+                    stop_requested=False,
+                )
+                return
+
+            segment = pending[0]
+            page_index = int(segment["page_index"])
+            segment_index = int(segment["segment_index"])
+            self.repository.set_generation_status(
+                generation_id,
+                "running",
+                current_page_index=page_index,
+                current_segment_index=segment_index,
+            )
+            segment_completed = False
+            try:
+                await self._segment_runner.process(
+                    generation_id,
+                    comic_id,
+                    chapter_id,
+                    page_index,
+                    segment_index,
+                    pipeline,
+                )
+                segment_completed = True
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                failed = self.repository.segment(generation_id, page_index, segment_index)
+                stage = str(failed["status"] if failed else "ocr")
+                code, message = self._classify_error(stage, exc)
+                self.repository.fail_segment(
+                    generation_id,
+                    page_index,
+                    segment_index,
+                    stage=stage,
+                    code=code,
+                    summary=message,
+                )
+                self.repository.finalize_page_from_segments(generation_id, page_index)
+
+            if segment_completed:
+                await self._segment_runner.publish_page_if_complete(
+                    generation_id,
+                    comic_id,
+                    chapter_id,
+                    page_index,
+                )
+
+            after_segment = self.repository.generation(generation_id)
+            if after_segment is None:
+                return
+            if bool(after_segment["stop_requested"]):
+                self.repository.set_generation_status(
+                    generation_id,
+                    "paused",
+                    stop_requested=False,
+                )
+                return
+            self.repository.set_generation_status(
+                generation_id,
+                "running",
+                current_page_index=None,
+                current_segment_index=None,
+            )
+
+    async def _finalize_progressive_pages(
+        self,
+        generation_id: str,
+        comic_id: str,
+        chapter_id: str,
+    ) -> None:
+        pages = self.repository.database.fetchall(
+            """
+            SELECT page_index, status FROM translation_pages
+            WHERE generation_id = ? ORDER BY page_index
+            """,
+            (generation_id,),
+        )
+        for page in pages:
+            page_index = int(page["page_index"])
+            result = self.repository.finalize_page_from_segments(
+                generation_id,
+                page_index,
+            )
+            if result == "ready" and str(page["status"]) != "completed":
+                await self._segment_runner.publish_page_if_complete(
+                    generation_id,
+                    comic_id,
+                    chapter_id,
+                    page_index,
+                )
+
+    async def _run_legacy_generation(
+        self,
+        generation_id: str,
+        comic_id: str,
+        chapter_id: str,
+        pipeline: ImageTranslationPipeline,
+    ) -> None:
         while True:
             current = self.repository.generation(generation_id)
             if current is None:
@@ -756,6 +1089,9 @@ class TranslationManager:
             "ocrSliceHeight": runtime["ocr_slice_height"],
             "ocrSliceOverlap": runtime["ocr_slice_overlap"],
             "readingSliceHeight": runtime["reading_slice_height"],
+            "longImageAspectRatio": 2.6,
+            "pipelineVersion": PROGRESSIVE_PIPELINE_VERSION,
+            "ocrOptionsVersion": "image-block-ocr-v1",
             "rendererVersion": RENDERER_VERSION,
             "fontIdentity": font_identity(),
         }
@@ -847,6 +1183,8 @@ class TranslationManager:
             return error.code, error.message
         if isinstance(error, OCRJobFailedError):
             return "OCR_JOB_FAILED", str(error)
+        if isinstance(error, OCRJobNotFoundError):
+            return "OCR_JOB_NOT_FOUND", str(error)
         if isinstance(error, OCRProtocolError):
             return "OCR_PROTOCOL_ERROR", str(error)
         if isinstance(error, DeepLAuthenticationError):
