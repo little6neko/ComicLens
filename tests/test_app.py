@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -17,6 +18,11 @@ def test_health_endpoint(client: TestClient) -> None:
         "app": "ComicLens",
         "version": "0.1.0",
     }
+
+
+def test_http_client_request_urls_are_not_logged_at_info() -> None:
+    assert logging.getLogger("httpx").getEffectiveLevel() >= logging.WARNING
+    assert logging.getLogger("httpcore").getEffectiveLevel() >= logging.WARNING
 
 
 def test_lifespan_creates_data_directories(client: TestClient, app_config: AppConfig) -> None:

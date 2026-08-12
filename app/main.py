@@ -137,4 +137,8 @@ def create_app(
 
 
 logging.basicConfig(level=AppConfig.from_env().log_level)
+# HTTPX's INFO message includes the complete request URL. OCR, translation and
+# proxy endpoints may contain credentials, so never emit those URLs at INFO.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 app = create_app()
