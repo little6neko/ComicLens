@@ -84,6 +84,7 @@ export interface ReaderPage {
   height: number | null;
   translationStatus: TranslationPageStatus;
   error: TranslationError | null;
+  translationLayers: TranslationLayer[];
 }
 
 export interface ChapterManifest {
@@ -155,9 +156,11 @@ export interface CacheStats {
 
 export type TranslationTaskStatus =
   | "idle"
+  | "preparing"
   | "queued"
   | "running"
   | "stopping_after_page"
+  | "stopping_after_segment"
   | "paused"
   | "completed"
   | "completed_with_errors"
@@ -190,6 +193,48 @@ export interface TranslationPageState {
   height: number | null;
   attempts: number;
   error: TranslationError | null;
+  segments: TranslationSegmentState[];
+  translationLayers: TranslationLayer[];
+}
+
+export type TranslationSegmentStatus =
+  | "pending"
+  | "ocr"
+  | "translating"
+  | "rendering"
+  | "completed"
+  | "failed";
+
+export interface TranslationLayer {
+  kind: "page" | "segment";
+  generationId: string;
+  segmentIndex: number | null;
+  top: number;
+  bottom: number;
+  sourceWidth: number;
+  sourceHeight: number;
+  url: string;
+  version: string;
+}
+
+export interface TranslationSegmentState {
+  pageIndex: number;
+  segmentIndex: number;
+  globalIndex: number;
+  status: TranslationSegmentStatus;
+  displayTop: number;
+  displayBottom: number;
+  sourceWidth: number;
+  sourceHeight: number;
+  translatedUrl: string | null;
+  translatedVersion: string | null;
+  attempts: number;
+  error: TranslationError | null;
+}
+
+export interface CurrentTranslationSegment {
+  pageIndex: number;
+  segmentIndex: number;
 }
 
 export interface TranslationTaskState {
@@ -200,9 +245,14 @@ export interface TranslationTaskState {
   status: TranslationTaskStatus;
   stopRequested: boolean;
   currentPageIndex: number | null;
+  currentSegment: CurrentTranslationSegment | null;
   totalPages: number;
   completedPages: number;
   failedPages: number;
+  planningComplete: boolean;
+  totalSegments: number;
+  completedSegments: number;
+  failedSegments: number;
   pages: TranslationPageState[];
 }
 

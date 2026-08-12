@@ -8,9 +8,10 @@ ComicTranslator 的长图切片、OCR、翻译与译文覆写管线集成到阅�
 
 - Maia 风格的移动端优先 UI，支持搜索、55 个分类入口、三种排序和周榜分页。
 - Comic 收藏、阅读历史、已读章节和阅读进度保存在服务器。
-- 条漫、单页、双页阅读模式；源图片先显示，译图完成一张替换一张。
-- 关闭实时翻译后立即显示原图，后端在当前完整源图片（含长图分片）完成后暂停。
-- 支持重新翻译本话，以及下载/OCR/翻译/渲染失败后的单图重试。
+- 条漫、单页、双页阅读模式；阅读器使用可自动隐藏的顶部控制栏和底部阅读胶囊。
+- 翻译前先缓存整话源图并确定完整分片数；OCR、翻译和渲染严格按分片顺序执行，完成一片立即显示一片。
+- 关闭实时翻译后立即显示原图，后端完成当前分片后暂停。
+- 支持重新翻译本话，以及 OCR/翻译/渲染失败后的单分片重试。
 - 原图、OCR 结果和译图无时间 TTL，在默认 5 GB 上限内长期保留并按 LRU 淘汰。
 - PaddleOCR、DeepL/DeepLX、代理、长图参数和阅读默认值均可在 Web 设置页维护。
 - 可选环境变量密码；不填写时不启用登录界面。
@@ -74,7 +75,7 @@ docker compose start comiclens
 进入“设置 → OCR 与翻译”配置：
 
 1. 源语言：自动识别（默认）、英语或韩语；目标固定为简体中文；
-2. PaddleOCR 异步任务 URL、Bearer Token、模型、轮询、超时与并发；
+2. PaddleOCR 异步任务 URL、Bearer Token、模型、轮询与超时；
 3. 翻译服务：默认使用 DeepL 官方 API，也可切换为 DeepLX；
 4. DeepL API Key 或 DeepLX URL，以及共用的翻译超时与并发；
 5. 可选回退代理和长图切片参数。
@@ -83,6 +84,11 @@ PaddleOCR 只使用异步任务接口，默认 URL 为
 `https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`，默认模型为
 `PaddleOCR-VL-1.6`。DeepL Key 以 `:fx` 结尾时自动使用 Free API，否则使用 Pro API；
 DeepL 与 DeepLX 之间不会在失败时自动回退。
+
+新翻译任务会在 OCR 请求中固定开启 `useOcrForImageBlock`，用于识别漫画版面中被归为
+图片块的对白。分片调度固定为单片串行，设置中的 OCR 并发仅保留旧任务兼容；翻译并发只用于
+当前分片内部的文本批次，不会让后续分片乱序显示。PaddleOCR `jobId` 会持久化，超时、重试
+或服务重启后优先继续轮询远端任务。
 
 敏感字段只返回掩码，编辑时明确选择“保留 / 替换 / 清除”。`.env.example` 中的
 `COMICLENS_OCR_*`、`COMICLENS_DEEPL_API_KEY`、`COMICLENS_DEEPLX_URL` 和
@@ -121,8 +127,9 @@ cd web && npm run build && npm run lint && npm run fmt:check
 - Manga18fx 页面结构变化时，来源解析可能需要随之更新。
 - 翻译调度是单进程设计，不要把 Uvicorn worker 数量调大。
 
-实现规格见[设计文档](docs/superpowers/specs/2026-08-12-comiclens-reader-design.md)和
-[实施计划](docs/superpowers/plans/2026-08-12-comiclens-implementation.md)。第三方归属见
+实现规格见[基础设计文档](docs/superpowers/specs/2026-08-12-comiclens-reader-design.md)、
+[分片渐进翻译设计](docs/superpowers/specs/2026-08-13-progressive-segment-reader-design.md)和
+[实施计划](docs/superpowers/plans/2026-08-13-progressive-segment-reader-implementation.md)。第三方归属见
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ## License

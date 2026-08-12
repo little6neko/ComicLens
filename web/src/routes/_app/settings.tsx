@@ -243,6 +243,7 @@ function SettingsPage() {
           />
           <NumberField
             label="OCR 并发"
+            hint="分片渐进翻译固定按顺序单片执行；此值仅为旧任务兼容保留。"
             value={draft.ocrConcurrency}
             min={1}
             max={16}
@@ -287,6 +288,7 @@ function SettingsPage() {
           />
           <NumberField
             label="翻译并发"
+            hint="只用于当前分片内部的文本请求；不同分片不会并发或乱序显示。"
             value={draft.translationConcurrency}
             min={1}
             max={16}
@@ -325,6 +327,7 @@ function SettingsPage() {
           />
           <NumberField
             label="阅读分片高度（px）"
+            hint="仅兼容旧整页译图任务；新任务直接按 OCR 分片逐片显示。"
             value={draft.readingSliceHeight}
             min={500}
             max={50000}

@@ -160,6 +160,11 @@ export const api = {
       `${translationPath(comicId, chapterId)}/pages/${pageIndex}/retry`,
       json("POST"),
     ),
+  retrySegment: (comicId: string, chapterId: string, pageIndex: number, segmentIndex: number) =>
+    request<TranslationActionResult>(
+      `${translationPath(comicId, chapterId)}/pages/${pageIndex}/segments/${segmentIndex}/retry`,
+      json("POST"),
+    ),
 };
 
 function translationPath(comicId: string, chapterId: string) {
