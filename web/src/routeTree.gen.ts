@@ -17,6 +17,7 @@ import { Route as AppFavoritesRouteImport } from './routes/_app/favorites'
 import { Route as AppHistoryRouteImport } from './routes/_app/history'
 import { Route as AppSettingsRouteImport } from './routes/_app/settings'
 import { Route as AppComicComicIdRouteImport } from './routes/_app/comic.$comicId'
+import { Route as AppExploreLatestRouteImport } from './routes/_app/explore_.latest'
 import { Route as AppExploreRankingRouteImport } from './routes/_app/explore_.ranking'
 import { Route as AppExploreSearchRouteImport } from './routes/_app/explore_.search'
 import { Route as ReaderComicIdChapterIdRouteImport } from './routes/reader.$comicId.$chapterId'
@@ -61,6 +62,11 @@ const AppComicComicIdRoute = AppComicComicIdRouteImport.update({
   path: '/comic/$comicId',
   getParentRoute: () => AppRoute,
 } as any)
+const AppExploreLatestRoute = AppExploreLatestRouteImport.update({
+  id: '/explore_/latest',
+  path: '/explore/latest',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppExploreRankingRoute = AppExploreRankingRouteImport.update({
   id: '/explore_/ranking',
   path: '/explore/ranking',
@@ -91,6 +97,7 @@ export interface FileRoutesByFullPath {
   '/history': typeof AppHistoryRoute
   '/settings': typeof AppSettingsRoute
   '/comic/$comicId': typeof AppComicComicIdRoute
+  '/explore/latest': typeof AppExploreLatestRoute
   '/explore/ranking': typeof AppExploreRankingRoute
   '/explore/search': typeof AppExploreSearchRoute
   '/reader/$comicId/$chapterId': typeof ReaderComicIdChapterIdRoute
@@ -104,6 +111,7 @@ export interface FileRoutesByTo {
   '/settings': typeof AppSettingsRoute
   '/': typeof AppIndexRoute
   '/comic/$comicId': typeof AppComicComicIdRoute
+  '/explore/latest': typeof AppExploreLatestRoute
   '/explore/ranking': typeof AppExploreRankingRoute
   '/explore/search': typeof AppExploreSearchRoute
   '/reader/$comicId/$chapterId': typeof ReaderComicIdChapterIdRoute
@@ -119,6 +127,7 @@ export interface FileRoutesById {
   '/_app/settings': typeof AppSettingsRoute
   '/_app/': typeof AppIndexRoute
   '/_app/comic/$comicId': typeof AppComicComicIdRoute
+  '/_app/explore_/latest': typeof AppExploreLatestRoute
   '/_app/explore_/ranking': typeof AppExploreRankingRoute
   '/_app/explore_/search': typeof AppExploreSearchRoute
   '/reader/$comicId/$chapterId': typeof ReaderComicIdChapterIdRoute
@@ -134,6 +143,7 @@ export interface FileRouteTypes {
     | '/history'
     | '/settings'
     | '/comic/$comicId'
+    | '/explore/latest'
     | '/explore/ranking'
     | '/explore/search'
     | '/reader/$comicId/$chapterId'
@@ -147,6 +157,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/'
     | '/comic/$comicId'
+    | '/explore/latest'
     | '/explore/ranking'
     | '/explore/search'
     | '/reader/$comicId/$chapterId'
@@ -161,6 +172,7 @@ export interface FileRouteTypes {
     | '/_app/settings'
     | '/_app/'
     | '/_app/comic/$comicId'
+    | '/_app/explore_/latest'
     | '/_app/explore_/ranking'
     | '/_app/explore_/search'
     | '/reader/$comicId/$chapterId'
@@ -231,6 +243,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppComicComicIdRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/explore_/latest': {
+      id: '/_app/explore_/latest'
+      path: '/explore/latest'
+      fullPath: '/explore/latest'
+      preLoaderRoute: typeof AppExploreLatestRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/_app/explore_/ranking': {
       id: '/_app/explore_/ranking'
       path: '/explore/ranking'
@@ -269,6 +288,7 @@ interface AppRouteChildren {
   AppSettingsRoute: typeof AppSettingsRoute
   AppIndexRoute: typeof AppIndexRoute
   AppComicComicIdRoute: typeof AppComicComicIdRoute
+  AppExploreLatestRoute: typeof AppExploreLatestRoute
   AppExploreRankingRoute: typeof AppExploreRankingRoute
   AppExploreSearchRoute: typeof AppExploreSearchRoute
   AppExploreCategoryCategoryIdRoute: typeof AppExploreCategoryCategoryIdRoute
@@ -281,6 +301,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppSettingsRoute: AppSettingsRoute,
   AppIndexRoute: AppIndexRoute,
   AppComicComicIdRoute: AppComicComicIdRoute,
+  AppExploreLatestRoute: AppExploreLatestRoute,
   AppExploreRankingRoute: AppExploreRankingRoute,
   AppExploreSearchRoute: AppExploreSearchRoute,
   AppExploreCategoryCategoryIdRoute: AppExploreCategoryCategoryIdRoute,

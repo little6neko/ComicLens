@@ -170,8 +170,9 @@ async def test_direct_ocr_and_deeplx_clients_preserve_request_contracts() -> Non
             token="secret",
             auth_mode="bearer",
             mode="direct",
+            request_timeout=7,
         )
-        translator = DeepLXClient(client, "https://service.example/translate")
+        translator = DeepLXClient(client, "https://service.example/translate", timeout=11)
         ocr_result = await ocr.analyze_image(image_bytes(20, 20))
         translated = await translator.translate("Hello", "EN")
 
@@ -179,7 +180,9 @@ async def test_direct_ocr_and_deeplx_clients_preserve_request_contracts() -> Non
     assert translated == "你好"
     assert requests[0].headers["authorization"] == "Bearer secret"
     assert b'"fileType":1' in requests[0].content
+    assert requests[0].extensions["timeout"]["read"] == 7
     assert requests[1].read().decode() == ('{"text":"Hello","source_lang":"EN","target_lang":"ZH"}')
+    assert requests[1].extensions["timeout"]["read"] == 11
 
 
 @pytest.mark.asyncio

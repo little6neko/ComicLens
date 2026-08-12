@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -193,3 +194,43 @@ async def test_unknown_category_and_external_media_are_rejected_without_request(
 
     assert category_error.value.status_code == 404
     assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_retryable_direct_failure_uses_configured_fallback_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    direct_requests = 0
+    proxy_requests = 0
+    proxy_urls: list[str] = []
+
+    def direct_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal direct_requests
+        direct_requests += 1
+        raise httpx.ConnectTimeout("direct timeout", request=request)
+
+    def proxy_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal proxy_requests
+        proxy_requests += 1
+        return html_response(request, "home.html")
+
+    monkeypatch.setattr("app.sources.manga18fx.asyncio.sleep", AsyncMock())
+    async with httpx.AsyncClient(transport=httpx.MockTransport(direct_handler)) as direct_client:
+        proxy_client = httpx.AsyncClient(transport=httpx.MockTransport(proxy_handler))
+        source = Manga18fxSource(
+            base_url="https://manga18fx.com",
+            client=direct_client,
+            fallback_proxy_provider=lambda: "http://user:secret@proxy.example:8080",
+        )
+
+        def proxy_factory(proxy_url: str) -> httpx.AsyncClient:
+            proxy_urls.append(proxy_url)
+            return proxy_client
+
+        monkeypatch.setattr(source, "_proxy_client", proxy_factory)
+        result = await source.home()
+
+    assert result.latest.items
+    assert direct_requests == 3
+    assert proxy_requests == 1
+    assert proxy_urls == ["http://user:secret@proxy.example:8080"]

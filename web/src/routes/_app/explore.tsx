@@ -5,6 +5,7 @@ import { useState, type FormEvent } from "react";
 
 import { AppPage } from "@/components/app-page";
 import { ComicGrid } from "@/components/comic-card";
+import { Pagination } from "@/components/pagination";
 import { ErrorState, LoadingState } from "@/components/query-state";
 import { SectionHeading } from "@/components/section-heading";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -110,7 +111,13 @@ function ExplorePage() {
           ) : latest.isError ? (
             <ErrorState error={latest.error} retry={() => void latest.refetch()} />
           ) : (
-            <ComicGrid comics={latest.data.items} />
+            <div className="space-y-6">
+              <ComicGrid comics={latest.data.items} />
+              <Pagination
+                {...latest.data}
+                onPage={(page) => void navigate({ to: "/explore/latest", search: { page } })}
+              />
+            </div>
           )}
         </section>
       )}

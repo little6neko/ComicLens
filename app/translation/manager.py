@@ -723,11 +723,13 @@ class TranslationManager:
             job_poll_interval=float(runtime["ocr_poll_interval_seconds"]),
             job_timeout=float(runtime["ocr_timeout_seconds"]),
             concurrency=int(runtime["ocr_concurrency"]),
+            request_timeout=float(runtime["ocr_timeout_seconds"]),
         )
         translator = DeepLXClient(
             self._http_client,
             str(runtime["deeplx_url"]),
             concurrency=int(runtime["translation_concurrency"]),
+            timeout=float(runtime["deeplx_timeout_seconds"]),
         )
         return ImageTranslationPipeline(
             ocr,

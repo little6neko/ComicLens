@@ -58,8 +58,8 @@ function HomePage() {
               title="最新更新"
               action={
                 <Link
-                  to="/explore"
-                  search={{ mode: "latest" }}
+                  to="/explore/latest"
+                  search={{ page: 1 }}
                   className="text-sm text-muted-foreground hover:text-foreground"
                 >
                   查看更多

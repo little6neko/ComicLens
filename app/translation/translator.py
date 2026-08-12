@@ -7,10 +7,17 @@ import httpx
 
 
 class DeepLXClient:
-    def __init__(self, client: httpx.AsyncClient, url: str, concurrency: int = 4) -> None:
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        concurrency: int = 4,
+        timeout: float = 30.0,
+    ) -> None:
         self.client = client
         self.url = url.rstrip("/")
         self.semaphore = asyncio.Semaphore(max(1, concurrency))
+        self.timeout = max(1.0, timeout)
 
     async def translate(self, text: str, source_lang: str = "EN") -> str | None:
         if not text:
@@ -33,6 +40,7 @@ class DeepLXClient:
                     self.url,
                     json=payload,
                     headers={"Content-Type": "application/json"},
+                    timeout=self.timeout,
                 )
                 if (response.status_code == 429 or response.status_code >= 500) and attempt < 2:
                     await asyncio.sleep(0.2 * (2**attempt))

@@ -56,6 +56,7 @@ class OCRClient:
         job_poll_interval: float = 2.0,
         job_timeout: float = 180.0,
         concurrency: int = 1,
+        request_timeout: float = 180.0,
     ) -> None:
         self.client = client
         self.api_url = api_url.rstrip("/")
@@ -68,6 +69,7 @@ class OCRClient:
         self.job_poll_interval = max(0.2, job_poll_interval)
         self.job_timeout = max(self.job_poll_interval, job_timeout)
         self.concurrency = max(1, concurrency)
+        self.request_timeout = max(1.0, request_timeout)
         self.semaphore = asyncio.Semaphore(self.concurrency)
 
     async def analyze_image(self, image_bytes: bytes) -> dict[str, Any]:
@@ -217,7 +219,12 @@ class OCRClient:
         last_error: Exception | None = None
         for attempt in range(3):
             try:
-                response = await self.client.request(method, url, **kwargs)
+                response = await self.client.request(
+                    method,
+                    url,
+                    timeout=self.request_timeout,
+                    **kwargs,
+                )
                 if (response.status_code == 429 or response.status_code >= 500) and attempt < 2:
                     await asyncio.sleep(0.2 * (2**attempt))
                     continue
