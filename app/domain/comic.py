@@ -94,6 +94,7 @@ class ReaderPage(ComicModel):
     height: int | None = None
     translation_status: str = "idle"
     error: dict[str, object] | None = None
+    translation_layers: list[dict[str, object]] = Field(default_factory=list)
 
 
 class ChapterManifest(ComicModel):

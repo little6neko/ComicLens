@@ -42,3 +42,16 @@ def generation_page_path(
 ) -> str:
     root = generation_directory(comic_id, chapter_id, generation_id)
     return f"{root}/{directory}/{page_index:05d}.{suffix}"
+
+
+def generation_segment_path(
+    comic_id: str,
+    chapter_id: str,
+    generation_id: str,
+    directory: str,
+    page_index: int,
+    segment_index: int,
+    suffix: str,
+) -> str:
+    root = generation_directory(comic_id, chapter_id, generation_id)
+    return f"{root}/{directory}/{page_index:05d}/{segment_index:05d}.{suffix}"

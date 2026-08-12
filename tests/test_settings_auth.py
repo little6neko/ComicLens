@@ -49,7 +49,7 @@ def test_database_runs_all_migrations_with_wal_and_foreign_keys(tmp_path: Path) 
     finally:
         database.close()
 
-    assert {row["version"] for row in versions} == {1, 2, 3, 4, 5, 6}
+    assert {row["version"] for row in versions} == {1, 2, 3, 4, 5, 6, 7}
     assert {
         "app_settings",
         "favorites",
@@ -58,6 +58,8 @@ def test_database_runs_all_migrations_with_wal_and_foreign_keys(tmp_path: Path) 
         "translation_generations",
         "translation_pages",
         "active_translation_pages",
+        "translation_segments",
+        "active_translation_segments",
         "cache_bundles",
         "cache_entries",
         "media_sources",

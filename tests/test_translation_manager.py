@@ -180,6 +180,99 @@ async def wait_for(predicate, timeout: float = 3.0) -> None:
     await asyncio.wait_for(poll(), timeout)
 
 
+def test_repository_commits_segment_plan_and_publishes_atomic_layer(tmp_path: Path) -> None:
+    harness = create_harness(tmp_path, page_count=1)
+    try:
+        generation_id = harness.repository.create_generation(
+            "alpha",
+            "chapter-1",
+            semantic_fingerprint="segments",
+            semantic_settings={"pipelineVersion": "progressive-segment-v1"},
+            page_indexes=[0],
+            source_pages={0: "https://img.example/0.png"},
+            kind="normal",
+            progressive=True,
+        )
+        harness.repository.save_prepared_page(
+            generation_id,
+            0,
+            source_url="https://img.example/0.png",
+            original_path="chapters/original.img",
+            original_checksum="checksum",
+            width=120,
+            height=180,
+        )
+        harness.repository.commit_segment_plan(
+            generation_id,
+            [
+                {
+                    "page_index": 0,
+                    "segment_index": 0,
+                    "global_index": 0,
+                    "source_width": 120,
+                    "source_height": 180,
+                    "display_top": 0,
+                    "display_bottom": 90,
+                    "ocr_top": 0,
+                    "ocr_bottom": 100,
+                    "ocr_input_path": "segments/0.png",
+                },
+                {
+                    "page_index": 0,
+                    "segment_index": 1,
+                    "global_index": 1,
+                    "source_width": 120,
+                    "source_height": 180,
+                    "display_top": 90,
+                    "display_bottom": 180,
+                    "ocr_top": 80,
+                    "ocr_bottom": 180,
+                    "ocr_input_path": "segments/1.png",
+                },
+            ],
+        )
+
+        planned = harness.repository.task_state("alpha", "chapter-1", generation_id)
+        assert planned.status == "queued"
+        assert planned.planning_complete is True
+        assert planned.total_segments == 2
+        assert [(item.display_top, item.display_bottom) for item in planned.pages[0].segments] == [
+            (0, 90),
+            (90, 180),
+        ]
+
+        media = harness.cache.put_bytes(
+            bundle_key="chapter:test",
+            bundle_kind="chapter",
+            comic_id="alpha",
+            chapter_id="chapter-1",
+            relative_path="segments/translated-0.png",
+            entry_kind="translated_segment",
+            content=make_png((10, 20, 30)),
+            media_type="image/png",
+            verify_image=True,
+        )
+        harness.repository.complete_segment(
+            generation_id,
+            "alpha",
+            "chapter-1",
+            0,
+            0,
+            translated_path="segments/translated-0.png",
+            translated_version=media.etag,
+        )
+
+        published = harness.repository.task_state("alpha", "chapter-1", generation_id)
+        assert published.completed_segments == 1
+        assert published.failed_segments == 0
+        assert published.pages[0].segments[0].translated_version == media.etag
+        assert published.pages[0].translation_layers[0].kind == "segment"
+        assert published.pages[0].translation_layers[0].top == 0
+        assert published.pages[0].translation_layers[0].bottom == 90
+    finally:
+        harness.database.close()
+
+
 @pytest.mark.asyncio
 async def test_pause_finishes_current_source_image_then_resumes_next(
     tmp_path: Path,

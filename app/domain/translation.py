@@ -8,9 +8,11 @@ from app.domain.comic import ComicModel
 
 TranslationTaskStatus = Literal[
     "idle",
+    "preparing",
     "queued",
     "running",
     "stopping_after_page",
+    "stopping_after_segment",
     "paused",
     "completed",
     "completed_with_errors",
@@ -27,12 +29,53 @@ TranslationPageStage = Literal[
     "failed",
 ]
 
+TranslationSegmentStage = Literal[
+    "pending",
+    "ocr",
+    "translating",
+    "rendering",
+    "completed",
+    "failed",
+]
+
 
 class TranslationError(ComicModel):
     stage: str
     code: str
     message: str
     retryable: bool = True
+
+
+class TranslationLayer(ComicModel):
+    kind: Literal["page", "segment"]
+    generation_id: str
+    segment_index: int | None = None
+    top: int = Field(ge=0)
+    bottom: int = Field(gt=0)
+    source_width: int = Field(gt=0)
+    source_height: int = Field(gt=0)
+    url: str
+    version: str
+
+
+class TranslationSegmentState(ComicModel):
+    page_index: int = Field(ge=0)
+    segment_index: int = Field(ge=0)
+    global_index: int = Field(ge=0)
+    status: TranslationSegmentStage
+    display_top: int = Field(ge=0)
+    display_bottom: int = Field(gt=0)
+    source_width: int = Field(gt=0)
+    source_height: int = Field(gt=0)
+    translated_url: str | None = None
+    translated_version: str | None = None
+    attempts: int = 0
+    error: TranslationError | None = None
+
+
+class CurrentTranslationSegment(ComicModel):
+    page_index: int = Field(ge=0)
+    segment_index: int = Field(ge=0)
 
 
 class TranslationPageState(ComicModel):
@@ -45,6 +88,8 @@ class TranslationPageState(ComicModel):
     height: int | None = None
     attempts: int = 0
     error: TranslationError | None = None
+    segments: list[TranslationSegmentState] = Field(default_factory=list)
+    translation_layers: list[TranslationLayer] = Field(default_factory=list)
 
 
 class TranslationTaskState(ComicModel):
@@ -55,9 +100,14 @@ class TranslationTaskState(ComicModel):
     status: TranslationTaskStatus = "idle"
     stop_requested: bool = False
     current_page_index: int | None = None
+    current_segment: CurrentTranslationSegment | None = None
     total_pages: int = 0
     completed_pages: int = 0
     failed_pages: int = 0
+    planning_complete: bool = False
+    total_segments: int = 0
+    completed_segments: int = 0
+    failed_segments: int = 0
     pages: list[TranslationPageState] = Field(default_factory=list)
 
 
