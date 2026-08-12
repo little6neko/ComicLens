@@ -47,7 +47,7 @@ def test_database_runs_all_migrations_with_wal_and_foreign_keys(tmp_path: Path) 
     finally:
         database.close()
 
-    assert {row["version"] for row in versions} == {1, 2, 3, 4}
+    assert {row["version"] for row in versions} == {1, 2, 3, 4, 5}
     assert {
         "app_settings",
         "favorites",

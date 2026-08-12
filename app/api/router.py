@@ -7,9 +7,21 @@ from fastapi import APIRouter, Depends, Path, Query, Response
 from app import __version__
 from app.api.auth import router as auth_router
 from app.api.cache import router as cache_router
-from app.api.dependencies import get_comic_source, get_media_cache, get_media_registry
+from app.api.dependencies import (
+    get_comic_source,
+    get_media_cache,
+    get_media_registry,
+    get_translation_manager,
+)
 from app.api.library import router as library_router
 from app.api.settings import router as settings_router
+from app.api.translation import router as translation_router
+from app.cache.keys import (
+    chapter_bundle_key,
+    cover_bundle_key,
+    cover_path,
+    original_path,
+)
 from app.cache.storage import CachedMedia, MediaCache
 from app.domain.comic import (
     ChapterManifest,
@@ -22,16 +34,19 @@ from app.domain.comic import (
 from app.errors import AppError
 from app.media.registry import SourceMediaRegistry
 from app.sources.base import ComicOrder, ComicSource
+from app.translation.manager import TranslationManager
 
 router = APIRouter()
 router.include_router(auth_router)
 router.include_router(settings_router)
 router.include_router(library_router)
 router.include_router(cache_router)
+router.include_router(translation_router)
 
 ComicSourceDependency = Annotated[ComicSource, Depends(get_comic_source)]
 MediaRegistryDependency = Annotated[SourceMediaRegistry, Depends(get_media_registry)]
 MediaCacheDependency = Annotated[MediaCache, Depends(get_media_cache)]
+TranslationManagerDependency = Annotated[TranslationManager, Depends(get_translation_manager)]
 
 
 @router.get("/health", tags=["system"])
@@ -115,12 +130,13 @@ async def chapter_manifest(
     source: ComicSourceDependency,
     registry: MediaRegistryDependency,
     cache: MediaCacheDependency,
+    translations: TranslationManagerDependency,
     comic_id: Annotated[str, Path(min_length=1, max_length=160)],
     chapter_id: Annotated[str, Path(min_length=1, max_length=160)],
 ) -> ChapterManifest:
     manifest = registry.localize_manifest(await source.chapter(comic_id, chapter_id))
     cache.lease_chapter(comic_id, chapter_id)
-    return manifest
+    return translations.decorate_manifest(manifest)
 
 
 @router.get("/api/media/covers/{comic_id}", tags=["media"])
@@ -133,13 +149,12 @@ async def comic_cover(
     source_url = registry.covers.get(comic_id)
     if source_url is None:
         raise AppError("MEDIA_NOT_FOUND", "媒体尚未登记或已失效", 404, False)
-    digest = _cache_digest("cover", comic_id)
     media = await cache.get_or_create(
-        bundle_key=f"cover:{digest}",
+        bundle_key=cover_bundle_key(comic_id),
         bundle_kind="cover",
         comic_id=comic_id,
         chapter_id=None,
-        relative_path=f"covers/{digest}.img",
+        relative_path=cover_path(comic_id),
         entry_kind="cover",
         loader=lambda: source.fetch_media(source_url),
         protect=False,
@@ -162,13 +177,12 @@ async def original_comic_page(
     source_url = registry.pages.get((comic_id, chapter_id, page_index))
     if source_url is None:
         raise AppError("MEDIA_NOT_FOUND", "媒体尚未登记或已失效", 404, False)
-    chapter_digest = _cache_digest("chapter", comic_id, chapter_id)
     media = await cache.get_or_create(
-        bundle_key=f"chapter:{chapter_digest}",
+        bundle_key=chapter_bundle_key(comic_id, chapter_id),
         bundle_kind="chapter",
         comic_id=comic_id,
         chapter_id=chapter_id,
-        relative_path=(f"chapters/{chapter_digest}/originals/{page_index:05d}.img"),
+        relative_path=original_path(comic_id, chapter_id, page_index),
         entry_kind="original",
         loader=lambda: source.fetch_media(source_url),
         protect=True,
@@ -185,10 +199,3 @@ def _cached_media_response(media: CachedMedia) -> Response:
             "ETag": f'"{media.etag}"',
         },
     )
-
-
-def _cache_digest(*parts: object) -> str:
-    import hashlib
-
-    identity = "\0".join(str(part) for part in parts).encode("utf-8")
-    return hashlib.sha256(identity).hexdigest()

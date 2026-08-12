@@ -11,6 +11,7 @@ from app.repositories.database import Database
 from app.repositories.library import LibraryRepository
 from app.security.access import AccessGate, LoginRateLimiter
 from app.sources.base import ComicSource
+from app.translation.manager import TranslationManager
 
 
 def get_comic_source(request: Request) -> ComicSource:
@@ -43,3 +44,7 @@ def get_access_gate(request: Request) -> AccessGate:
 
 def get_login_rate_limiter(request: Request) -> LoginRateLimiter:
     return cast(LoginRateLimiter, request.app.state.login_rate_limiter)
+
+
+def get_translation_manager(request: Request) -> TranslationManager:
+    return cast(TranslationManager, request.app.state.translation_manager)

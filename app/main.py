@@ -15,10 +15,12 @@ from app.errors import install_error_handlers
 from app.media.registry import SourceMediaRegistry
 from app.repositories.database import Database
 from app.repositories.library import LibraryRepository
+from app.repositories.translation import TranslationRepository
 from app.security.access import SESSION_COOKIE_NAME, AccessGate, LoginRateLimiter
 from app.security.secrets import SecretCipher
 from app.sources.base import ComicSource
 from app.sources.manga18fx import Manga18fxSource
+from app.translation.manager import TranslationManager
 from app.web import SpaStaticFiles
 
 
@@ -48,15 +50,26 @@ def create_app(
             timeout=resolved_config.request_timeout,
         )
         app.state.comic_source = source
-        app.state.media_registry = SourceMediaRegistry(database)
-        app.state.media_cache = MediaCache(
+        media_registry = SourceMediaRegistry(database)
+        media_cache = MediaCache(
             resolved_config.cache_dir,
             database,
             settings_service.public_settings().cache_max_mb * 1024 * 1024,
         )
+        app.state.media_registry = media_registry
+        app.state.media_cache = media_cache
+        app.state.translation_repository = TranslationRepository(database)
+        app.state.translation_manager = TranslationManager(
+            repository=app.state.translation_repository,
+            cache=media_cache,
+            source=source,
+            registry=media_registry,
+            settings=settings_service,
+        )
         try:
             yield
         finally:
+            await app.state.translation_manager.shutdown()
             if comic_source is None:
                 await source.aclose()
             database.close()

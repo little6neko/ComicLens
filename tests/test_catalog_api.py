@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -20,6 +21,8 @@ from app.domain.comic import (
 )
 from app.main import create_app
 from app.sources.base import ComicOrder
+from app.translation.models import TextBlock
+from app.translation.pipeline import OCROutput, RenderOutput, TranslationOutput
 
 
 class FakeComicSource:
@@ -101,6 +104,36 @@ class FakeComicSource:
                 )
             ],
             page=page,
+        )
+
+
+class FastPipeline:
+    async def run_ocr(self, original_bytes: bytes) -> OCROutput:
+        with Image.open(io.BytesIO(original_bytes)) as opened:
+            image = opened.convert("RGB")
+        return OCROutput(
+            image=image,
+            sanitized_bytes=original_bytes,
+            payload={"result": {}},
+            blocks=[TextBlock("Hello", (0, 0, 1, 1))],
+            segment_count=1,
+        )
+
+    async def translate_blocks(self, blocks: list[TextBlock]) -> TranslationOutput:
+        for block in blocks:
+            block.translation = "你好"
+        return TranslationOutput(blocks=blocks, translated_count=len(blocks))
+
+    async def render(self, image: Image.Image, _blocks: list[TextBlock]) -> RenderOutput:
+        rendered = image.copy()
+        rendered.putpixel((0, 0), (1, 2, 3))
+        buffer = io.BytesIO()
+        rendered.save(buffer, format="PNG")
+        return RenderOutput(
+            translated_bytes=buffer.getvalue(),
+            width=rendered.width,
+            height=rendered.height,
+            display_parts=[],
         )
 
 
@@ -273,3 +306,58 @@ def test_history_rejects_progress_outside_chapter(tmp_path: Path) -> None:
 
     assert invalid.status_code == 422
     assert source.calls == []
+
+
+def test_translation_api_polls_manifest_and_serves_immutable_version(
+    tmp_path: Path,
+) -> None:
+    api_client, _source = catalog_client(tmp_path)
+
+    with api_client:
+        manager = api_client.app.state.translation_manager
+        manager._pipeline_factory = lambda _semantic, _runtime: FastPipeline()
+        configured = api_client.patch(
+            "/api/settings",
+            json={
+                "ocrApiUrl": {
+                    "action": "replace",
+                    "value": "https://ocr.example/api",
+                },
+                "deeplxUrl": {
+                    "action": "replace",
+                    "value": "https://translate.example/api",
+                },
+            },
+        )
+        assert configured.status_code == 200
+
+        initial = api_client.get("/api/comics/alpha-comic/chapters/chapter-12/translation")
+        started = api_client.post("/api/comics/alpha-comic/chapters/chapter-12/translation/start")
+        deadline = time.monotonic() + 3
+        state = None
+        while time.monotonic() < deadline:
+            state = api_client.get("/api/comics/alpha-comic/chapters/chapter-12/translation")
+            if state.json()["status"] == "completed":
+                break
+            time.sleep(0.01)
+        manifest = api_client.get("/api/comics/alpha-comic/chapters/chapter-12/manifest")
+        translated_url = manifest.json()["pages"][0]["translatedUrl"]
+        translated = api_client.get(translated_url)
+        wrong_version = api_client.get(
+            "/api/media/comics/alpha-comic/chapters/chapter-12/pages/0/translated",
+            params={"v": "0000000000000000"},
+        )
+        unconfirmed = api_client.post(
+            "/api/comics/alpha-comic/chapters/chapter-12/translation/retranslate",
+            json={"confirmed": False},
+        )
+
+    assert initial.json()["status"] == "idle"
+    assert started.status_code == 200
+    assert state is not None and state.json()["status"] == "completed"
+    assert state.json()["pages"][0]["translatedUrl"] == translated_url
+    assert "?v=" in translated_url
+    assert translated.status_code == 200
+    assert translated.headers["cache-control"].endswith("immutable")
+    assert wrong_version.status_code == 404
+    assert unconfirmed.status_code == 422

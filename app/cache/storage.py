@@ -59,75 +59,167 @@ class MediaCache:
                 return existing
             content, claimed_media_type = await loader()
             media_type = self._verify_image(content, claimed_media_type)
-            checksum = hashlib.sha256(content).hexdigest()
-            target = self._resolve_relative(relative_path)
-            self._atomic_write(target, content)
-            timestamp = self._timestamp()
-            protected_until = timestamp + READING_LEASE_SECONDS if protect else 0
-            try:
-                with self.database.transaction() as connection:
-                    connection.execute(
-                        """
-                        INSERT INTO cache_bundles(
-                            bundle_key, kind, comic_id, chapter_id, byte_size,
-                            accessed_at, protected_until, active_task
-                        ) VALUES (?, ?, ?, ?, 0, ?, ?, 0)
-                        ON CONFLICT(bundle_key) DO UPDATE SET
-                            accessed_at = excluded.accessed_at,
-                            protected_until = MAX(
-                                cache_bundles.protected_until,
-                                excluded.protected_until
-                            )
-                        """,
-                        (
-                            bundle_key,
-                            bundle_kind,
-                            comic_id,
-                            chapter_id,
-                            timestamp,
-                            protected_until,
-                        ),
-                    )
-                    previous_size_row = connection.execute(
-                        "SELECT byte_size FROM cache_entries WHERE relative_path = ?",
-                        (relative_path,),
-                    ).fetchone()
-                    previous_size = int(previous_size_row[0]) if previous_size_row else 0
-                    connection.execute(
-                        """
-                        INSERT INTO cache_entries(
-                            bundle_key, relative_path, entry_kind, byte_size,
-                            checksum, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(relative_path) DO UPDATE SET
-                            bundle_key = excluded.bundle_key,
-                            entry_kind = excluded.entry_kind,
-                            byte_size = excluded.byte_size,
-                            checksum = excluded.checksum,
-                            created_at = excluded.created_at
-                        """,
-                        (
-                            bundle_key,
-                            relative_path,
-                            entry_kind,
-                            len(content),
-                            checksum,
-                            timestamp,
-                        ),
-                    )
-                    connection.execute(
-                        """
-                        UPDATE cache_bundles
-                        SET byte_size = byte_size + ?, accessed_at = ?
-                        WHERE bundle_key = ?
-                        """,
-                        (len(content) - previous_size, timestamp, bundle_key),
-                    )
-            except Exception:
-                target.unlink(missing_ok=True)
-                raise
-            self.enforce_limit(exclude_bundle=bundle_key)
-            return CachedMedia(content=content, media_type=media_type, etag=checksum)
+            return self.put_bytes(
+                bundle_key=bundle_key,
+                bundle_kind=bundle_kind,
+                comic_id=comic_id,
+                chapter_id=chapter_id,
+                relative_path=relative_path,
+                entry_kind=entry_kind,
+                content=content,
+                media_type=media_type,
+                protect=protect,
+            )
+
+    def put_bytes(
+        self,
+        *,
+        bundle_key: str,
+        bundle_kind: str,
+        comic_id: str,
+        chapter_id: str | None,
+        relative_path: str,
+        entry_kind: str,
+        content: bytes,
+        media_type: str = "application/octet-stream",
+        protect: bool = False,
+        verify_image: bool = False,
+    ) -> CachedMedia:
+        if not content:
+            raise AppError("CACHE_WRITE_ERROR", "缓存产物为空", 500, True)
+        if verify_image or media_type.startswith("image/"):
+            media_type = self._verify_image(content, media_type)
+        checksum = hashlib.sha256(content).hexdigest()
+        target = self._resolve_relative(relative_path)
+        self._atomic_write(target, content)
+        timestamp = self._timestamp()
+        protected_until = timestamp + READING_LEASE_SECONDS if protect else 0
+        try:
+            with self.database.transaction() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO cache_bundles(
+                        bundle_key, kind, comic_id, chapter_id, byte_size,
+                        accessed_at, protected_until, active_task
+                    ) VALUES (?, ?, ?, ?, 0, ?, ?, 0)
+                    ON CONFLICT(bundle_key) DO UPDATE SET
+                        accessed_at = excluded.accessed_at,
+                        protected_until = MAX(
+                            cache_bundles.protected_until,
+                            excluded.protected_until
+                        )
+                    """,
+                    (
+                        bundle_key,
+                        bundle_kind,
+                        comic_id,
+                        chapter_id,
+                        timestamp,
+                        protected_until,
+                    ),
+                )
+                previous_size_row = connection.execute(
+                    "SELECT byte_size FROM cache_entries WHERE relative_path = ?",
+                    (relative_path,),
+                ).fetchone()
+                previous_size = int(previous_size_row[0]) if previous_size_row else 0
+                connection.execute(
+                    """
+                    INSERT INTO cache_entries(
+                        bundle_key, relative_path, entry_kind, byte_size,
+                        checksum, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(relative_path) DO UPDATE SET
+                        bundle_key = excluded.bundle_key,
+                        entry_kind = excluded.entry_kind,
+                        byte_size = excluded.byte_size,
+                        checksum = excluded.checksum,
+                        created_at = excluded.created_at
+                    """,
+                    (
+                        bundle_key,
+                        relative_path,
+                        entry_kind,
+                        len(content),
+                        checksum,
+                        timestamp,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE cache_bundles
+                    SET byte_size = byte_size + ?, accessed_at = ?
+                    WHERE bundle_key = ?
+                    """,
+                    (len(content) - previous_size, timestamp, bundle_key),
+                )
+        except Exception:
+            target.unlink(missing_ok=True)
+            raise
+        self.enforce_limit(exclude_bundle=bundle_key)
+        return CachedMedia(content=content, media_type=media_type, etag=checksum)
+
+    def read_bytes(
+        self,
+        relative_path: str,
+        *,
+        media_type: str = "application/octet-stream",
+        protect: bool = False,
+        verify_image: bool = False,
+    ) -> CachedMedia | None:
+        return self._read_indexed(
+            relative_path,
+            protect=protect,
+            media_type=media_type,
+            verify_image=verify_image,
+        )
+
+    def delete_entries(self, relative_paths: list[str]) -> None:
+        affected_bundles: set[str] = set()
+        for relative_path in relative_paths:
+            row = self.database.fetchone(
+                "SELECT bundle_key FROM cache_entries WHERE relative_path = ?",
+                (relative_path,),
+            )
+            if row is None:
+                continue
+            affected_bundles.add(str(row["bundle_key"]))
+            self.database.execute(
+                "DELETE FROM cache_entries WHERE relative_path = ?", (relative_path,)
+            )
+            with suppress(OSError, ValueError):
+                self._resolve_relative(relative_path).unlink(missing_ok=True)
+        for bundle_key in affected_bundles:
+            self._recalculate_bundle(bundle_key)
+        self._remove_empty_directories()
+
+    def set_chapter_active(self, comic_id: str, chapter_id: str, active: bool) -> None:
+        self.ensure_chapter_bundle(comic_id, chapter_id)
+        self.database.execute(
+            """
+            UPDATE cache_bundles SET active_task = ?
+            WHERE kind = 'chapter' AND comic_id = ? AND chapter_id = ?
+            """,
+            (int(active), comic_id, chapter_id),
+        )
+
+    def ensure_chapter_bundle(self, comic_id: str, chapter_id: str) -> str:
+        from app.cache.keys import chapter_bundle_key
+
+        bundle_key = chapter_bundle_key(comic_id, chapter_id)
+        timestamp = self._timestamp()
+        self.database.execute(
+            """
+            INSERT INTO cache_bundles(
+                bundle_key, kind, comic_id, chapter_id, byte_size,
+                accessed_at, protected_until, active_task
+            ) VALUES (?, 'chapter', ?, ?, 0, ?, 0, 0)
+            ON CONFLICT(bundle_key) DO UPDATE SET
+                accessed_at = MAX(cache_bundles.accessed_at, excluded.accessed_at)
+            """,
+            (bundle_key, comic_id, chapter_id, timestamp),
+        )
+        return bundle_key
 
     def stats(self) -> CacheStats:
         used = int(
@@ -215,7 +307,10 @@ class MediaCache:
                 temporary.unlink()
 
         rows = self.database.fetchall(
-            "SELECT entry_id, bundle_key, relative_path, byte_size FROM cache_entries"
+            """
+            SELECT entry_id, bundle_key, relative_path, byte_size, checksum
+            FROM cache_entries
+            """
         )
         affected_bundles: set[str] = set()
         indexed_paths: set[Path] = set()
@@ -226,7 +321,14 @@ class MediaCache:
             except ValueError:
                 path = self.root / "invalid-index-path"
             indexed_paths.add(path)
-            if not path.is_file() or path.stat().st_size != int(row["byte_size"]):
+            valid = path.is_file() and path.stat().st_size == int(row["byte_size"])
+            if valid:
+                try:
+                    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                    valid = digest == str(row["checksum"])
+                except OSError:
+                    valid = False
+            if not valid:
                 self.database.execute(
                     "DELETE FROM cache_entries WHERE entry_id = ?",
                     (int(row["entry_id"]),),
@@ -244,7 +346,14 @@ class MediaCache:
                     path.unlink()
         self._remove_empty_directories()
 
-    def _read_indexed(self, relative_path: str, *, protect: bool) -> CachedMedia | None:
+    def _read_indexed(
+        self,
+        relative_path: str,
+        *,
+        protect: bool,
+        media_type: str = "",
+        verify_image: bool = True,
+    ) -> CachedMedia | None:
         row = self.database.fetchone(
             "SELECT bundle_key, byte_size, checksum FROM cache_entries WHERE relative_path = ?",
             (relative_path,),
@@ -263,7 +372,8 @@ class MediaCache:
             )
             self._recalculate_bundle(str(row["bundle_key"]))
             return None
-        media_type = self._verify_image(content, "")
+        if verify_image:
+            media_type = self._verify_image(content, media_type)
         timestamp = self._timestamp()
         protected_until = timestamp + READING_LEASE_SECONDS if protect else 0
         self.database.execute(
