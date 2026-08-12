@@ -39,12 +39,12 @@ type Draft = Omit<
   | "publicListenerWarning"
   | "ocrApiUrl"
   | "ocrToken"
-  | "ocrBasicPassword"
+  | "deeplApiKey"
   | "deeplxUrl"
   | "fallbackProxyUrl"
 >;
 
-type SecretKey = "ocrApiUrl" | "ocrToken" | "ocrBasicPassword" | "deeplxUrl" | "fallbackProxyUrl";
+type SecretKey = "ocrApiUrl" | "ocrToken" | "deeplApiKey" | "deeplxUrl" | "fallbackProxyUrl";
 
 interface SecretDraft {
   action: "keep" | "replace" | "clear";
@@ -54,7 +54,7 @@ interface SecretDraft {
 const secretKeys: SecretKey[] = [
   "ocrApiUrl",
   "ocrToken",
-  "ocrBasicPassword",
+  "deeplApiKey",
   "deeplxUrl",
   "fallbackProxyUrl",
 ];
@@ -192,43 +192,23 @@ function SettingsPage() {
         </SettingsSection>
 
         <SettingsSection icon={<LanguagesIcon />} title="OCR 与翻译">
-          <Field label="源语言" hint="目标语言固定为中文（ZH）">
-            <Input
+          <Field label="源语言" hint="目标语言固定为简体中文（ZH-HANS）">
+            <Select
               value={draft.sourceLanguage}
-              onChange={(event) => patch("sourceLanguage", event.target.value.toUpperCase())}
-              required
-              minLength={2}
-              maxLength={12}
-            />
-          </Field>
-          <Field label="OCR 模式">
-            <Select
-              value={draft.ocrMode}
-              onChange={(value) => patch("ocrMode", value as Draft["ocrMode"])}
+              onChange={(value) => patch("sourceLanguage", value as Draft["sourceLanguage"])}
               options={[
-                ["auto", "自动识别接口模式"],
-                ["direct", "直接响应"],
-                ["job", "任务轮询"],
-              ]}
-            />
-          </Field>
-          <Field label="OCR 认证">
-            <Select
-              value={draft.ocrAuthMode}
-              onChange={(value) => patch("ocrAuthMode", value as Draft["ocrAuthMode"])}
-              options={[
-                ["none", "无认证"],
-                ["bearer", "Bearer Token"],
-                ["basic", "Basic Auth"],
+                ["AUTO", "自动识别（默认）"],
+                ["EN", "英语"],
+                ["KO", "韩语"],
               ]}
             />
           </Field>
           <SecretField
-            label="OCR API URL"
+            label="OCR 异步任务 URL"
             state={settings.data.ocrApiUrl}
             draft={secrets.ocrApiUrl}
             onChange={(value) => setSecret(setSecrets, "ocrApiUrl", value)}
-            placeholder="https://ocr.example.com/v1/ocr"
+            placeholder="https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
           />
           <SecretField
             label="OCR Token"
@@ -237,30 +217,13 @@ function SettingsPage() {
             onChange={(value) => setSecret(setSecrets, "ocrToken", value)}
             type="password"
           />
-          {draft.ocrAuthMode === "basic" && (
-            <>
-              <Field label="Basic 用户名">
-                <Input
-                  value={draft.ocrBasicUsername}
-                  onChange={(event) => patch("ocrBasicUsername", event.target.value)}
-                  maxLength={200}
-                />
-              </Field>
-              <SecretField
-                label="Basic 密码"
-                state={settings.data.ocrBasicPassword}
-                draft={secrets.ocrBasicPassword}
-                onChange={(value) => setSecret(setSecrets, "ocrBasicPassword", value)}
-                type="password"
-              />
-            </>
-          )}
           <Field label="OCR 模型">
             <Input
               value={draft.ocrModel}
               onChange={(event) => patch("ocrModel", event.target.value)}
               maxLength={200}
-              placeholder="PaddleOCR-VL-1.5"
+              placeholder="PaddleOCR-VL-1.6"
+              required
             />
           </Field>
           <NumberField
@@ -285,19 +248,42 @@ function SettingsPage() {
             max={16}
             onChange={(value) => patch("ocrConcurrency", value)}
           />
-          <SecretField
-            label="DeepLX URL"
-            state={settings.data.deeplxUrl}
-            draft={secrets.deeplxUrl}
-            onChange={(value) => setSecret(setSecrets, "deeplxUrl", value)}
-            placeholder="https://deeplx.example.com/translate"
-          />
+          <Field label="翻译服务" hint="请求失败时不会自动切换到另一服务。">
+            <Select
+              value={draft.translationService}
+              onChange={(value) =>
+                patch("translationService", value as Draft["translationService"])
+              }
+              options={[
+                ["deepl", "DeepL 官方 API（默认）"],
+                ["deeplx", "DeepLX"],
+              ]}
+            />
+          </Field>
+          {draft.translationService === "deepl" ? (
+            <SecretField
+              label="DeepL API Key"
+              state={settings.data.deeplApiKey}
+              draft={secrets.deeplApiKey}
+              onChange={(value) => setSecret(setSecrets, "deeplApiKey", value)}
+              hint="以 :fx 结尾的 Key 自动使用 Free API，否则使用 Pro API。"
+              type="password"
+            />
+          ) : (
+            <SecretField
+              label="DeepLX URL"
+              state={settings.data.deeplxUrl}
+              draft={secrets.deeplxUrl}
+              onChange={(value) => setSecret(setSecrets, "deeplxUrl", value)}
+              placeholder="https://deeplx.example.com/translate"
+            />
+          )}
           <NumberField
-            label="DeepLX 超时（秒）"
-            value={draft.deeplxTimeoutSeconds}
+            label="翻译超时（秒）"
+            value={draft.translationTimeoutSeconds}
             min={1}
             max={600}
-            onChange={(value) => patch("deeplxTimeoutSeconds", value)}
+            onChange={(value) => patch("translationTimeoutSeconds", value)}
           />
           <NumberField
             label="翻译并发"
@@ -561,6 +547,7 @@ function SecretField({
   draft,
   onChange,
   placeholder,
+  hint,
   type = "text",
 }: {
   label: string;
@@ -568,6 +555,7 @@ function SecretField({
   draft: SecretDraft;
   onChange: (draft: SecretDraft) => void;
   placeholder?: string;
+  hint?: string;
   type?: "text" | "password";
 }) {
   return (
@@ -601,6 +589,7 @@ function SecretField({
           autoComplete="off"
         />
       </div>
+      {hint && <span className="mt-1.5 block text-xs leading-5 text-muted-foreground">{hint}</span>}
     </div>
   );
 }
@@ -612,7 +601,7 @@ function toDraft(settings: ServerSettings): Draft {
     publicListenerWarning: _publicListenerWarning,
     ocrApiUrl: _ocrApiUrl,
     ocrToken: _ocrToken,
-    ocrBasicPassword: _ocrBasicPassword,
+    deeplApiKey: _deeplApiKey,
     deeplxUrl: _deeplxUrl,
     fallbackProxyUrl: _fallbackProxyUrl,
     ...draft

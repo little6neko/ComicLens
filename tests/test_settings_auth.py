@@ -185,6 +185,7 @@ def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> N
             json={
                 "theme": "dark",
                 "ocrToken": {"action": "replace", "value": "new-secret-token"},
+                "deeplApiKey": {"action": "replace", "value": "test-deepl-key:fx"},
                 "deeplxUrl": {
                     "action": "replace",
                     "value": "https://translator.example/api?key=private",
@@ -205,8 +206,13 @@ def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> N
         "configured": True,
         "masked": "••••oken",
     }
+    assert updated.json()["deeplApiKey"] == {
+        "configured": True,
+        "masked": "••••y:fx",
+    }
     assert kept.json()["ocrToken"]["configured"] is True
     assert b"new-secret-token" not in database_bytes
+    assert b"test-deepl-key:fx" not in database_bytes
     assert b"translator.example" not in database_bytes
 
     # A later environment seed does not overwrite persisted settings.

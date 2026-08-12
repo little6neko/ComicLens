@@ -122,20 +122,18 @@ export interface ServerSettings {
   readingMode: "strip" | "page" | "double";
   pageDirection: "ltr" | "rtl";
   realtimeTranslationDefault: boolean;
-  sourceLanguage: string;
-  targetLanguage: "ZH";
-  ocrMode: "auto" | "direct" | "job";
-  ocrAuthMode: "none" | "bearer" | "basic";
+  sourceLanguage: "AUTO" | "EN" | "KO";
+  targetLanguage: "ZH-HANS";
   ocrApiUrl: SensitiveSettingState;
   ocrToken: SensitiveSettingState;
-  ocrBasicUsername: string;
-  ocrBasicPassword: SensitiveSettingState;
   ocrModel: string;
   ocrPollIntervalSeconds: number;
   ocrTimeoutSeconds: number;
   ocrConcurrency: number;
+  translationService: "deepl" | "deeplx";
+  deeplApiKey: SensitiveSettingState;
   deeplxUrl: SensitiveSettingState;
-  deeplxTimeoutSeconds: number;
+  translationTimeoutSeconds: number;
   translationConcurrency: number;
   fallbackProxyUrl: SensitiveSettingState;
   longImageThreshold: number;
@@ -234,14 +232,14 @@ export type SettingsPatch = Partial<
     | "publicListenerWarning"
     | "ocrApiUrl"
     | "ocrToken"
-    | "ocrBasicPassword"
+    | "deeplApiKey"
     | "deeplxUrl"
     | "fallbackProxyUrl"
   >
 > & {
   ocrApiUrl?: SensitiveAction;
   ocrToken?: SensitiveAction;
-  ocrBasicPassword?: SensitiveAction;
+  deeplApiKey?: SensitiveAction;
   deeplxUrl?: SensitiveAction;
   fallbackProxyUrl?: SensitiveAction;
 };

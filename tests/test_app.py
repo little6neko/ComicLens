@@ -55,6 +55,21 @@ def test_invalid_integer_config_fails_fast(monkeypatch, tmp_path: Path) -> None:
         raise AssertionError("invalid PORT should fail")
 
 
+def test_config_seeds_deepl_key_and_ignores_removed_basic_auth_env(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("COMICLENS_DEEPL_API_KEY", "test-key:fx")
+    monkeypatch.setenv("COMICLENS_OCR_BASIC_USERNAME", "removed-user")
+    monkeypatch.setenv("COMICLENS_OCR_BASIC_PASSWORD", "removed-password")
+
+    config = AppConfig.from_env(data_dir=tmp_path / "data", static_dir=tmp_path / "web")
+
+    assert config.initial_settings["deepl_api_key"] == "test-key:fx"
+    assert "ocr_basic_username" not in config.initial_settings
+    assert "ocr_basic_password" not in config.initial_settings
+
+
 def test_built_web_uses_spa_fallback_without_swallowing_api_errors(
     app_config: AppConfig,
 ) -> None:
