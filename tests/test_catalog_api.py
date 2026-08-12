@@ -173,3 +173,92 @@ def test_catalog_validation_rejects_invalid_parameters_before_source_call(
     assert invalid_order.status_code == 422
     assert invalid_page.status_code == 422
     assert source.calls == []
+
+
+def test_library_snapshots_and_read_state_survive_restart(tmp_path: Path) -> None:
+    api_client, source = catalog_client(tmp_path)
+    config = api_client.app.state.config
+    favorite_payload = {
+        "title": "Alpha Comic",
+        "rating": 4.8,
+        "isAdult": False,
+        "latestChapters": [
+            {
+                "chapterId": "chapter-12",
+                "title": "Chapter 12",
+                "updatedLabel": "Today",
+            }
+        ],
+    }
+    history_payload = {
+        **favorite_payload,
+        "chapterId": "chapter-12",
+        "chapterTitle": "Chapter 12",
+        "pageIndex": 3,
+        "totalPages": 10,
+    }
+
+    with api_client:
+        favorite = api_client.put("/api/favorites/alpha-comic", json=favorite_payload)
+        favorite_update = api_client.put(
+            "/api/favorites/alpha-comic",
+            json={**favorite_payload, "title": "Alpha Comic Updated"},
+        )
+        history = api_client.put("/api/history/alpha-comic", json=history_payload)
+        read_first = api_client.put(
+            "/api/comics/alpha-comic/read-chapters/chapter-12", json={"read": True}
+        )
+        read_second = api_client.put(
+            "/api/comics/alpha-comic/read-chapters/chapter-11", json={"read": True}
+        )
+        unread_first = api_client.put(
+            "/api/comics/alpha-comic/read-chapters/chapter-12", json={"read": False}
+        )
+
+    assert favorite.status_code == 200
+    assert favorite_update.status_code == 200
+    assert favorite_update.json()["favoritedAt"] == favorite.json()["favoritedAt"]
+    assert history.status_code == 200
+    assert history.json()["pageIndex"] == 3
+    assert read_first.json()["chapterIds"] == ["chapter-12"]
+    assert set(read_second.json()["chapterIds"]) == {"chapter-11", "chapter-12"}
+    assert unread_first.json()["chapterIds"] == ["chapter-11"]
+    assert source.calls.count(("detail", "alpha-comic")) == 1
+
+    restarted_source = FakeComicSource()
+    with TestClient(create_app(config, comic_source=restarted_source)) as restarted_client:
+        favorites = restarted_client.get("/api/favorites")
+        histories = restarted_client.get("/api/history")
+        read_state = restarted_client.get("/api/comics/alpha-comic/read-chapters")
+        cover = restarted_client.get("/api/media/covers/alpha-comic")
+        delete_history = restarted_client.delete("/api/history/alpha-comic")
+        favorites_after_history_delete = restarted_client.get("/api/favorites")
+
+    assert favorites.json()[0]["comic"]["title"] == "Alpha Comic Updated"
+    assert favorites.json()[0]["comic"]["coverUrl"] == ("/api/media/covers/alpha-comic")
+    assert histories.json()[0]["chapterId"] == "chapter-12"
+    assert histories.json()[0]["comic"]["title"] == "Alpha Comic"
+    assert read_state.json()["chapterIds"] == ["chapter-11"]
+    assert cover.status_code == 200
+    assert ("detail", "alpha-comic") not in restarted_source.calls
+    assert delete_history.status_code == 204
+    assert len(favorites_after_history_delete.json()) == 1
+
+
+def test_history_rejects_progress_outside_chapter(tmp_path: Path) -> None:
+    api_client, source = catalog_client(tmp_path)
+
+    with api_client:
+        invalid = api_client.put(
+            "/api/history/alpha-comic",
+            json={
+                "title": "Alpha Comic",
+                "chapterId": "chapter-12",
+                "chapterTitle": "Chapter 12",
+                "pageIndex": 10,
+                "totalPages": 10,
+            },
+        )
+
+    assert invalid.status_code == 422
+    assert source.calls == []

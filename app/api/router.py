@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Path, Query, Response
 from app import __version__
 from app.api.auth import router as auth_router
 from app.api.dependencies import get_comic_source, get_media_registry
+from app.api.library import router as library_router
 from app.api.settings import router as settings_router
 from app.domain.comic import (
     ChapterManifest,
@@ -23,6 +24,7 @@ from app.sources.base import ComicOrder, ComicSource
 router = APIRouter()
 router.include_router(auth_router)
 router.include_router(settings_router)
+router.include_router(library_router)
 
 ComicSourceDependency = Annotated[ComicSource, Depends(get_comic_source)]
 MediaRegistryDependency = Annotated[SourceMediaRegistry, Depends(get_media_registry)]

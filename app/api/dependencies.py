@@ -7,6 +7,7 @@ from fastapi import Request
 from app.application.settings import SettingsService
 from app.media.registry import SourceMediaRegistry
 from app.repositories.database import Database
+from app.repositories.library import LibraryRepository
 from app.security.access import AccessGate, LoginRateLimiter
 from app.sources.base import ComicSource
 
@@ -21,6 +22,10 @@ def get_media_registry(request: Request) -> SourceMediaRegistry:
 
 def get_database(request: Request) -> Database:
     return cast(Database, request.app.state.database)
+
+
+def get_library_repository(request: Request) -> LibraryRepository:
+    return cast(LibraryRepository, request.app.state.library_repository)
 
 
 def get_settings_service(request: Request) -> SettingsService:

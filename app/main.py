@@ -13,6 +13,7 @@ from app.config import AppConfig
 from app.errors import install_error_handlers
 from app.media.registry import SourceMediaRegistry
 from app.repositories.database import Database
+from app.repositories.library import LibraryRepository
 from app.security.access import SESSION_COOKIE_NAME, AccessGate, LoginRateLimiter
 from app.security.secrets import SecretCipher
 from app.sources.base import ComicSource
@@ -32,6 +33,7 @@ def create_app(
         database = Database(resolved_config.database_path)
         cipher = SecretCipher(resolved_config.secrets_path, database)
         app.state.database = database
+        app.state.library_repository = LibraryRepository(database)
         app.state.secret_cipher = cipher
         app.state.settings_service = SettingsService(database, cipher, resolved_config)
         app.state.access_gate = AccessGate(

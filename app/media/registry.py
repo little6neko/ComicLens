@@ -12,6 +12,7 @@ from app.domain.comic import (
     ReaderPage,
     SourceChapterManifest,
 )
+from app.domain.library import FavoriteItem, HistoryItem
 
 
 @dataclass(slots=True)
@@ -63,6 +64,15 @@ class SourceMediaRegistry:
             title=result.title,
             pages=pages,
         )
+
+    def localize_favorite(self, item: FavoriteItem) -> FavoriteItem:
+        return item.model_copy(update={"comic": self.localize_summary(item.comic)})
+
+    def localize_history(self, item: HistoryItem) -> HistoryItem:
+        return item.model_copy(update={"comic": self.localize_summary(item.comic)})
+
+    def cover_source(self, comic_id: str) -> str | None:
+        return self.covers.get(comic_id)
 
     @staticmethod
     def cover_url(comic_id: str) -> str:
