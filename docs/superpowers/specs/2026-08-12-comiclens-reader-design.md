@@ -29,7 +29,7 @@ ComicLens 是一个个人使用、单用户自托管的 Comic 阅读网站。它
 不得使用 jm-boom 中泛化的 `manga` 领域命名。只有以下两类内容允许保留该字符串：
 
 1. 上游品牌专名 `Manga18fx`。
-2. 上游无法改变的 URL，例如 `/manga/{slug}` 和 `/manga-genre/{slug}`。
+2. 上游无法改变的 URL、分类 slug、来源标签和解析 fixture，例如 `/manga/{slug}`、`/manga-genre/{slug}`、上游分类 `manhwa` 和标签 `Manhwa Raw`。
 
 “源图片”指 Manga18fx 章节页面中的一张图片。长图即使被切成多个 OCR 分片或阅读分片，仍是一张源图片。
 
@@ -147,7 +147,7 @@ web/
 | 首页重点更新与最新更新 | `GET /` | 分别解析重点更新轨道和最新更新第一页 |
 | 最新更新翻页 | `GET /page/{page}` | `page` 从 1 开始；只返回最新更新列表及分页，不重复重点更新轨道 |
 | 搜索 | `GET /search?q={query}&page={page}` | `q` 由 HTTP 客户端编码；`page` 从 1 开始；空查询由 ComicLens 拒绝 |
-| 分类目录 | `GET /` | 从导航中的 `/manga-genre/{slug}` 链接发现并去重；同时纳入来源专用的 `/manhwa-raw` 列表入口 |
+| 分类目录 | `GET /sitemap-manga.xml.gz`，首页 `GET /` 作为补充发现 | 从 sitemap 中的 `/manga-genre/{slug}` 取得全量分类，以首页导航补充标签；同时纳入来源专用的 `/manhwa-raw` 列表入口 |
 | 普通分类 | `GET /manga-genre/{slug}?orderby={order}`；第 2 页起使用 `/manga-genre/{slug}/{page}?orderby={order}` | `order` 只允许 `latest`、`rating`、`views`，默认 `latest` |
 | 来源专用 Raw 列表 | `GET /manhwa-raw?orderby={order}`；第 2 页起使用 `/manhwa-raw/{page}?orderby={order}` | 与普通分类使用相同的三种排序；只在适配器内保留该上游名称 |
 | 周热门排行 | `GET /hot-manga?page={page}` | Manga18fx 页面明确为一周热门；第一版不显示来源未提供的日榜、月榜或总榜切换 |
@@ -156,7 +156,24 @@ web/
 
 搜索和周榜使用 `page` 查询参数，最新更新与分类分页使用路径段；例如不能把搜索第 2 页构造成 `/search/2`，也不能把周榜第 2 页构造成 `/hot-manga/2`。适配器从受控参数构造上述白名单 URL，不直接跟随客户端提交的 URL 或未经校验的任意分页链接。
 
-分类 API 使用稳定的 `category_id`。普通分类 ID 对应已验证的 slug；来源专用入口由适配器中的显式映射表解析，不能把 `category_id` 当作任意上游路径。导航中重复出现的分类按规范化 slug 去重并保留第一次出现的标签和顺序。
+分类 API 使用稳定的 `category_id`。普通分类 ID 对应已验证的 slug；来源专用入口由适配器中的显式映射表解析，不能把 `category_id` 当作任意上游路径。
+
+首页导航不是全量分类来源。2026-08-12 验证时，首页只公开 23 个分类链接，而官方 `sitemap-manga.xml.gz` 公开并已逐一验证 54 个有效 `/manga-genre/{slug}` 分类：
+
+```text
+action adult adventure bl comedy comics cooking demons doujinshi drama ecchi
+family fantasy game gender-bender gl harem hentai historical horror isekai josei
+magic manhua manhwa martial-arts mature mecha mystery ntr psychological raw
+reincarnation romance rpg school-life sci-fi seinen shoujo shounen slice-of-life
+smut sports super-power supernatural thriller tragedy uncensored-manhwa vanilla
+webtoon webtoons yaoi yuri zombie
+```
+
+上述清单作为版本内置回退基线。sitemap 成功解析时，以 sitemap 的普通分类集合为当前事实；只有 sitemap 请求或解析失败时才使用完整内置基线，避免已被来源删除的旧分类永久残留。首页发现但 sitemap 未列出的分类，以及 sitemap 新增但内置基线没有的分类，只有满足 `/manga-genre/{slug}` 格式、落在允许来源主机且目标页通过分类结构校验后才能加入返回结果。所有结果规范化并去重；客户端提交的未知 slug 不会因此被任意放行。分类标签优先使用上游导航文本，其次使用分类页标题，最后才把 slug 格式化为可读标签。
+
+每个普通分类都可进入详情列表，支持 `latest`、`rating`、`views` 三种排序；结果不足一页时没有分页条属于正常情况。当前 54 个分类均已验证至少有一个列表项且三种排序入口存在。
+
+`/manga-genre/raw` 是普通分类，`/manhwa-raw` 是另一条来源专用列表；两者第一页内容并不相同，必须使用不同 `category_id`（分别为 `raw` 和 `source:raw-feed`），不能合并、覆盖或互相重定向。领域/API/UI 中仍使用 Comic 通用命名，`manhwa-raw` 只作为无法更改的来源路径和来源标签 `Manhwa Raw` 出现。
 
 ### 5.3 列表解析与领域 DTO
 
@@ -586,6 +603,8 @@ GET    /health
 
 `/api/home/feed` 分别返回重点更新和最新更新第一页，继续加载使用 `/api/home/latest`；`/api/comics/ranking` 固定返回 `period = "week"`，明确表示来源只提供周榜。四个分页列表接口都返回第 5.3 节的 `ComicListPage`，分类接口另回显实际 `order`，搜索接口回显规范化查询词。`page` 必须是大于等于 1 的整数，`order` 只能使用白名单值。
 
+`/api/comics/categories` 返回 `category_id`、`label`、`kind = genre | source_special` 和 `supported_orders`。按 2026-08-12 基线应包含 54 个 `genre` 项及一个 `category_id = source:raw-feed`、标签为来源原名 `Manhwa Raw` 的 `source_special` 项；运行时可按第 5.2 节吸收经验证的新分类。
+
 目录响应中的上游封面 URL 先由后端校验并登记为封面缓存元数据，再转换成受控的 `/api/media/covers/{comic_id}`；这份媒体索引不等同于持久化全站目录，也不能作为陈旧目录结果返回。
 
 媒体 API 通过领域 ID 和受控 variant 查找数据库记录，不接受文件系统路径或任意远端 URL。
@@ -605,6 +624,8 @@ GET    /health
 ### 15.1 后端单元测试
 
 - Manga18fx 首页重点更新、最新更新、搜索、分类、周榜、详情和章节 fixture 解析。
+- sitemap gzip 分类发现、54 项内置分类基线、首页补充标签、动态分类校验与去重。
+- 54 个普通分类全部可访问；`raw` 与来源专用 `source:raw-feed` 使用不同 ID 和 URL 映射。
 - 首页最新更新路径分页、搜索 query 分页、分类路径分页、三种分类排序、周榜 query 分页和分页状态解析。
 - 空搜索结果、空评分、重复分类、异常页面及站点结构变化的判定。
 - URL 规范化、ID 生成和 SSRF 防护。
@@ -638,20 +659,21 @@ GET    /health
 
 1. 未配置密码时直接进入首页。
 2. 配置密码时登录后才能访问 API 和图片。
-3. 浏览首页最新更新并继续加载；执行搜索并翻页；切换分类的最新、评分、浏览量排序；浏览周榜并翻页；进入详情和章节。
-4. 开启翻译，看到原图先出现、译图逐张替换。
-5. 关闭翻译，立即回原图，当前源图片结束后停止。
-6. 再次开启，从缓存和下一张未完成图片续接。
-7. 注入单图失败并点击“重新翻译此图”。
-8. 点击“重新翻译本话”，确认旧译图在新图成功前可读。
-9. 重启容器并验证设置、历史、收藏、缓存和任务检查点。
+3. 分类页展示 54 个普通分类和独立的 Manhwa Raw 入口；抽查首页未展示分类，且 `raw` 与 Manhwa Raw 打开不同列表。
+4. 浏览首页最新更新并继续加载；执行搜索并翻页；切换分类的最新、评分、浏览量排序；浏览周榜并翻页；进入详情和章节。
+5. 开启翻译，看到原图先出现、译图逐张替换。
+6. 关闭翻译，立即回原图，当前源图片结束后停止。
+7. 再次开启，从缓存和下一张未完成图片续接。
+8. 注入单图失败并点击“重新翻译此图”。
+9. 点击“重新翻译本话”，确认旧译图在新图成功前可读。
+10. 重启容器并验证设置、历史、收藏、缓存和任务检查点。
 
 ### 15.5 完成标准
 
 - 所有业务代码中的泛化领域名称均为 `comic`。
 - 一个 Docker 容器可启动前后端，持久卷只需挂载 `/app/data`。
 - 不配置访问密码时无登录流程；配置后业务资源无法绕过会话访问。
-- 首页最新更新、搜索、分类三种排序和周榜分页均使用第 5.2 节验证过的真实上游路径，且解析结果符合第 5.3 节 DTO。
+- 首页最新更新、搜索、全部分类的三种排序、独立 Manhwa Raw 入口和周榜分页均使用第 5.2 节验证过的真实上游路径，且解析结果符合第 5.3 节 DTO。
 - 目录不写入全站索引，行为符合实时请求 + React Query 缓存边界。
 - 翻译、停止、续接、整话重译、单图重试和长图处理符合本规格。
 - 缓存没有时间 TTL；只有超过默认 5 GB 才按规则淘汰。
