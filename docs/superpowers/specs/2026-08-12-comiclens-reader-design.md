@@ -9,7 +9,7 @@ ComicLens 是一个个人使用、单用户自托管的 Comic 阅读网站。它
 
 核心目标：
 
-1. 提供首页、搜索、分类、热门排行、Comic 详情、章节、收藏和阅读历史。
+1. 提供首页、搜索、分类、Manga18fx 周热门排行、Comic 详情、章节、收藏和阅读历史。
 2. 使用 `shadcn/ui + Radix UI` 的 `radix-maia` 风格，延续 jm-boom 的移动媒体库布局和沉浸式阅读器。
 3. 阅读器开启实时翻译后，先显示原图；普通源图片完成一张就原位显示一张译图，长图沿用 ComicTranslator 的切片 OCR 和渐进阅读分片。
 4. 设置、收藏、历史、翻译任务和页级进度保存在服务器；原图、OCR 数据和译图在 5 GB 范围内长期保留。
@@ -37,7 +37,7 @@ ComicLens 是一个个人使用、单用户自托管的 Comic 阅读网站。它
 
 ### 3.1 第一版范围
 
-- Manga18fx 首页、搜索、分类、热门排行和分页。
+- Manga18fx 首页、搜索、分类、分类排序、周热门排行和分页。
 - Comic 详情、章节列表和相关元数据。
 - 移动端优先、桌面自适应的 Maia UI。
 - 收藏、阅读历史、已读章节和继续阅读。
@@ -119,9 +119,9 @@ web/
 
 ### 5.1 数据获取边界
 
-目录逻辑沿用 jm-boom 的设计：
+目录的实时获取边界沿用 jm-boom 的设计，Manga18fx URL 和 HTML 解析则由独立适配器实现：
 
-- 首页、搜索、分类、热门和详情由后端在请求时实时访问上游。
+- 首页、搜索、分类、周榜和详情由后端在请求时实时访问上游。
 - 后端不持久化完整目录，也不为目录响应增加服务器 TTL 缓存。
 - React Query 在浏览器内短期缓存响应。
 - 收藏和历史保存当时的 `ComicSummary` 快照，因此上游暂时不可用时仍可展示本地列表。
@@ -131,36 +131,76 @@ web/
 
 | 数据 | staleTime | gcTime |
 |---|---:|---:|
-| 首页、搜索、分类、热门列表 | 30 分钟 | 6 小时 |
+| 首页、搜索、分类、周榜列表 | 30 分钟 | 6 小时 |
 | Comic 详情 | 10 分钟 | 1 小时 |
 | 分类筛选项 | 12 小时 | 24 小时 |
 | 章节阅读清单 | 1 小时 | 2 小时 |
 
 页面重新加载后，未持久化的 Query 缓存可以丢失。这是设计行为，不把浏览器缓存同步到 SQLite。
 
-### 5.2 上游适配器
+### 5.2 Manga18fx 获取契约
 
-领域层定义 `ComicSource` 协议，Manga18fx 适配器负责：
+以下契约已于 2026-08-12 对 Manga18fx 实际页面验证。领域层定义 `ComicSource` 协议，Manga18fx 适配器按功能分别构造 URL，不能假设所有列表使用同一种分页格式：
 
-- `/`：首页和最新更新。
-- `/search?q={query}`：搜索。
-- `/manga-genre/{slug}`：分类列表。
-- `/hot-manga`：热门排行。
-- `/manga/{comic_slug}`：Comic 详情和章节列表。
-- `/manga/{comic_slug}/{chapter_slug}`：章节清单。
-- `.page-break img`：章节源图片。
+| 功能 | 上游请求 | 行为 |
+|---|---|---|
+| 首页重点更新与最新更新 | `GET /` | 分别解析重点更新轨道和最新更新第一页 |
+| 最新更新翻页 | `GET /page/{page}` | `page` 从 1 开始；只返回最新更新列表及分页，不重复重点更新轨道 |
+| 搜索 | `GET /search?q={query}&page={page}` | `q` 由 HTTP 客户端编码；`page` 从 1 开始；空查询由 ComicLens 拒绝 |
+| 分类目录 | `GET /` | 从导航中的 `/manga-genre/{slug}` 链接发现并去重；同时纳入来源专用的 `/manhwa-raw` 列表入口 |
+| 普通分类 | `GET /manga-genre/{slug}?orderby={order}`；第 2 页起使用 `/manga-genre/{slug}/{page}?orderby={order}` | `order` 只允许 `latest`、`rating`、`views`，默认 `latest` |
+| 来源专用 Raw 列表 | `GET /manhwa-raw?orderby={order}`；第 2 页起使用 `/manhwa-raw/{page}?orderby={order}` | 与普通分类使用相同的三种排序；只在适配器内保留该上游名称 |
+| 周热门排行 | `GET /hot-manga?page={page}` | Manga18fx 页面明确为一周热门；第一版不显示来源未提供的日榜、月榜或总榜切换 |
+| Comic 详情 | `GET /manga/{comic_slug}` | 解析元数据和完整章节列表 |
+| 章节清单 | `GET /manga/{comic_slug}/{chapter_slug}` | 从 `.page-break img` 按 DOM 顺序解析全部有效源图片 |
+
+搜索和周榜使用 `page` 查询参数，最新更新与分类分页使用路径段；例如不能把搜索第 2 页构造成 `/search/2`，也不能把周榜第 2 页构造成 `/hot-manga/2`。适配器从受控参数构造上述白名单 URL，不直接跟随客户端提交的 URL 或未经校验的任意分页链接。
+
+分类 API 使用稳定的 `category_id`。普通分类 ID 对应已验证的 slug；来源专用入口由适配器中的显式映射表解析，不能把 `category_id` 当作任意上游路径。导航中重复出现的分类按规范化 slug 去重并保留第一次出现的标签和顺序。
+
+### 5.3 列表解析与领域 DTO
+
+搜索、分类和周榜复用同一个列表项解析器。其作用域限定为内容区 `.listupd > .page-item`，不能全页扫描 `/manga/` 链接，以免把导航、广告或推荐区误当结果。每项归一化为 `ComicSummary`：
+
+| 字段 | Manga18fx 来源与规则 |
+|---|---|
+| `comic_id` | 从列表项内详情链接 `/manga/{comic_slug}` 提取并规范化 |
+| `title` | 优先使用 `h3.tt a` 的 `title` 或文本，缺失时回退封面 `alt` |
+| `cover_url` | `.thumb-manga img` 的 `data-src` 优先、`src` 回退；API 返回受控的 ComicLens 媒体 URL |
+| `rating` | `.mmrate[data-rating]`；缺失或空值为 `null`，不能伪装成 0 分 |
+| `is_adult` | 是否存在 `.adult-badges` |
+| `latest_chapters` | `.list-chapter .chapter-item` 中的章节 ID、标题和链接，以及 `.post-on` 的原始更新时间标签；没有日期时允许 `null` |
+
+首页的重点更新轨道使用 `.trending-block .hot-item` 单独解析；最新更新区仍复用上述列表项解析器和分页 DTO。重点更新卡至少返回 `comic_id`、标题、封面和卡片上的最新章节标签。首页“重点更新”不等同于 `/hot-manga` 周榜，前端使用不同标题和 Query Key。
+
+首页最新更新、搜索、分类和周榜统一返回 `ComicListPage`：
+
+```text
+items
+page                 # 一基页码
+available_pages      # 当前分页条中出现的页码
+has_previous
+has_next
+```
+
+分页状态从 `ul.pagination` 解析：`li.active` 表示当前页，`li.prev`、`li.next` 是否禁用决定前后页；上游的 `data-page` 是零基值，不能直接作为 API 页码。上游没有可靠的结果总数，因此 API 不虚构 `total`；分页条缺失时，按单页结果返回。
+
+搜索结果区存在且显示明确的 `No result` 时返回 200 和空 `items`。若预期内容容器缺失、列表项结构全部无法识别，或请求页与解析出的活动页矛盾，则返回可重试的 `UPSTREAM_PARSE_ERROR`，不能把站点改版、验证页或错误页冒充空结果。
 
 `comic_id` 使用规范化的 `comic_slug`；`chapter_id` 使用该 Comic 下 URL-safe 的章节 slug。数据库中用 `(comic_id, chapter_id)` 作为章节身份，不把用户输入直接拼接为文件路径。
 
 文件缓存键由 `(comic_id, chapter_id)` 的规范化值经过无歧义编码和散列生成；即使不同 Comic 存在相同章节 slug，也不能共享缓存路径。
 
-解析器将上游 HTML 归一化为稳定领域对象。HTML fixture 测试用于锁定选择器；上游结构变化只修改适配器，不传播到 API 和 UI。
+解析器将上游 HTML 归一化为稳定领域对象。HTML fixture 测试用于锁定选择器、URL 形式、空结果和分页状态；上游结构变化只修改适配器，不传播到 API 和 UI。
 
-### 5.3 网络与安全
+### 5.4 网络与安全
 
 - 目录和图片先直连；发生连接超时等可重试错误时，使用设置中的回退代理重试。
+- 为目录请求设置明确的连接、读取和总超时；对超时、429 和瞬时 5xx 做有上限的退避重试，尊重 `Retry-After`，不做无界重试。
+- 发送稳定、可配置的常规浏览器 `User-Agent` 和来源需要的最小请求头；不转发浏览器 Cookie，也不登录来源站点。
 - API 不接受任意网页 URL 或图片 URL，避免把服务变成 SSRF 代理。
 - 源 URL 只能来自适配器解析结果，协议必须是 HTTP(S)，并拒绝回环、私网、链路本地和非法重定向目标。
+- 目录请求只接受最终落在允许来源主机上的有限次重定向；2xx HTML 仍需通过预期内容结构校验，不能仅凭状态码认定成功。
 - Manga18fx 使用外部图片 CDN 时，由适配器维护允许规则并继续执行地址安全检查。
 
 ## 6. 页面、导航与 UI
@@ -200,8 +240,8 @@ Comic 详情和阅读器使用独立页面，不显示主导航，以保持沉�
 
 ### 6.4 页面内容
 
-- 首页：继续阅读、最新更新、热门和来源提供的重点分区。
-- 探索：统一搜索框、分类入口、热门排行和分页列表。
+- 首页：继续阅读、最新更新、重点更新和来源提供的其他重点分区。
+- 探索：统一搜索框、分类入口、分类排序、周热门排行和分页列表。
 - Comic 详情：封面、标题、作者、标签、简介、收藏按钮、继续阅读、章节列表。
 - 收藏：服务器持久化，默认按最近收藏排序。
 - 历史：最近阅读、页进度和继续阅读；支持删除单项及清空确认。
@@ -507,9 +547,11 @@ COMICLENS_CACHE_MAX_MB=5120
 
 ```text
 GET    /api/home/feed
-GET    /api/comics/search
+GET    /api/home/latest?page={page}
+GET    /api/comics/search?q={query}&page={page}
 GET    /api/comics/categories
-GET    /api/comics/list
+GET    /api/comics/categories/{category_id}?page={page}&order={latest|rating|views}
+GET    /api/comics/ranking?page={page}
 GET    /api/comics/{comic_id}
 GET    /api/comics/{comic_id}/chapters/{chapter_id}/manifest
 
@@ -542,6 +584,10 @@ POST   /api/auth/logout
 GET    /health
 ```
 
+`/api/home/feed` 分别返回重点更新和最新更新第一页，继续加载使用 `/api/home/latest`；`/api/comics/ranking` 固定返回 `period = "week"`，明确表示来源只提供周榜。四个分页列表接口都返回第 5.3 节的 `ComicListPage`，分类接口另回显实际 `order`，搜索接口回显规范化查询词。`page` 必须是大于等于 1 的整数，`order` 只能使用白名单值。
+
+目录响应中的上游封面 URL 先由后端校验并登记为封面缓存元数据，再转换成受控的 `/api/media/covers/{comic_id}`；这份媒体索引不等同于持久化全站目录，也不能作为陈旧目录结果返回。
+
 媒体 API 通过领域 ID 和受控 variant 查找数据库记录，不接受文件系统路径或任意远端 URL。
 
 ## 14. 错误处理
@@ -558,7 +604,9 @@ GET    /health
 
 ### 15.1 后端单元测试
 
-- Manga18fx 首页、搜索、分类、热门、详情和章节 fixture 解析。
+- Manga18fx 首页重点更新、最新更新、搜索、分类、周榜、详情和章节 fixture 解析。
+- 首页最新更新路径分页、搜索 query 分页、分类路径分页、三种分类排序、周榜 query 分页和分页状态解析。
+- 空搜索结果、空评分、重复分类、异常页面及站点结构变化的判定。
 - URL 规范化、ID 生成和 SSRF 防护。
 - ComicTranslator 长图切片、文本去重、坐标偏移和渲染。
 - 翻译指纹、设置掩码和任务状态机。
@@ -579,7 +627,7 @@ GET    /health
 
 ### 15.3 前端测试
 
-- 查询参数、分页和领域 DTO 映射。
+- 首页最新更新、搜索词、分类排序、四类分页契约和领域 DTO 映射。
 - 实时翻译默认值与会话覆盖。
 - 状态轮询、稳定图片 key 和滚动位置保持。
 - 失败卡、重复重试点击和整话重译确认。
@@ -590,7 +638,7 @@ GET    /health
 
 1. 未配置密码时直接进入首页。
 2. 配置密码时登录后才能访问 API 和图片。
-3. 浏览首页、搜索、分类、热门、详情和章节。
+3. 浏览首页最新更新并继续加载；执行搜索并翻页；切换分类的最新、评分、浏览量排序；浏览周榜并翻页；进入详情和章节。
 4. 开启翻译，看到原图先出现、译图逐张替换。
 5. 关闭翻译，立即回原图，当前源图片结束后停止。
 6. 再次开启，从缓存和下一张未完成图片续接。
@@ -603,6 +651,7 @@ GET    /health
 - 所有业务代码中的泛化领域名称均为 `comic`。
 - 一个 Docker 容器可启动前后端，持久卷只需挂载 `/app/data`。
 - 不配置访问密码时无登录流程；配置后业务资源无法绕过会话访问。
+- 首页最新更新、搜索、分类三种排序和周榜分页均使用第 5.2 节验证过的真实上游路径，且解析结果符合第 5.3 节 DTO。
 - 目录不写入全站索引，行为符合实时请求 + React Query 缓存边界。
 - 翻译、停止、续接、整话重译、单图重试和长图处理符合本规格。
 - 缓存没有时间 TTL；只有超过默认 5 GB 才按规则淘汰。
