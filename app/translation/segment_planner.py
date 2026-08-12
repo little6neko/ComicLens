@@ -88,6 +88,30 @@ class SegmentPlanner:
                 verify_image=True,
             )
             if original is None:
+                resolved_source_url = source_url
+                planned_page_index = page_index
+
+                async def load_source_page(
+                    target_page_index: int = planned_page_index,
+                ) -> tuple[bytes, str]:
+                    nonlocal resolved_source_url
+                    try:
+                        return await self.source.fetch_media(resolved_source_url)
+                    except Exception:
+                        refreshed = await self.source.chapter(comic_id, chapter_id)
+                        replacement = next(
+                            (
+                                item.source_url
+                                for item in refreshed.pages
+                                if item.index == target_page_index
+                            ),
+                            None,
+                        )
+                        if not replacement or replacement == resolved_source_url:
+                            raise
+                        resolved_source_url = replacement
+                        return await self.source.fetch_media(resolved_source_url)
+
                 original = await self.cache.get_or_create(
                     bundle_key=bundle_key,
                     bundle_kind="chapter",
@@ -95,9 +119,10 @@ class SegmentPlanner:
                     chapter_id=chapter_id,
                     relative_path=relative_path,
                     entry_kind="original",
-                    loader=lambda url=source_url: self.source.fetch_media(url),
+                    loader=load_source_page,
                     protect=True,
                 )
+                source_url = resolved_source_url
 
             image, normalized = await asyncio.to_thread(sanitize_image, original.content)
             normalized_media = self.cache.put_bytes(

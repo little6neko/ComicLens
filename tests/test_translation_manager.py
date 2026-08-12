@@ -49,6 +49,8 @@ class FakeTranslationSource:
         self.page_count = page_count
         self.image_size = image_size
         self.media_calls: list[str] = []
+        self.replacement_urls: dict[int, str] = {}
+        self.expired_urls: set[str] = set()
 
     async def chapter(self, comic_id: str, chapter_id: str) -> SourceChapterManifest:
         return SourceChapterManifest(
@@ -58,7 +60,10 @@ class FakeTranslationSource:
             pages=[
                 SourcePage(
                     index=index,
-                    source_url=f"https://img01.manga18fx.com/{index}.png",
+                    source_url=self.replacement_urls.get(
+                        index,
+                        f"https://img01.manga18fx.com/{index}.png",
+                    ),
                 )
                 for index in range(self.page_count)
             ],
@@ -66,6 +71,12 @@ class FakeTranslationSource:
 
     async def fetch_media(self, source_url: str) -> tuple[bytes, str]:
         self.media_calls.append(source_url)
+        if source_url in self.expired_urls:
+            raise httpx.HTTPStatusError(
+                "expired",
+                request=httpx.Request("GET", source_url),
+                response=httpx.Response(403),
+            )
         index = int(source_url.rsplit("/", 1)[1].split(".", 1)[0])
         return make_png((30 + index, 60, 90), self.image_size), "image/png"
 
@@ -368,6 +379,28 @@ async def test_long_page_has_exact_segment_total_before_first_ocr_and_publishes_
             3,
         ]
         assert harness.pipeline.ocr_calls == 4
+    finally:
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_preparation_refreshes_an_expired_frozen_source_url(tmp_path: Path) -> None:
+    harness = create_harness(tmp_path, page_count=1)
+    old_url = "https://img01.manga18fx.com/0.png"
+    fresh_url = "https://img02.manga18fx.com/fresh/0.png"
+    try:
+        await harness.manager._ensure_source_pages("alpha", "chapter-1")
+        harness.source.expired_urls.add(old_url)
+        harness.source.replacement_urls[0] = fresh_url
+
+        await harness.manager.start("alpha", "chapter-1")
+        await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
+
+        state = harness.manager.state("alpha", "chapter-1")
+        page = harness.repository.page(str(state.generation_id), 0)
+        assert page is not None
+        assert page["source_url"] == fresh_url
+        assert harness.source.media_calls[:2] == [old_url, fresh_url]
     finally:
         await harness.close()
 
