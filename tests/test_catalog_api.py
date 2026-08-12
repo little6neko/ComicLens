@@ -324,6 +324,11 @@ def test_translation_api_polls_manifest_and_serves_immutable_version(
                     "action": "replace",
                     "value": "https://ocr.example/api",
                 },
+                "ocrToken": {
+                    "action": "replace",
+                    "value": "test-ocr-token",
+                },
+                "translationService": "deeplx",
                 "deeplxUrl": {
                     "action": "replace",
                     "value": "https://translate.example/api",

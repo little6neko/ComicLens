@@ -5,6 +5,7 @@ import io
 from dataclasses import dataclass
 from pathlib import Path
 
+import httpx
 import pytest
 from PIL import Image
 
@@ -19,6 +20,15 @@ from app.security.secrets import SecretCipher
 from app.translation.manager import TranslationManager
 from app.translation.models import TextBlock
 from app.translation.pipeline import OCROutput, RenderOutput, TranslationOutput
+from app.translation.translator import (
+    DeepLAuthenticationError,
+    DeepLClient,
+    DeepLQuotaExceededError,
+    DeepLRateLimitError,
+    DeepLXClient,
+    TranslationInputTooLargeError,
+    TranslationProtocolError,
+)
 
 
 def make_png(color: tuple[int, int, int]) -> bytes:
@@ -137,8 +147,9 @@ def create_harness(tmp_path: Path, *, page_count: int = 3) -> ManagerHarness:
         log_level="INFO",
         initial_settings={
             "ocr_api_url": "https://ocr.example/api",
+            "ocr_token": "test-ocr-token",
+            "translation_service": "deeplx",
             "deeplx_url": "https://translate.example/api",
-            "ocr_auth_mode": "none",
         },
     )
     config.ensure_directories()
@@ -297,3 +308,54 @@ async def test_interrupted_stage_recovers_to_paused_pending(tmp_path: Path) -> N
     )
     assert bundle is not None and bundle["active_task"] == 0
     await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_manager_selects_only_configured_semantic_translation_service(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path, page_count=1)
+    try:
+        runtime = harness.manager._runtime_settings(require_services=True)
+        deeplx_semantic, deeplx_fingerprint = harness.manager._semantic_settings(
+            {0: "https://img.example/0.png"},
+            runtime,
+        )
+        deeplx_pipeline = harness.manager._build_pipeline(deeplx_semantic, runtime)
+        assert isinstance(deeplx_pipeline.translator, DeepLXClient)
+
+        runtime.update(
+            {
+                "translation_service": "deepl",
+                "deepl_api_key": "test-key:fx",
+                "deeplx_url": "",
+            }
+        )
+        deepl_semantic, deepl_fingerprint = harness.manager._semantic_settings(
+            {0: "https://img.example/0.png"},
+            runtime,
+        )
+        deepl_pipeline = harness.manager._build_pipeline(deepl_semantic, runtime)
+        assert isinstance(deepl_pipeline.translator, DeepLClient)
+        assert deepl_semantic["translationService"] == "deepl"
+        assert deepl_semantic["targetLanguage"] == "ZH-HANS"
+        assert "ocrMode" not in deepl_semantic
+        assert deepl_fingerprint != deeplx_fingerprint
+    finally:
+        await harness.close()
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (DeepLAuthenticationError("auth"), "DEEPL_AUTH_ERROR"),
+        (DeepLQuotaExceededError("quota"), "DEEPL_QUOTA_EXCEEDED"),
+        (DeepLRateLimitError("rate"), "DEEPL_RATE_LIMITED"),
+        (TranslationInputTooLargeError("large"), "TRANSLATION_INPUT_TOO_LARGE"),
+        (TranslationProtocolError("protocol"), "TRANSLATION_PROTOCOL_ERROR"),
+        (httpx.ConnectError("network"), "TRANSLATION_NETWORK_ERROR"),
+        (httpx.ReadTimeout("timeout"), "TRANSLATION_TIMEOUT"),
+    ],
+)
+def test_manager_classifies_translation_errors(error: Exception, code: str) -> None:
+    assert TranslationManager._classify_error("translating", error)[0] == code

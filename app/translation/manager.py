@@ -30,9 +30,17 @@ from app.translation.image_renderer import (
     sanitize_image,
 )
 from app.translation.models import TextBlock
-from app.translation.ocr import OCRClient
+from app.translation.ocr import OCRClient, OCRJobFailedError, OCRProtocolError
 from app.translation.pipeline import ImageTranslationPipeline, PipelineSettings
-from app.translation.translator import DeepLXClient
+from app.translation.translator import (
+    DeepLAuthenticationError,
+    DeepLClient,
+    DeepLQuotaExceededError,
+    DeepLRateLimitError,
+    DeepLXClient,
+    TranslationInputTooLargeError,
+    TranslationProtocolError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -399,7 +407,12 @@ class TranslationManager:
         comic_id = str(generation["comic_id"])
         chapter_id = str(generation["chapter_id"])
         semantic = self.repository.decode_semantic_settings(generation)
-        runtime = self._runtime_settings(require_services=True)
+        runtime = self._runtime_settings(
+            require_services=True,
+            translation_service=(
+                str(semantic["translationService"]) if semantic.get("translationService") else None
+            ),
+        )
         pipeline = self._pipeline_factory(semantic, runtime)
 
         while True:
@@ -687,11 +700,36 @@ class TranslationManager:
             raise AppError("CHAPTER_EMPTY", "章节没有可翻译的源图片", 502, True)
         return pages
 
-    def _runtime_settings(self, *, require_services: bool) -> dict[str, Any]:
+    def _runtime_settings(
+        self,
+        *,
+        require_services: bool,
+        translation_service: str | None = None,
+    ) -> dict[str, Any]:
         values = self.settings.values(include_secrets=True)
         if require_services:
             if not str(values.get("ocr_api_url") or "").strip():
                 raise AppError("OCR_NOT_CONFIGURED", "请先在设置中配置 OCR 接口", 409, False)
+            if not str(values.get("ocr_token") or "").strip():
+                raise AppError("OCR_AUTH_NOT_CONFIGURED", "请先配置 OCR Token", 409, False)
+            self._require_translation_service(
+                values,
+                translation_service or str(values.get("translation_service") or "deepl"),
+            )
+        return values
+
+    @staticmethod
+    def _require_translation_service(values: dict[str, Any], service: str) -> None:
+        if service == "deepl":
+            if not str(values.get("deepl_api_key") or "").strip():
+                raise AppError(
+                    "TRANSLATOR_NOT_CONFIGURED",
+                    "请先在设置中配置 DeepL API Key",
+                    409,
+                    False,
+                )
+            return
+        if service == "deeplx":
             if not str(values.get("deeplx_url") or "").strip():
                 raise AppError(
                     "TRANSLATOR_NOT_CONFIGURED",
@@ -699,19 +737,8 @@ class TranslationManager:
                     409,
                     False,
                 )
-            auth_mode = str(values.get("ocr_auth_mode") or "none")
-            if auth_mode == "bearer" and not values.get("ocr_token"):
-                raise AppError("OCR_AUTH_NOT_CONFIGURED", "请先配置 OCR Token", 409, False)
-            if auth_mode == "basic" and not (
-                values.get("ocr_basic_username") and values.get("ocr_basic_password")
-            ):
-                raise AppError(
-                    "OCR_AUTH_NOT_CONFIGURED",
-                    "请先配置 OCR Basic Auth",
-                    409,
-                    False,
-                )
-        return values
+            return
+        raise AppError("TRANSLATOR_INVALID", "翻译服务设置无效", 409, False)
 
     def _semantic_settings(
         self, source_pages: dict[int, str], runtime: dict[str, Any]
@@ -722,9 +749,9 @@ class TranslationManager:
                 for index, url in sorted(source_pages.items())
             ],
             "sourceLanguage": runtime["source_language"],
-            "targetLanguage": "ZH",
-            "ocrMode": runtime["ocr_mode"],
+            "targetLanguage": "ZH-HANS",
             "ocrModel": runtime["ocr_model"],
+            "translationService": runtime["translation_service"],
             "longImageThreshold": runtime["long_image_threshold"],
             "ocrSliceHeight": runtime["ocr_slice_height"],
             "ocrSliceOverlap": runtime["ocr_slice_overlap"],
@@ -747,22 +774,28 @@ class TranslationManager:
             self._http_client,
             str(runtime["ocr_api_url"]),
             token=str(runtime.get("ocr_token") or ""),
-            auth_mode=str(runtime.get("ocr_auth_mode") or "none"),
-            basic_username=str(runtime.get("ocr_basic_username") or ""),
-            basic_password=str(runtime.get("ocr_basic_password") or ""),
-            mode=str(semantic.get("ocrMode") or "auto"),
-            job_model=str(semantic.get("ocrModel") or "PaddleOCR-VL-1.5"),
+            job_model=str(semantic.get("ocrModel") or "PaddleOCR-VL-1.6"),
             job_poll_interval=float(runtime["ocr_poll_interval_seconds"]),
             job_timeout=float(runtime["ocr_timeout_seconds"]),
             concurrency=int(runtime["ocr_concurrency"]),
             request_timeout=float(runtime["ocr_timeout_seconds"]),
         )
-        translator = DeepLXClient(
-            self._http_client,
-            str(runtime["deeplx_url"]),
-            concurrency=int(runtime["translation_concurrency"]),
-            timeout=float(runtime["deeplx_timeout_seconds"]),
-        )
+        service = str(semantic.get("translationService") or runtime["translation_service"])
+        self._require_translation_service(runtime, service)
+        if service == "deepl":
+            translator = DeepLClient(
+                self._http_client,
+                str(runtime["deepl_api_key"]),
+                concurrency=int(runtime["translation_concurrency"]),
+                timeout=float(runtime["translation_timeout_seconds"]),
+            )
+        else:
+            translator = DeepLXClient(
+                self._http_client,
+                str(runtime["deeplx_url"]),
+                concurrency=int(runtime["translation_concurrency"]),
+                timeout=float(runtime["translation_timeout_seconds"]),
+            )
         return ImageTranslationPipeline(
             ocr,
             translator,
@@ -812,6 +845,20 @@ class TranslationManager:
             return f"{stage_name.upper()}_TIMEOUT", f"{stage_name} 接口超时"
         if isinstance(error, AppError):
             return error.code, error.message
+        if isinstance(error, OCRJobFailedError):
+            return "OCR_JOB_FAILED", str(error)
+        if isinstance(error, OCRProtocolError):
+            return "OCR_PROTOCOL_ERROR", str(error)
+        if isinstance(error, DeepLAuthenticationError):
+            return "DEEPL_AUTH_ERROR", "DeepL API Key 无效或没有访问权限"
+        if isinstance(error, DeepLQuotaExceededError):
+            return "DEEPL_QUOTA_EXCEEDED", "DeepL API 配额已用尽"
+        if isinstance(error, DeepLRateLimitError):
+            return "DEEPL_RATE_LIMITED", "DeepL API 请求过于频繁"
+        if isinstance(error, TranslationInputTooLargeError):
+            return "TRANSLATION_INPUT_TOO_LARGE", str(error)
+        if isinstance(error, TranslationProtocolError):
+            return "TRANSLATION_PROTOCOL_ERROR", str(error)
         if isinstance(error, httpx.HTTPStatusError):
             return (
                 f"{stage_name.upper()}_HTTP_ERROR",

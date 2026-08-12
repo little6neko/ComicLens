@@ -28,12 +28,16 @@ class OCRBackend(Protocol):
 
 
 class TranslatorBackend(Protocol):
-    async def translate(self, text: str, source_lang: str = "EN") -> str | None: ...
+    async def translate_many(
+        self,
+        texts: list[str],
+        source_lang: str = "AUTO",
+    ) -> list[str | None]: ...
 
 
 @dataclass(frozen=True, slots=True)
 class PipelineSettings:
-    source_language: str = "EN"
+    source_language: str = "AUTO"
     long_image_threshold: int = 2800
     long_image_aspect_ratio: float = 2.6
     ocr_slice_height: int = 2200
@@ -140,12 +144,12 @@ class ImageTranslationPipeline:
         )
 
     async def translate_blocks(self, blocks: list[TextBlock]) -> TranslationOutput:
-        async def translate_one(block: TextBlock) -> str | None:
-            return await self.translator.translate(
-                block.text, source_lang=self.settings.source_language
-            )
-
-        translations = await asyncio.gather(*(translate_one(block) for block in blocks))
+        translations = await self.translator.translate_many(
+            [block.text for block in blocks],
+            source_lang=self.settings.source_language,
+        )
+        if len(translations) != len(blocks):
+            raise ValueError("翻译结果数量与 OCR 文本块不一致")
         translated_count = 0
         for block, translated in zip(blocks, translations, strict=True):
             if translated:

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import math
 import re
@@ -42,17 +41,21 @@ BOX_KEYS = (
 )
 
 
+class OCRProtocolError(ValueError):
+    """Raised when the cloud OCR service returns an unusable response."""
+
+
+class OCRJobFailedError(ValueError):
+    """Raised when the cloud OCR service reports a failed job."""
+
+
 class OCRClient:
     def __init__(
         self,
         client: httpx.AsyncClient,
         api_url: str,
         token: str = "",
-        auth_mode: str = "bearer",
-        basic_username: str = "",
-        basic_password: str = "",
-        mode: str = "auto",
-        job_model: str = "PaddleOCR-VL-1.5",
+        job_model: str = "PaddleOCR-VL-1.6",
         job_poll_interval: float = 2.0,
         job_timeout: float = 180.0,
         concurrency: int = 1,
@@ -61,11 +64,7 @@ class OCRClient:
         self.client = client
         self.api_url = api_url.rstrip("/")
         self.token = token.strip()
-        self.auth_mode = (auth_mode or "none").strip().lower()
-        self.basic_username = basic_username
-        self.basic_password = basic_password
-        self.mode = (mode or "auto").strip().lower()
-        self.job_model = job_model.strip() or "PaddleOCR-VL-1.5"
+        self.job_model = job_model.strip() or "PaddleOCR-VL-1.6"
         self.job_poll_interval = max(0.2, job_poll_interval)
         self.job_timeout = max(self.job_poll_interval, job_timeout)
         self.concurrency = max(1, concurrency)
@@ -74,38 +73,7 @@ class OCRClient:
 
     async def analyze_image(self, image_bytes: bytes) -> dict[str, Any]:
         async with self.semaphore:
-            if self._uses_async_jobs():
-                return await self._analyze_image_by_job(image_bytes)
-            return await self._analyze_image_direct(image_bytes)
-
-    def _uses_async_jobs(self) -> bool:
-        if self.mode == "job":
-            return True
-        if self.mode == "direct":
-            return False
-        return "/api/v2/ocr/jobs" in self.api_url or self.api_url.endswith("/ocr/jobs")
-
-    async def _analyze_image_direct(self, image_bytes: bytes) -> dict[str, Any]:
-        headers, auth = self._build_request_auth()
-        headers["Content-Type"] = "application/json"
-        payload = {
-            "file": base64.b64encode(image_bytes).decode("ascii"),
-            "fileType": 1,
-            "useDocOrientationClassify": False,
-            "useDocUnwarping": False,
-            "useChartRecognition": False,
-        }
-        response = await self._request(
-            "POST",
-            self.api_url,
-            json=payload,
-            headers=headers,
-            auth=auth,
-        )
-        data = response.json()
-        if not isinstance(data, dict) or "result" not in data:
-            raise ValueError("OCR 返回格式异常，缺少 result")
-        return data
+            return await self._analyze_image_by_job(image_bytes)
 
     async def _analyze_image_by_job(self, image_bytes: bytes) -> dict[str, Any]:
         optional_payload = {
@@ -113,7 +81,7 @@ class OCRClient:
             "useDocUnwarping": False,
             "useChartRecognition": False,
         }
-        headers, auth = self._build_request_auth()
+        headers = self._request_headers()
         data = {
             "model": self.job_model,
             "optionalPayload": json.dumps(optional_payload, ensure_ascii=False),
@@ -125,90 +93,86 @@ class OCRClient:
             headers=headers,
             data=data,
             files=files,
-            auth=auth,
         )
-        submit_payload = submit_response.json()
-        job_id = (
-            submit_payload.get("data", {}).get("jobId")
-            if isinstance(submit_payload, dict)
-            else None
-        )
+        submit_payload = self._response_object(submit_response, "OCR 异步任务提交响应")
+        submit_data = submit_payload.get("data")
+        job_id = submit_data.get("jobId") if isinstance(submit_data, dict) else None
         if not job_id:
-            raise ValueError("OCR 异步任务提交失败，缺少 jobId")
+            raise OCRProtocolError("OCR 异步任务提交响应缺少 jobId")
 
         deadline = time.monotonic() + self.job_timeout
         result_url: str | None = None
         job_url = f"{self.api_url}/{job_id}"
         while time.monotonic() < deadline:
-            job_response = await self._request("GET", job_url, headers=headers, auth=auth)
-            response_payload = job_response.json()
-            payload = response_payload.get("data", {}) if isinstance(response_payload, dict) else {}
+            job_response = await self._request("GET", job_url, headers=headers)
+            response_payload = self._response_object(job_response, "OCR 异步任务状态响应")
+            payload = response_payload.get("data")
+            if not isinstance(payload, dict):
+                raise OCRProtocolError("OCR 异步任务状态响应缺少 data")
             state = str(payload.get("state") or "").lower()
             if state == "done":
                 result_urls = payload.get("resultUrl", {})
                 if isinstance(result_urls, dict):
                     candidate = result_urls.get("jsonUrl")
                     result_url = str(candidate) if candidate else None
+                if not result_url:
+                    raise OCRProtocolError("OCR 异步任务结果缺少 jsonUrl")
                 break
             if state == "failed":
-                raise ValueError(str(payload.get("errorMsg") or "OCR 异步任务失败"))
+                raise OCRJobFailedError(str(payload.get("errorMsg") or "OCR 异步任务失败"))
+            if state not in {"pending", "running"}:
+                raise OCRProtocolError(f"OCR 异步任务状态无效: {state or 'missing'}")
             await asyncio.sleep(self.job_poll_interval)
 
         if not result_url:
             raise TimeoutError("OCR 异步任务超时")
         self._validate_result_url(result_url)
-        result_auth = auth if self._should_send_basic_auth(result_url) else None
-        result_response = await self._request("GET", result_url, auth=result_auth)
-        entries = [json.loads(line) for line in result_response.text.splitlines() if line.strip()]
+        result_response = await self._request("GET", result_url)
+        entries: list[dict[str, Any]] = []
+        for line_number, line in enumerate(result_response.text.splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise OCRProtocolError(f"OCR JSONL 第 {line_number} 行格式异常") from exc
+            if not isinstance(entry, dict):
+                raise OCRProtocolError(f"OCR JSONL 第 {line_number} 行不是对象")
+            entries.append(entry)
         if not entries:
-            raise ValueError("OCR 异步任务结果为空")
-        if len(entries) == 1:
-            if not isinstance(entries[0], dict):
-                raise ValueError("OCR 异步任务结果格式异常")
-            return entries[0]
+            raise OCRProtocolError("OCR 异步任务结果为空")
 
         layout_results: list[object] = []
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            root = entry.get("result", entry)
-            item_results = root.get("layoutParsingResults") if isinstance(root, dict) else None
-            if isinstance(item_results, list):
-                layout_results.extend(item_results)
-        if layout_results:
-            return {"result": {"layoutParsingResults": layout_results}}
-        if not isinstance(entries[0], dict):
-            raise ValueError("OCR 异步任务结果格式异常")
-        return entries[0]
+        for line_number, entry in enumerate(entries, start=1):
+            root = entry.get("result")
+            if not isinstance(root, dict):
+                raise OCRProtocolError(f"OCR JSONL 第 {line_number} 行缺少 result")
+            item_results = root.get("layoutParsingResults")
+            if not isinstance(item_results, list):
+                raise OCRProtocolError(f"OCR JSONL 第 {line_number} 行缺少 layoutParsingResults")
+            layout_results.extend(item_results)
+        return {"result": {"layoutParsingResults": layout_results}}
 
-    def _build_request_auth(
-        self,
-    ) -> tuple[dict[str, str], httpx.BasicAuth | None]:
-        if self.auth_mode == "none":
-            return {}, None
-        if self.auth_mode == "basic":
-            if not self.basic_username or not self.basic_password:
-                raise ValueError("OCR Basic Auth 缺少用户名或密码")
-            return {}, httpx.BasicAuth(self.basic_username, self.basic_password)
-        if self.auth_mode in {"bearer", "token"}:
-            if not self.token:
-                raise ValueError("OCR Token 不能为空")
-            scheme = "Bearer" if self.auth_mode == "bearer" else "token"
-            return {"Authorization": f"{scheme} {self.token}"}, None
-        raise ValueError("OCR 认证模式无效")
+    def _request_headers(self) -> dict[str, str]:
+        if not self.token:
+            raise ValueError("OCR Token 不能为空")
+        return {"Authorization": f"Bearer {self.token}"}
 
-    def _should_send_basic_auth(self, target_url: str) -> bool:
-        if self.auth_mode != "basic":
-            return False
-        api_parts = urlparse(self.api_url)
-        target_parts = urlparse(target_url)
-        return api_parts.scheme == target_parts.scheme and api_parts.netloc == target_parts.netloc
+    @staticmethod
+    def _response_object(response: httpx.Response, context: str) -> dict[str, Any]:
+        try:
+            payload = response.json()
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise OCRProtocolError(f"{context}不是有效 JSON") from exc
+        if not isinstance(payload, dict):
+            raise OCRProtocolError(f"{context}不是对象")
+        return payload
 
     @staticmethod
     def _validate_result_url(target_url: str) -> None:
         parsed = urlparse(target_url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise ValueError("OCR 结果地址无效")
+            raise OCRProtocolError("OCR 结果地址无效")
 
     async def _request(
         self,

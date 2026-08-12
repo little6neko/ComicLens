@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 from typing import Any
 
 import httpx
@@ -14,9 +15,20 @@ from app.translation.image_segments import (
     shift_text_blocks,
 )
 from app.translation.models import TextBlock
-from app.translation.ocr import OCRClient, extract_text_blocks
+from app.translation.ocr import OCRClient, OCRProtocolError, extract_text_blocks
 from app.translation.pipeline import ImageTranslationPipeline, PipelineSettings
-from app.translation.translator import DeepLXClient
+from app.translation.translator import (
+    DEEPL_FREE_URL,
+    DEEPL_MAX_REQUEST_BYTES,
+    DEEPL_PRO_URL,
+    DeepLAuthenticationError,
+    DeepLClient,
+    DeepLQuotaExceededError,
+    DeepLRateLimitError,
+    DeepLXClient,
+    TranslationInputTooLargeError,
+    TranslationProtocolError,
+)
 
 
 def image_bytes(width: int, height: int) -> bytes:
@@ -40,11 +52,11 @@ class FakeOCR:
 
 class FakeTranslator:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, str]] = []
+        self.calls: list[tuple[list[str], str]] = []
 
-    async def translate(self, text: str, source_lang: str = "EN") -> str:
-        self.calls.append((text, source_lang))
-        return f"ZH:{text}"
+    async def translate_many(self, texts: list[str], source_lang: str = "AUTO") -> list[str]:
+        self.calls.append((texts, source_lang))
+        return [f"ZH:{text}" for text in texts]
 
 
 def test_slice_planning_preserves_overlap_and_full_image_boundary() -> None:
@@ -150,47 +162,113 @@ def test_renderer_sanitizes_and_changes_only_translated_canvas() -> None:
 
 
 @pytest.mark.asyncio
-async def test_direct_ocr_and_deeplx_clients_preserve_request_contracts() -> None:
+async def test_async_ocr_submits_polls_merges_jsonl_and_isolates_token() -> None:
     requests: list[httpx.Request] = []
+    poll_count = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal poll_count
         requests.append(request)
-        if request.url.path == "/ocr":
+        if request.url.path == "/jobs":
+            return httpx.Response(200, json={"data": {"jobId": "job-1"}}, request=request)
+        if request.url.path == "/jobs/job-1":
+            poll_count += 1
+            if poll_count == 1:
+                return httpx.Response(200, json={"data": {"state": "running"}}, request=request)
             return httpx.Response(
                 200,
-                json={"result": {"layoutParsingResults": []}},
+                json={
+                    "data": {
+                        "state": "done",
+                        "resultUrl": {"jsonUrl": "https://files.example/result.jsonl"},
+                    }
+                },
                 request=request,
             )
-        return httpx.Response(200, json={"data": "你好"}, request=request)
+        return httpx.Response(
+            200,
+            text=(
+                '{"result":{"layoutParsingResults":[{"text":"one","bbox":[1,1,2,2]}]}}\n'
+                '{"result":{"layoutParsingResults":[{"text":"two","bbox":[2,2,3,3]}]}}\n'
+            ),
+            request=request,
+        )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         ocr = OCRClient(
             client,
-            "https://service.example/ocr",
+            "https://ocr.example/jobs",
             token="secret",
-            auth_mode="bearer",
-            mode="direct",
+            job_model="PaddleOCR-VL-1.6",
+            job_poll_interval=0.2,
             request_timeout=7,
         )
-        translator = DeepLXClient(client, "https://service.example/translate", timeout=11)
         ocr_result = await ocr.analyze_image(image_bytes(20, 20))
-        translated = await translator.translate("Hello", "EN")
 
-    assert "result" in ocr_result
-    assert translated == "你好"
+    assert len(ocr_result["result"]["layoutParsingResults"]) == 2
+    assert len(requests) == 4
     assert requests[0].headers["authorization"] == "Bearer secret"
-    assert b'"fileType":1' in requests[0].content
+    assert b'name="model"' in requests[0].content
+    assert b"PaddleOCR-VL-1.6" in requests[0].content
+    assert b'name="optionalPayload"' in requests[0].content
+    assert b'name="file"; filename="image.png"' in requests[0].content
     assert requests[0].extensions["timeout"]["read"] == 7
-    assert requests[1].read().decode() == ('{"text":"Hello","source_lang":"EN","target_lang":"ZH"}')
-    assert requests[1].extensions["timeout"]["read"] == 11
+    assert requests[1].headers["authorization"] == "Bearer secret"
+    assert requests[2].headers["authorization"] == "Bearer secret"
+    assert "authorization" not in requests[3].headers
 
 
 @pytest.mark.asyncio
-async def test_job_ocr_does_not_leak_basic_auth_to_external_result() -> None:
-    requests: list[httpx.Request] = []
-
+@pytest.mark.parametrize(
+    ("state", "payload", "message"),
+    [
+        ("failed", {"errorMsg": "cloud rejected image"}, "cloud rejected image"),
+        ("mystery", {}, "状态无效"),
+        ("done", {"resultUrl": {}}, "缺少 jsonUrl"),
+    ],
+)
+async def test_async_ocr_rejects_failed_or_invalid_job_states(
+    state: str,
+    payload: dict[str, object],
+    message: str,
+) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
+        if request.url.path == "/jobs":
+            return httpx.Response(200, json={"data": {"jobId": "job-1"}}, request=request)
+        return httpx.Response(
+            200,
+            json={"data": {"state": state, **payload}},
+            request=request,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        ocr = OCRClient(client, "https://ocr.example/jobs", token="secret")
+        with pytest.raises(ValueError, match=message):
+            await ocr.analyze_image(image_bytes(20, 20))
+
+
+@pytest.mark.asyncio
+async def test_async_ocr_times_out_while_job_remains_pending() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/jobs":
+            return httpx.Response(200, json={"data": {"jobId": "job-1"}}, request=request)
+        return httpx.Response(200, json={"data": {"state": "pending"}}, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        ocr = OCRClient(
+            client,
+            "https://ocr.example/jobs",
+            token="secret",
+            job_poll_interval=0.2,
+            job_timeout=0.2,
+        )
+        with pytest.raises(TimeoutError, match="OCR 异步任务超时"):
+            await ocr.analyze_image(image_bytes(20, 20))
+
+
+@pytest.mark.asyncio
+async def test_async_ocr_rejects_invalid_jsonl() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/jobs":
             return httpx.Response(200, json={"data": {"jobId": "job-1"}}, request=request)
         if request.url.path == "/jobs/job-1":
@@ -204,24 +282,145 @@ async def test_job_ocr_does_not_leak_basic_auth_to_external_result() -> None:
                 },
                 request=request,
             )
+        return httpx.Response(200, text="not-json", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        ocr = OCRClient(client, "https://ocr.example/jobs", token="secret")
+        with pytest.raises(OCRProtocolError, match="JSONL"):
+            await ocr.analyze_image(image_bytes(20, 20))
+
+
+@pytest.mark.asyncio
+async def test_deepl_selects_free_or_pro_and_maps_languages() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        payload = json.loads(request.read())
+        count = len(payload["text"])
         return httpx.Response(
             200,
-            text='{"result":{"layoutParsingResults":[]}}\n',
+            json={"translations": [{"text": f"translated-{index}"} for index in range(count)]},
             request=request,
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        ocr = OCRClient(
-            client,
-            "https://ocr.example/jobs",
-            auth_mode="basic",
-            basic_username="user",
-            basic_password="password",
-            mode="job",
-            job_poll_interval=0.2,
-        )
-        await ocr.analyze_image(image_bytes(20, 20))
+        free = DeepLClient(client, "free-key:fx")
+        pro = DeepLClient(client, "pro-key")
+        free_result = await free.translate_many(["source-0", "", "source-1"], "AUTO")
+        pro_result = await pro.translate_many(["source-0"], "KO")
 
-    assert requests[0].headers.get("authorization", "").startswith("Basic ")
-    assert requests[1].headers.get("authorization", "").startswith("Basic ")
-    assert "authorization" not in requests[2].headers
+    assert free.url == DEEPL_FREE_URL
+    assert pro.url == DEEPL_PRO_URL
+    assert free_result == ["translated-0", "", "translated-1"]
+    assert pro_result == ["translated-0"]
+    assert requests[0].headers["authorization"] == "DeepL-Auth-Key free-key:fx"
+    assert requests[0].url.host == "api-free.deepl.com"
+    assert requests[0].read().decode() == (
+        '{"text":["source-0","source-1"],"target_lang":"ZH-HANS"}'
+    )
+    assert requests[1].url.host == "api.deepl.com"
+    assert '"source_lang":"KO"' in requests[1].read().decode()
+
+
+@pytest.mark.asyncio
+async def test_deepl_batches_by_count_and_preserves_result_order() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        texts = json.loads(request.read())["text"]
+        return httpx.Response(
+            200,
+            json={"translations": [{"text": f"ZH:{text}"} for text in texts]},
+            request=request,
+        )
+
+    texts = [f"line-{index}" for index in range(101)]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        translations = await DeepLClient(client, "pro-key", concurrency=3).translate_many(
+            texts, "EN"
+        )
+
+    assert len(requests) == 3
+    assert translations == [f"ZH:{text}" for text in texts]
+    assert all(len(request.content) < DEEPL_MAX_REQUEST_BYTES for request in requests)
+
+
+@pytest.mark.asyncio
+async def test_deepl_batches_by_serialized_request_size() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        texts = json.loads(request.read())["text"]
+        return httpx.Response(
+            200,
+            json={"translations": [{"text": text[:1]} for text in texts]},
+            request=request,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        translated = await DeepLClient(client, "pro-key").translate_many(
+            ["x" * 70_000, "y" * 70_000],
+            "EN",
+        )
+
+    assert translated == ["x", "y"]
+    assert len(requests) == 2
+    assert all(len(request.content) < DEEPL_MAX_REQUEST_BYTES for request in requests)
+
+
+@pytest.mark.asyncio
+async def test_deepl_rejects_oversized_text_and_malformed_response() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"translations": []}, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        translator = DeepLClient(client, "pro-key")
+        with pytest.raises(TranslationInputTooLargeError):
+            await translator.translate_many(["x" * DEEPL_MAX_REQUEST_BYTES], "EN")
+        with pytest.raises(TranslationProtocolError, match="数量"):
+            await translator.translate_many(["hello"], "EN")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "error_type"),
+    [
+        (403, DeepLAuthenticationError),
+        (456, DeepLQuotaExceededError),
+        (429, DeepLRateLimitError),
+    ],
+)
+async def test_deepl_classifies_service_statuses(
+    status: int,
+    error_type: type[ValueError],
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        translator = DeepLClient(client, "pro-key")
+        with pytest.raises(error_type):
+            await translator.translate_many(["hello"], "AUTO")
+
+
+@pytest.mark.asyncio
+async def test_deeplx_translates_each_text_and_maps_auto_language() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"data": "你好"}, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        translator = DeepLXClient(client, "https://service.example/translate", timeout=11)
+        translated = await translator.translate_many(["Hello", "World"], "AUTO")
+
+    assert translated == ["你好", "你好"]
+    assert len(requests) == 2
+    assert requests[0].read().decode() == (
+        '{"text":"Hello","source_lang":"auto","target_lang":"ZH"}'
+    )
+    assert requests[0].extensions["timeout"]["read"] == 11
