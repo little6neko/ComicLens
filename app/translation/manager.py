@@ -489,11 +489,8 @@ class TranslationManager:
                 self.cache.set_chapter_active(comic_id, chapter_id, True)
                 try:
                     if not bool(generation["planning_complete"]):
-                        self.repository.set_generation_status(
-                            generation_id,
-                            "preparing",
-                            stop_requested=False,
-                        )
+                        if not self.repository.begin_preparing(generation_id):
+                            continue
                         prepared = await self._prepare_generation(generation_id)
                         if not prepared:
                             self.repository.set_generation_status(
@@ -502,11 +499,18 @@ class TranslationManager:
                                 stop_requested=False,
                             )
                             continue
-                    self.repository.set_generation_status(
-                        generation_id,
-                        "running",
-                        stop_requested=False,
-                    )
+                        prepared_generation = self.repository.generation(generation_id)
+                        if prepared_generation is None:
+                            continue
+                        if bool(prepared_generation["stop_requested"]):
+                            self.repository.set_generation_status(
+                                generation_id,
+                                "paused",
+                                stop_requested=False,
+                            )
+                            continue
+                    if not self.repository.begin_running(generation_id):
+                        continue
                     await self._run_generation(generation_id)
                 except asyncio.CancelledError:
                     raise

@@ -300,6 +300,47 @@ def test_repository_commits_segment_plan_and_publishes_atomic_layer(tmp_path: Pa
         harness.database.close()
 
 
+def test_pause_wins_race_with_preparation_and_running_transitions(tmp_path: Path) -> None:
+    harness = create_harness(tmp_path, page_count=1)
+    try:
+        generation_id = harness.repository.create_generation(
+            "alpha",
+            "chapter-1",
+            semantic_fingerprint="pause-race",
+            semantic_settings={"pipelineVersion": "progressive-segment-v1"},
+            page_indexes=[0],
+            source_pages={0: "https://img.example/0.png"},
+            kind="normal",
+            progressive=True,
+        )
+        harness.repository.request_stop(generation_id)
+        assert harness.repository.begin_preparing(generation_id) is False
+
+        harness.repository.resume(generation_id)
+        harness.repository.commit_segment_plan(
+            generation_id,
+            [
+                {
+                    "page_index": 0,
+                    "segment_index": 0,
+                    "global_index": 0,
+                    "source_width": 120,
+                    "source_height": 180,
+                    "display_top": 0,
+                    "display_bottom": 180,
+                    "ocr_top": 0,
+                    "ocr_bottom": 180,
+                    "ocr_input_path": "segments/0.png",
+                }
+            ],
+        )
+        harness.repository.request_stop(generation_id)
+        assert harness.repository.begin_running(generation_id) is False
+        assert harness.repository.generation(generation_id)["status"] == "paused"
+    finally:
+        harness.database.close()
+
+
 @pytest.mark.asyncio
 async def test_pause_finishes_current_segment_then_resumes_next(
     tmp_path: Path,

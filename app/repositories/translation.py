@@ -494,6 +494,34 @@ class TranslationRepository:
             tuple(parameters),
         )
 
+    def begin_preparing(self, generation_id: str) -> bool:
+        return bool(
+            self.database.execute(
+                """
+                UPDATE translation_generations SET status = 'preparing',
+                    current_page_index = NULL, current_segment_index = NULL,
+                    updated_at = ?
+                WHERE generation_id = ? AND status IN ('preparing', 'queued')
+                  AND stop_requested = 0
+                """,
+                (self._timestamp(), generation_id),
+            )
+        )
+
+    def begin_running(self, generation_id: str) -> bool:
+        return bool(
+            self.database.execute(
+                """
+                UPDATE translation_generations SET status = 'running',
+                    current_page_index = NULL, current_segment_index = NULL,
+                    updated_at = ?
+                WHERE generation_id = ? AND status IN ('preparing', 'queued')
+                  AND stop_requested = 0
+                """,
+                (self._timestamp(), generation_id),
+            )
+        )
+
     def request_stop(self, generation_id: str) -> str | None:
         row = self.generation(generation_id)
         if row is None:
