@@ -125,13 +125,15 @@ function TaskSummary({ task }: { task: TranslationTaskState | undefined }) {
     return <StatusLine loading>正在准备本话</StatusLine>;
   }
 
-  const total = task.totalSegments ?? task.totalPages;
-  const completed = task.completedSegments ?? task.completedPages;
-  const failed = task.failedSegments ?? task.failedPages;
-  const progress =
-    task.planningComplete || total > 0
-      ? `${completed} / ${total}${failed ? ` · ${failed} 失败` : ""}`
-      : "正在准备本话";
+  const progressiveTask = task.planningComplete !== undefined;
+  const total = progressiveTask ? task.totalSegments : task.totalPages;
+  const completed = progressiveTask ? task.completedSegments : task.completedPages;
+  const failed = progressiveTask ? task.failedSegments : task.failedPages;
+  const progress = task.planningComplete
+    ? `${completed} / ${total}${failed ? ` · ${failed} 失败` : ""}`
+    : progressiveTask
+      ? "正在准备本话"
+      : `${completed} / ${total}${failed ? ` · ${failed} 失败` : ""}`;
 
   if (task.status === "queued" || task.status === "running") {
     return <StatusLine loading>{progress}</StatusLine>;

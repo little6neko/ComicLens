@@ -124,8 +124,12 @@ function ReaderPageView() {
     return manifest.data.pages.map((page) => mergePage(page, taskPages.get(page.index)));
   }, [manifest.data, task.data?.pages]);
   const totalPages = effectivePages.length;
-  const clampedCurrent = clamp(currentPageIndex, 0, Math.max(0, totalPages - 1));
-  const completionPageIndex = Math.max(0, totalPages - (readingMode === "double" ? 2 : 1));
+  const rawCurrent = clamp(currentPageIndex, 0, Math.max(0, totalPages - 1));
+  const clampedCurrent = readingMode === "double" ? Math.floor(rawCurrent / 2) * 2 : rawCurrent;
+  const completionPageIndex =
+    readingMode === "double"
+      ? Math.floor(Math.max(0, totalPages - 1) / 2) * 2
+      : Math.max(0, totalPages - 1);
 
   useEffect(() => {
     if (initializedChapter.current === chapterKey || !manifest.isSuccess) return;
@@ -250,7 +254,8 @@ function ReaderPageView() {
   }
 
   function jumpToPage(index: number) {
-    const target = clamp(index, 0, Math.max(0, totalPages - 1));
+    const selected = clamp(index, 0, Math.max(0, totalPages - 1));
+    const target = readingMode === "double" ? Math.floor(selected / 2) * 2 : selected;
     setCurrentPageIndex(target);
     if (readingMode === "strip") pageElements.current.get(target)?.scrollIntoView();
   }
