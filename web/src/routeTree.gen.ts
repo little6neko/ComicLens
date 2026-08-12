@@ -19,6 +19,7 @@ import { Route as AppSettingsRouteImport } from './routes/_app/settings'
 import { Route as AppComicComicIdRouteImport } from './routes/_app/comic.$comicId'
 import { Route as AppExploreRankingRouteImport } from './routes/_app/explore_.ranking'
 import { Route as AppExploreSearchRouteImport } from './routes/_app/explore_.search'
+import { Route as ReaderComicIdChapterIdRouteImport } from './routes/reader.$comicId.$chapterId'
 import { Route as AppExploreCategoryCategoryIdRouteImport } from './routes/_app/explore_.category.$categoryId'
 
 const AppRoute = AppRouteImport.update({
@@ -70,6 +71,11 @@ const AppExploreSearchRoute = AppExploreSearchRouteImport.update({
   path: '/explore/search',
   getParentRoute: () => AppRoute,
 } as any)
+const ReaderComicIdChapterIdRoute = ReaderComicIdChapterIdRouteImport.update({
+  id: '/reader/$comicId/$chapterId',
+  path: '/reader/$comicId/$chapterId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AppExploreCategoryCategoryIdRoute =
   AppExploreCategoryCategoryIdRouteImport.update({
     id: '/explore_/category/$categoryId',
@@ -87,6 +93,7 @@ export interface FileRoutesByFullPath {
   '/comic/$comicId': typeof AppComicComicIdRoute
   '/explore/ranking': typeof AppExploreRankingRoute
   '/explore/search': typeof AppExploreSearchRoute
+  '/reader/$comicId/$chapterId': typeof ReaderComicIdChapterIdRoute
   '/explore/category/$categoryId': typeof AppExploreCategoryCategoryIdRoute
 }
 export interface FileRoutesByTo {
@@ -99,6 +106,7 @@ export interface FileRoutesByTo {
   '/comic/$comicId': typeof AppComicComicIdRoute
   '/explore/ranking': typeof AppExploreRankingRoute
   '/explore/search': typeof AppExploreSearchRoute
+  '/reader/$comicId/$chapterId': typeof ReaderComicIdChapterIdRoute
   '/explore/category/$categoryId': typeof AppExploreCategoryCategoryIdRoute
 }
 export interface FileRoutesById {
@@ -113,6 +121,7 @@ export interface FileRoutesById {
   '/_app/comic/$comicId': typeof AppComicComicIdRoute
   '/_app/explore_/ranking': typeof AppExploreRankingRoute
   '/_app/explore_/search': typeof AppExploreSearchRoute
+  '/reader/$comicId/$chapterId': typeof ReaderComicIdChapterIdRoute
   '/_app/explore_/category/$categoryId': typeof AppExploreCategoryCategoryIdRoute
 }
 export interface FileRouteTypes {
@@ -127,6 +136,7 @@ export interface FileRouteTypes {
     | '/comic/$comicId'
     | '/explore/ranking'
     | '/explore/search'
+    | '/reader/$comicId/$chapterId'
     | '/explore/category/$categoryId'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -139,6 +149,7 @@ export interface FileRouteTypes {
     | '/comic/$comicId'
     | '/explore/ranking'
     | '/explore/search'
+    | '/reader/$comicId/$chapterId'
     | '/explore/category/$categoryId'
   id:
     | '__root__'
@@ -152,12 +163,14 @@ export interface FileRouteTypes {
     | '/_app/comic/$comicId'
     | '/_app/explore_/ranking'
     | '/_app/explore_/search'
+    | '/reader/$comicId/$chapterId'
     | '/_app/explore_/category/$categoryId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   AppRoute: typeof AppRouteWithChildren
   LoginRoute: typeof LoginRoute
+  ReaderComicIdChapterIdRoute: typeof ReaderComicIdChapterIdRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -232,6 +245,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppExploreSearchRouteImport
       parentRoute: typeof AppRoute
     }
+    '/reader/$comicId/$chapterId': {
+      id: '/reader/$comicId/$chapterId'
+      path: '/reader/$comicId/$chapterId'
+      fullPath: '/reader/$comicId/$chapterId'
+      preLoaderRoute: typeof ReaderComicIdChapterIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/_app/explore_/category/$categoryId': {
       id: '/_app/explore_/category/$categoryId'
       path: '/explore/category/$categoryId'
@@ -271,6 +291,7 @@ const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)
 const rootRouteChildren: RootRouteChildren = {
   AppRoute: AppRouteWithChildren,
   LoginRoute: LoginRoute,
+  ReaderComicIdChapterIdRoute: ReaderComicIdChapterIdRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
