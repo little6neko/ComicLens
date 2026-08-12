@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.application.settings import SettingsService
 from app.config import AppConfig
+from app.domain.settings import ServerSettingsPatch
 from app.main import create_app
 from app.repositories.database import Database
 from app.security.secrets import SecretCipher
@@ -47,7 +49,7 @@ def test_database_runs_all_migrations_with_wal_and_foreign_keys(tmp_path: Path) 
     finally:
         database.close()
 
-    assert {row["version"] for row in versions} == {1, 2, 3, 4, 5}
+    assert {row["version"] for row in versions} == {1, 2, 3, 4, 5, 6}
     assert {
         "app_settings",
         "favorites",
@@ -59,9 +61,115 @@ def test_database_runs_all_migrations_with_wal_and_foreign_keys(tmp_path: Path) 
         "cache_bundles",
         "cache_entries",
         "media_sources",
+        "app_metadata",
     }.issubset(tables)
     assert journal_mode == "wal"
     assert foreign_keys == 1
+
+
+def test_new_settings_use_async_ocr_deepl_and_auto_language_defaults(tmp_path: Path) -> None:
+    with TestClient(create_app(config_for(tmp_path))) as client:
+        settings = client.get("/api/settings")
+
+    assert settings.status_code == 200
+    payload = settings.json()
+    assert payload["sourceLanguage"] == "AUTO"
+    assert payload["targetLanguage"] == "ZH-HANS"
+    assert payload["ocrApiUrl"]["configured"] is True
+    assert payload["ocrModel"] == "PaddleOCR-VL-1.6"
+    assert payload["ocrPollIntervalSeconds"] == 2.0
+    assert payload["ocrTimeoutSeconds"] == 180.0
+    assert payload["translationService"] == "deepl"
+    assert payload["deeplApiKey"] == {"configured": False, "masked": None}
+    assert payload["translationTimeoutSeconds"] == 30.0
+    assert "ocrMode" not in payload
+    assert "ocrAuthMode" not in payload
+    assert "ocrBasicPassword" not in payload
+    assert "deeplxTimeoutSeconds" not in payload
+
+
+def test_legacy_settings_migrate_once_and_preserve_existing_deeplx(tmp_path: Path) -> None:
+    config = config_for(tmp_path)
+    database = Database(config.database_path)
+    cipher = SecretCipher(config.secrets_path, database)
+    _insert_legacy_settings(
+        database,
+        cipher,
+        {
+            "source_language": ("EN", False),
+            "ocr_mode": ("auto", False),
+            "ocr_auth_mode": ("bearer", False),
+            "ocr_api_url": ("", True),
+            "ocr_token": ("ocr-secret", True),
+            "ocr_basic_username": ("legacy-user", False),
+            "ocr_basic_password": ("legacy-password", True),
+            "ocr_model": ("PaddleOCR-VL-1.5", False),
+            "ocr_poll_interval_seconds": (2.0, False),
+            "ocr_timeout_seconds": (180.0, False),
+            "ocr_concurrency": (1, False),
+            "deeplx_url": ("https://deeplx.example/translate", True),
+            "deeplx_timeout_seconds": (47.0, False),
+            "translation_concurrency": (3, False),
+        },
+    )
+
+    settings = SettingsService(database, cipher, config)
+    migrated = settings.values(include_secrets=True)
+    stored_keys = {
+        str(row["key"]) for row in database.fetchall("SELECT key FROM app_settings ORDER BY key")
+    }
+
+    assert migrated["source_language"] == "AUTO"
+    assert migrated["ocr_api_url"] == ("https://paddleocr.aistudio-app.com/api/v2/ocr/jobs")
+    assert migrated["ocr_token"] == "ocr-secret"
+    assert migrated["ocr_model"] == "PaddleOCR-VL-1.6"
+    assert migrated["translation_service"] == "deeplx"
+    assert migrated["deeplx_url"] == "https://deeplx.example/translate"
+    assert migrated["translation_timeout_seconds"] == 47.0
+    assert migrated["translation_concurrency"] == 3
+    assert "ocr_mode" not in stored_keys
+    assert "ocr_auth_mode" not in stored_keys
+    assert "ocr_basic_username" not in stored_keys
+    assert "ocr_basic_password" not in stored_keys
+    assert "deeplx_timeout_seconds" not in stored_keys
+
+    settings.patch(
+        ServerSettingsPatch(
+            source_language="EN",
+            ocr_model="custom-ocr-model",
+            translation_service="deepl",
+        )
+    )
+    restarted = SettingsService(database, cipher, config).values(include_secrets=True)
+    database.close()
+
+    assert restarted["source_language"] == "EN"
+    assert restarted["ocr_model"] == "custom-ocr-model"
+    assert restarted["translation_service"] == "deepl"
+
+
+def test_legacy_custom_ocr_and_korean_without_deeplx_are_preserved(tmp_path: Path) -> None:
+    config = config_for(tmp_path)
+    database = Database(config.database_path)
+    cipher = SecretCipher(config.secrets_path, database)
+    _insert_legacy_settings(
+        database,
+        cipher,
+        {
+            "source_language": ("KO", False),
+            "ocr_api_url": ("https://ocr.example/custom/jobs", True),
+            "ocr_model": ("custom-model", False),
+            "deeplx_url": ("", True),
+        },
+    )
+
+    migrated = SettingsService(database, cipher, config).values(include_secrets=True)
+    database.close()
+
+    assert migrated["source_language"] == "KO"
+    assert migrated["ocr_api_url"] == "https://ocr.example/custom/jobs"
+    assert migrated["ocr_model"] == "custom-model"
+    assert migrated["translation_service"] == "deepl"
 
 
 def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> None:
@@ -218,3 +326,20 @@ def test_database_schema_is_valid_sqlite(tmp_path: Path) -> None:
         connection.close()
 
     assert result == ("ok",)
+
+
+def _insert_legacy_settings(
+    database: Database,
+    cipher: SecretCipher,
+    settings: dict[str, tuple[object, bool]],
+) -> None:
+    for key, (value, is_secret) in settings.items():
+        serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        stored = cipher.encrypt(serialized) if is_secret else serialized
+        database.execute(
+            """
+            INSERT INTO app_settings(key, value, is_secret, updated_at)
+            VALUES (?, ?, ?, 1)
+            """,
+            (key, stored, int(is_secret)),
+        )

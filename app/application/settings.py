@@ -16,6 +16,11 @@ from app.domain.settings import (
 from app.repositories.database import Database
 from app.security.secrets import SecretCipher
 
+DEFAULT_OCR_API_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
+DEFAULT_OCR_MODEL = "PaddleOCR-VL-1.6"
+SETTINGS_SCHEMA_KEY = "settings_schema_version"
+SETTINGS_SCHEMA_VERSION = 2
+
 
 @dataclass(frozen=True, slots=True)
 class SettingDefinition:
@@ -28,19 +33,17 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
     "reading_mode": SettingDefinition("strip"),
     "page_direction": SettingDefinition("ltr"),
     "realtime_translation_default": SettingDefinition(False),
-    "source_language": SettingDefinition("EN"),
-    "ocr_mode": SettingDefinition("auto"),
-    "ocr_auth_mode": SettingDefinition("none"),
-    "ocr_api_url": SettingDefinition("", True),
+    "source_language": SettingDefinition("AUTO"),
+    "ocr_api_url": SettingDefinition(DEFAULT_OCR_API_URL, True),
     "ocr_token": SettingDefinition("", True),
-    "ocr_basic_username": SettingDefinition(""),
-    "ocr_basic_password": SettingDefinition("", True),
-    "ocr_model": SettingDefinition(""),
+    "ocr_model": SettingDefinition(DEFAULT_OCR_MODEL),
     "ocr_poll_interval_seconds": SettingDefinition(2.0),
     "ocr_timeout_seconds": SettingDefinition(180.0),
     "ocr_concurrency": SettingDefinition(1),
+    "translation_service": SettingDefinition("deepl"),
+    "deepl_api_key": SettingDefinition("", True),
     "deeplx_url": SettingDefinition("", True),
-    "deeplx_timeout_seconds": SettingDefinition(30.0),
+    "translation_timeout_seconds": SettingDefinition(30.0),
     "translation_concurrency": SettingDefinition(2),
     "fallback_proxy_url": SettingDefinition("", True),
     "long_image_threshold": SettingDefinition(8000),
@@ -65,7 +68,7 @@ class SettingsService:
         self.database = database
         self.cipher = cipher
         self.config = config
-        self._initialize(config.initial_settings)
+        self._initialize_or_migrate(config.initial_settings)
         # Fail during startup if the database and secrets.key do not belong together.
         self.values(include_secrets=True)
 
@@ -73,7 +76,7 @@ class SettingsService:
         values = self.values(include_secrets=False)
         return ServerSettings(
             **values,
-            target_language="ZH",
+            target_language="ZH-HANS",
             access_password_enabled=self.config.access_password is not None,
             public_listener_warning=(
                 self.config.host not in {"127.0.0.1", "::1", "localhost"}
@@ -86,6 +89,8 @@ class SettingsService:
         result: dict[str, Any] = {}
         for row in rows:
             key = str(row["key"])
+            if key not in SETTING_DEFINITIONS:
+                continue
             serialized = str(row["value"])
             is_secret = bool(row["is_secret"])
             if is_secret:
@@ -128,24 +133,117 @@ class SettingsService:
                 )
         return self.public_settings()
 
-    def _initialize(self, initial_values: Mapping[str, object]) -> None:
-        initial = {key: definition.default for key, definition in SETTING_DEFINITIONS.items()}
-        initial["cache_max_mb"] = self.config.cache_max_mb
-        initial.update(
-            {key: value for key, value in initial_values.items() if key in SETTING_DEFINITIONS}
-        )
+    def _initialize_or_migrate(self, initial_values: Mapping[str, object]) -> None:
         now = int(time.time())
         with self.database.transaction() as connection:
+            rows = list(
+                connection.execute("SELECT key, value, is_secret FROM app_settings").fetchall()
+            )
+            version_row = connection.execute(
+                "SELECT value FROM app_metadata WHERE key = ?",
+                (SETTINGS_SCHEMA_KEY,),
+            ).fetchone()
+            version = int(version_row["value"]) if version_row is not None else 0
+
+            if not rows:
+                values = self._new_defaults(initial_values)
+                self._replace_settings(connection, values, now)
+                self._record_schema_version(connection, now)
+                return
+
+            if version < SETTINGS_SCHEMA_VERSION:
+                old_values = self._decode_rows(rows)
+                values = self._migrate_legacy_values(old_values, initial_values)
+                self._replace_settings(connection, values, now)
+                self._record_schema_version(connection, now)
+                return
+
+            values = self._new_defaults(initial_values)
+            existing_keys = {str(row["key"]) for row in rows}
             for key, definition in SETTING_DEFINITIONS.items():
-                serialized = json.dumps(initial[key], ensure_ascii=False, separators=(",", ":"))
-                stored = self.cipher.encrypt(serialized) if definition.secret else serialized
-                connection.execute(
-                    """
-                    INSERT OR IGNORE INTO app_settings(key, value, is_secret, updated_at)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (key, stored, int(definition.secret), now),
-                )
+                if key in existing_keys:
+                    continue
+                self._insert_setting(connection, key, values[key], definition, now)
+
+    def _new_defaults(self, initial_values: Mapping[str, object]) -> dict[str, object]:
+        values = {key: definition.default for key, definition in SETTING_DEFINITIONS.items()}
+        values["cache_max_mb"] = self.config.cache_max_mb
+        values.update(
+            {key: value for key, value in initial_values.items() if key in SETTING_DEFINITIONS}
+        )
+        return values
+
+    def _decode_rows(self, rows: list[Any]) -> dict[str, object]:
+        values: dict[str, object] = {}
+        for row in rows:
+            serialized = str(row["value"])
+            if bool(row["is_secret"]):
+                serialized = self.cipher.decrypt(serialized)
+            values[str(row["key"])] = json.loads(serialized)
+        return values
+
+    def _migrate_legacy_values(
+        self,
+        old_values: Mapping[str, object],
+        initial_values: Mapping[str, object],
+    ) -> dict[str, object]:
+        values = self._new_defaults(initial_values)
+        for key in SETTING_DEFINITIONS:
+            if key in old_values:
+                values[key] = old_values[key]
+
+        old_language = str(old_values.get("source_language") or "").upper()
+        values["source_language"] = old_language if old_language in {"AUTO", "KO"} else "AUTO"
+
+        old_model = str(old_values.get("ocr_model") or "").strip()
+        values["ocr_model"] = (
+            DEFAULT_OCR_MODEL if old_model in {"", "PaddleOCR-VL-1.5"} else old_model
+        )
+
+        old_ocr_url = str(old_values.get("ocr_api_url") or "").strip()
+        values["ocr_api_url"] = old_ocr_url or DEFAULT_OCR_API_URL
+
+        old_deeplx_url = str(old_values.get("deeplx_url") or "").strip()
+        values["translation_service"] = "deeplx" if old_deeplx_url else "deepl"
+        values["translation_timeout_seconds"] = old_values.get(
+            "deeplx_timeout_seconds",
+            SETTING_DEFINITIONS["translation_timeout_seconds"].default,
+        )
+        return values
+
+    def _replace_settings(self, connection: Any, values: Mapping[str, object], now: int) -> None:
+        connection.execute("DELETE FROM app_settings")
+        for key, definition in SETTING_DEFINITIONS.items():
+            self._insert_setting(connection, key, values[key], definition, now)
+
+    def _insert_setting(
+        self,
+        connection: Any,
+        key: str,
+        value: object,
+        definition: SettingDefinition,
+        now: int,
+    ) -> None:
+        serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        stored = self.cipher.encrypt(serialized) if definition.secret else serialized
+        connection.execute(
+            """
+            INSERT INTO app_settings(key, value, is_secret, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (key, stored, int(definition.secret), now),
+        )
+
+    @staticmethod
+    def _record_schema_version(connection: Any, now: int) -> None:
+        connection.execute(
+            """
+            INSERT INTO app_metadata(key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            (SETTINGS_SCHEMA_KEY, str(SETTINGS_SCHEMA_VERSION), now),
+        )
 
     @staticmethod
     def _masked_state(value: str) -> SensitiveSettingState:
