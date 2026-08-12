@@ -48,7 +48,6 @@ function ReaderPageView() {
   const initialScrollChapter = useRef<string | null>(null);
   const markedReadChapter = useRef<string | null>(null);
   const heldOpen = directoryOpen || readerSettingsOpen;
-  const chrome = useReaderChrome(chapterKey, heldOpen);
 
   const manifest = useQuery({
     queryKey: queryKeys.manifest(comicId, chapterId),
@@ -67,6 +66,10 @@ function ReaderPageView() {
     refetchInterval: (query) =>
       activeTaskStatuses.has(query.state.data?.status ?? "") ? 1000 : false,
   });
+  const chrome = useReaderChrome(
+    `${chapterKey}:${manifest.isSuccess ? "ready" : "loading"}`,
+    heldOpen,
+  );
 
   const updateTask = (next: TranslationTaskState) => {
     queryClient.setQueryData(taskKey, next);
