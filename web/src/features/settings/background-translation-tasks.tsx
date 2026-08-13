@@ -134,8 +134,8 @@ function BackgroundTaskCard({
   stopping: boolean;
   onForceStop: () => void;
 }) {
-  const planned = task.planningComplete && task.totalSegments > 0;
-  const percentage = planned
+  const discovered = task.totalSegments > 0;
+  const percentage = discovered
     ? Math.min(100, Math.round((task.completedSegments / task.totalSegments) * 100))
     : null;
   const readerUrl = `/reader/${encodeURIComponent(task.comicId)}/${encodeURIComponent(task.chapterId)}`;
@@ -181,7 +181,7 @@ function BackgroundTaskCard({
             />
           )}
         </div>
-        <div className="mt-2 flex items-center justify-between gap-3 text-xs text-muted-foreground">
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs text-muted-foreground">
           {percentage === null ? (
             <span className="tabular-nums">
               已缓存 {task.preparedPages} / {task.totalPages} 张源图
@@ -191,8 +191,11 @@ function BackgroundTaskCard({
               {task.completedSegments} / {task.totalSegments} 个分片 · {percentage}%
             </span>
           )}
+          <span className="shrink-0 tabular-nums">
+            已缓存 {task.preparedPages} / {task.totalPages} 张源图
+          </span>
           {task.failedSegments > 0 && (
-            <span className="shrink-0 text-destructive">{task.failedSegments} 个失败</span>
+            <span className="w-full text-destructive">{task.failedSegments} 个失败</span>
           )}
         </div>
       </div>

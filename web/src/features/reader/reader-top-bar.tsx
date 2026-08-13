@@ -105,7 +105,7 @@ export function ReaderTopBar({
         </button>
       </div>
 
-      {task && activeStatuses.has(task.status) && task.planningComplete && total > 0 && (
+      {task && activeStatuses.has(task.status) && total > 0 && (
         <div className="h-0.5 bg-white/10">
           <div
             className="h-full bg-white transition-[width] duration-300"
@@ -121,7 +121,7 @@ function TaskSummary({ task }: { task: TranslationTaskState | undefined }) {
   if (!task || task.status === "idle") {
     return <p className="mt-1 text-[10px] text-zinc-500 sm:text-[11px]">原图可直接阅读</p>;
   }
-  if (task.status === "preparing") {
+  if (task.status === "preparing" && task.totalSegments === 0) {
     return <StatusLine loading>正在准备本话</StatusLine>;
   }
 
@@ -129,13 +129,12 @@ function TaskSummary({ task }: { task: TranslationTaskState | undefined }) {
   const total = progressiveTask ? task.totalSegments : task.totalPages;
   const completed = progressiveTask ? task.completedSegments : task.completedPages;
   const failed = progressiveTask ? task.failedSegments : task.failedPages;
-  const progress = task.planningComplete
-    ? `${completed} / ${total}${failed ? ` · ${failed} 失败` : ""}`
-    : progressiveTask
+  const progress =
+    progressiveTask && total === 0
       ? "正在准备本话"
       : `${completed} / ${total}${failed ? ` · ${failed} 失败` : ""}`;
 
-  if (task.status === "queued" || task.status === "running") {
+  if (task.status === "preparing" || task.status === "queued" || task.status === "running") {
     return <StatusLine loading>{progress}</StatusLine>;
   }
   if (task.status === "stopping_after_segment" || task.status === "stopping_after_page") {

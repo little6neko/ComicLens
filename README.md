@@ -85,10 +85,12 @@ PaddleOCR 只使用异步任务接口，默认 URL 为
 `PaddleOCR-VL-1.6`。DeepL Key 以 `:fx` 结尾时自动使用 Free API，否则使用 Pro API；
 DeepL 与 DeepLX 之间不会在失败时自动回退。
 
-新翻译任务会在 OCR 请求中固定开启 `useOcrForImageBlock`，用于识别漫画版面中被归为
-图片块的对白。分片调度固定为单片串行，设置中的 OCR 并发仅保留旧任务兼容；翻译并发只用于
-当前分片内部的文本批次，不会让后续分片乱序显示。PaddleOCR `jobId` 会持久化，超时、重试
-或服务重启后优先继续轮询远端任务。
+新翻译任务默认按 `1600px` 高度切片并保留 `200px` 重叠上下文，OCR 请求不发送
+`useOcrForImageBlock`，避免图片区域被误渲染为大文本框。任务获取第一张源图并切片后会立即
+开始 OCR、翻译和显示，同时继续准备后续源图；顶部进度分母会随新分片动态增加。分片调度
+固定为单片串行，设置中的 OCR 并发仅保留旧任务兼容；翻译并发只用于当前分片内部的文本
+批次，不会让后续分片乱序显示。PaddleOCR `jobId` 会持久化，超时、重试或服务重启后优先
+继续轮询远端任务。
 
 敏感字段只返回掩码，编辑时明确选择“保留 / 替换 / 清除”。`.env.example` 中的
 `COMICLENS_OCR_*`、`COMICLENS_DEEPL_API_KEY`、`COMICLENS_DEEPLX_URL` 和
