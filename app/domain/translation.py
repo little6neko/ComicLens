@@ -38,6 +38,16 @@ TranslationSegmentStage = Literal[
     "failed",
 ]
 
+BackgroundTranslationStage = Literal[
+    "preparing",
+    "queued",
+    "ocr",
+    "translating",
+    "rendering",
+    "stopping",
+    "processing",
+]
+
 
 class TranslationError(ComicModel):
     stage: str
@@ -113,6 +123,33 @@ class TranslationTaskState(ComicModel):
 
 class TranslationActionResult(ComicModel):
     task: TranslationTaskState
+
+
+class BackgroundTranslationTask(ComicModel):
+    comic_id: str
+    chapter_id: str
+    comic_title: str
+    chapter_title: str
+    generation_id: str
+    kind: Literal["normal", "retranslate", "retry"] = "normal"
+    status: TranslationTaskStatus
+    stage: BackgroundTranslationStage
+    current_page_index: int | None = None
+    current_segment: CurrentTranslationSegment | None = None
+    planning_complete: bool = False
+    total_pages: int = 0
+    prepared_pages: int = 0
+    completed_pages: int = 0
+    failed_pages: int = 0
+    total_segments: int = 0
+    completed_segments: int = 0
+    failed_segments: int = 0
+
+
+class ForceStopTranslationResult(ComicModel):
+    comic_id: str
+    chapter_id: str
+    stopped_generations: int = 0
 
 
 class RetranslateRequest(ComicModel):

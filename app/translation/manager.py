@@ -19,7 +19,11 @@ from app.cache.keys import (
 )
 from app.cache.storage import MediaCache
 from app.domain.comic import ChapterManifest
-from app.domain.translation import TranslationTaskState
+from app.domain.translation import (
+    BackgroundTranslationTask,
+    ForceStopTranslationResult,
+    TranslationTaskState,
+)
 from app.errors import AppError
 from app.media.registry import SourceMediaRegistry
 from app.repositories.translation import TranslationRepository
@@ -73,6 +77,8 @@ class TranslationManager:
         self.settings = settings
         self._tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._force_stop_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._force_stopping: set[tuple[str, str]] = set()
         self._http_client = httpx.AsyncClient(timeout=httpx.Timeout(60.0))
         self._pipeline_factory = pipeline_factory or self._build_pipeline
         self._planner = SegmentPlanner(repository=repository, cache=cache, source=source)
@@ -95,6 +101,11 @@ class TranslationManager:
         await self._http_client.aclose()
 
     async def start(self, comic_id: str, chapter_id: str) -> TranslationTaskState:
+        action_lock = self._force_stop_locks.setdefault((comic_id, chapter_id), asyncio.Lock())
+        async with action_lock:
+            return await self._start(comic_id, chapter_id)
+
+    async def _start(self, comic_id: str, chapter_id: str) -> TranslationTaskState:
         source_pages = await self._ensure_source_pages(comic_id, chapter_id)
         runtime = self._runtime_settings(require_services=True)
         semantic, fingerprint = self._semantic_settings(source_pages, runtime)
@@ -188,7 +199,46 @@ class TranslationManager:
         latest_id = str(active_rows[-1]["generation_id"])
         return self.repository.task_state(comic_id, chapter_id, latest_id)
 
+    def background_tasks(self) -> list[BackgroundTranslationTask]:
+        return self.repository.background_tasks()
+
+    async def force_stop(
+        self,
+        comic_id: str,
+        chapter_id: str,
+    ) -> ForceStopTranslationResult:
+        key = (comic_id, chapter_id)
+        force_stop_lock = self._force_stop_locks.setdefault(key, asyncio.Lock())
+        stopped = 0
+        async with force_stop_lock:
+            self._force_stopping.add(key)
+            try:
+                worker = self._tasks.get(key)
+                if worker is not None and not worker.done():
+                    worker.cancel()
+                    await asyncio.gather(worker, return_exceptions=True)
+                chapter_lock = self._locks.setdefault(key, asyncio.Lock())
+                async with chapter_lock:
+                    stopped = self.repository.force_pause_chapter(comic_id, chapter_id)
+                    if stopped:
+                        self.cache.set_chapter_active(comic_id, chapter_id, False)
+                        self.cache.enforce_limit()
+            finally:
+                self._force_stopping.discard(key)
+            if self.repository.active_generation(comic_id, chapter_id) is not None:
+                self._ensure_worker(comic_id, chapter_id)
+            return ForceStopTranslationResult(
+                comic_id=comic_id,
+                chapter_id=chapter_id,
+                stopped_generations=stopped,
+            )
+
     async def retranslate(self, comic_id: str, chapter_id: str) -> TranslationTaskState:
+        action_lock = self._force_stop_locks.setdefault((comic_id, chapter_id), asyncio.Lock())
+        async with action_lock:
+            return await self._retranslate(comic_id, chapter_id)
+
+    async def _retranslate(self, comic_id: str, chapter_id: str) -> TranslationTaskState:
         source_pages = await self._ensure_source_pages(comic_id, chapter_id)
         runtime = self._runtime_settings(require_services=True)
         semantic, fingerprint = self._semantic_settings(source_pages, runtime)
@@ -229,6 +279,13 @@ class TranslationManager:
         return self.repository.task_state(comic_id, chapter_id, generation_id)
 
     async def retry_page(
+        self, comic_id: str, chapter_id: str, page_index: int
+    ) -> TranslationTaskState:
+        action_lock = self._force_stop_locks.setdefault((comic_id, chapter_id), asyncio.Lock())
+        async with action_lock:
+            return await self._retry_page(comic_id, chapter_id, page_index)
+
+    async def _retry_page(
         self, comic_id: str, chapter_id: str, page_index: int
     ) -> TranslationTaskState:
         generation = self.repository.latest_generation(comic_id, chapter_id)
@@ -283,6 +340,22 @@ class TranslationManager:
         return self.repository.task_state(comic_id, chapter_id, generation_id)
 
     async def retry_segment(
+        self,
+        comic_id: str,
+        chapter_id: str,
+        page_index: int,
+        segment_index: int,
+    ) -> TranslationTaskState:
+        action_lock = self._force_stop_locks.setdefault((comic_id, chapter_id), asyncio.Lock())
+        async with action_lock:
+            return await self._retry_segment(
+                comic_id,
+                chapter_id,
+                page_index,
+                segment_index,
+            )
+
+    async def _retry_segment(
         self,
         comic_id: str,
         chapter_id: str,
@@ -455,6 +528,8 @@ class TranslationManager:
 
     def _ensure_worker(self, comic_id: str, chapter_id: str) -> None:
         key = (comic_id, chapter_id)
+        if key in self._force_stopping:
+            return
         existing = self._tasks.get(key)
         if existing is not None and not existing.done():
             return

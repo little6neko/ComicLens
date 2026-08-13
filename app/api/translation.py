@@ -6,6 +6,8 @@ from fastapi import APIRouter, Depends, Path, Query, Response
 
 from app.api.dependencies import get_translation_manager
 from app.domain.translation import (
+    BackgroundTranslationTask,
+    ForceStopTranslationResult,
     RetranslateRequest,
     TranslationActionResult,
     TranslationTaskState,
@@ -18,6 +20,16 @@ router = APIRouter(tags=["translation"])
 ManagerDependency = Annotated[TranslationManager, Depends(get_translation_manager)]
 ComicId = Annotated[str, Path(min_length=1, max_length=160)]
 ChapterId = Annotated[str, Path(min_length=1, max_length=160)]
+
+
+@router.get(
+    "/api/translations/background",
+    response_model=list[BackgroundTranslationTask],
+)
+async def background_translation_tasks(
+    manager: ManagerDependency,
+) -> list[BackgroundTranslationTask]:
+    return manager.background_tasks()
 
 
 @router.get(
@@ -54,6 +66,18 @@ async def pause_translation(
     manager: ManagerDependency,
 ) -> TranslationActionResult:
     return TranslationActionResult(task=await manager.pause(comic_id, chapter_id))
+
+
+@router.post(
+    "/api/comics/{comic_id}/chapters/{chapter_id}/translation/force-stop",
+    response_model=ForceStopTranslationResult,
+)
+async def force_stop_translation(
+    comic_id: ComicId,
+    chapter_id: ChapterId,
+    manager: ManagerDependency,
+) -> ForceStopTranslationResult:
+    return await manager.force_stop(comic_id, chapter_id)
 
 
 @router.post(

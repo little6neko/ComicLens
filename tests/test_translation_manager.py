@@ -300,6 +300,141 @@ def test_repository_commits_segment_plan_and_publishes_atomic_layer(tmp_path: Pa
         harness.database.close()
 
 
+def test_background_tasks_and_force_pause_preserve_segment_checkpoints(tmp_path: Path) -> None:
+    harness = create_harness(tmp_path, page_count=1)
+    try:
+        generation_id = harness.repository.create_generation(
+            "alpha",
+            "chapter-1",
+            semantic_fingerprint="force-stop-checkpoints",
+            semantic_settings={"pipelineVersion": "progressive-segment-v1"},
+            page_indexes=[0],
+            source_pages={0: "https://img.example/0.png"},
+            kind="normal",
+            progressive=True,
+        )
+        harness.repository.save_prepared_page(
+            generation_id,
+            0,
+            source_url="https://img.example/0.png",
+            original_path="chapters/original.png",
+            original_checksum="checksum",
+            width=120,
+            height=180,
+        )
+        harness.repository.commit_segment_plan(
+            generation_id,
+            [
+                {
+                    "page_index": 0,
+                    "segment_index": segment_index,
+                    "global_index": segment_index,
+                    "source_width": 120,
+                    "source_height": 180,
+                    "display_top": segment_index * 90,
+                    "display_bottom": (segment_index + 1) * 90,
+                    "ocr_top": max(0, segment_index * 90 - 10),
+                    "ocr_bottom": (segment_index + 1) * 90,
+                    "ocr_input_path": f"segments/input-{segment_index}.png",
+                }
+                for segment_index in range(2)
+            ],
+        )
+        translated = harness.cache.put_bytes(
+            bundle_key=harness.cache.ensure_chapter_bundle("alpha", "chapter-1"),
+            bundle_kind="chapter",
+            comic_id="alpha",
+            chapter_id="chapter-1",
+            relative_path="segments/translated-0.png",
+            entry_kind="translated_segment",
+            content=make_png((10, 20, 30)),
+            media_type="image/png",
+            verify_image=True,
+        )
+        harness.repository.complete_segment(
+            generation_id,
+            "alpha",
+            "chapter-1",
+            0,
+            0,
+            translated_path="segments/translated-0.png",
+            translated_version=translated.etag,
+        )
+        harness.repository.set_segment_stage(
+            generation_id,
+            0,
+            1,
+            "ocr",
+            increment_attempts=True,
+            paths={
+                "ocr_path": "segments/ocr-1.json",
+                "blocks_path": "segments/blocks-1.json",
+                "translations_path": "segments/translations-1.json",
+                "translated_path": "segments/rendered-1.png",
+            },
+            job_id="paddle-job-1",
+        )
+        harness.repository.set_page_stage(generation_id, 0, "rendering")
+        harness.repository.set_generation_status(
+            generation_id,
+            "running",
+            current_page_index=0,
+            current_segment_index=1,
+        )
+        harness.database.execute(
+            """
+            INSERT INTO reading_history(
+                comic_id, title, cover_source_url, rating, is_adult,
+                latest_chapters_json, chapter_id, chapter_title,
+                page_index, total_pages, updated_at
+            ) VALUES (?, ?, ?, NULL, 0, '[]', ?, ?, 0, 1, ?)
+            """,
+            ("alpha", "Alpha Comic", "https://img.example/cover.png", "chapter-1", "第 1 话", 1),
+        )
+        harness.cache.set_chapter_active("alpha", "chapter-1", True)
+
+        tasks = harness.repository.background_tasks()
+        assert len(tasks) == 1
+        assert tasks[0].comic_title == "Alpha Comic"
+        assert tasks[0].chapter_title == "第 1 话"
+        assert tasks[0].stage == "ocr"
+        assert tasks[0].prepared_pages == 1
+        assert tasks[0].completed_segments == 1
+        assert tasks[0].total_segments == 2
+
+        assert harness.repository.force_pause_chapter("alpha", "chapter-1") == 1
+        assert harness.repository.force_pause_chapter("alpha", "chapter-1") == 0
+
+        state = harness.repository.task_state("alpha", "chapter-1", generation_id)
+        assert state.status == "paused"
+        assert state.current_page_index is None
+        assert state.current_segment is None
+        assert state.pages[0].status == "pending"
+        assert [segment.status for segment in state.pages[0].segments] == [
+            "completed",
+            "pending",
+        ]
+        checkpoint = harness.repository.segment(generation_id, 0, 1)
+        assert checkpoint is not None
+        assert checkpoint["ocr_job_id"] == "paddle-job-1"
+        assert checkpoint["ocr_path"] == "segments/ocr-1.json"
+        assert checkpoint["blocks_path"] == "segments/blocks-1.json"
+        assert checkpoint["translations_path"] == "segments/translations-1.json"
+        assert checkpoint["translated_path"] == "segments/rendered-1.png"
+        assert harness.repository.translation_layers("alpha", "chapter-1", 0)[0].segment_index == 0
+        bundle = harness.database.fetchone(
+            """
+            SELECT active_task FROM cache_bundles
+            WHERE comic_id = ? AND chapter_id = ?
+            """,
+            ("alpha", "chapter-1"),
+        )
+        assert bundle is not None and bundle["active_task"] == 0
+        assert harness.repository.background_tasks() == []
+    finally:
+        harness.database.close()
+
+
 def test_pause_wins_race_with_preparation_and_running_transitions(tmp_path: Path) -> None:
     harness = create_harness(tmp_path, page_count=1)
     try:
@@ -379,6 +514,58 @@ async def test_pause_finishes_current_segment_then_resumes_next(
         finished = harness.manager.state("alpha", "chapter-1")
         assert finished.completed_pages == 3
         assert harness.pipeline.ocr_calls == 3
+    finally:
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_force_stop_cancels_current_segment_immediately_and_can_resume(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path, page_count=2)
+    harness.pipeline.block_first_ocr = True
+    try:
+        started = await harness.manager.start("alpha", "chapter-1")
+        await wait_for(harness.pipeline.ocr_started.is_set)
+
+        result = await harness.manager.force_stop("alpha", "chapter-1")
+        paused = harness.manager.state("alpha", "chapter-1")
+
+        assert result.stopped_generations == 1
+        assert paused.generation_id == started.generation_id
+        assert paused.status == "paused"
+        assert paused.current_segment is None
+        assert paused.pages[0].segments[0].status == "pending"
+        assert harness.pipeline.ocr_calls == 1
+        assert harness.pipeline.translation_calls == 0
+        assert harness.pipeline.render_calls == 0
+        assert harness.manager.background_tasks() == []
+
+        resumed = await harness.manager.start("alpha", "chapter-1")
+        assert resumed.generation_id == started.generation_id
+        await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
+        assert harness.pipeline.ocr_calls == 3
+        assert harness.pipeline.translation_calls == 2
+        assert harness.pipeline.render_calls == 2
+    finally:
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_force_stop_does_not_cancel_another_chapter_worker(tmp_path: Path) -> None:
+    harness = create_harness(tmp_path, page_count=1)
+    harness.pipeline.block_first_ocr = True
+    try:
+        await harness.manager.start("alpha", "chapter-1")
+        await wait_for(harness.pipeline.ocr_started.is_set)
+        await harness.manager.start("beta", "chapter-2")
+
+        result = await harness.manager.force_stop("alpha", "chapter-1")
+        await wait_for(lambda: harness.manager.state("beta", "chapter-2").status == "completed")
+
+        assert result.stopped_generations == 1
+        assert harness.manager.state("alpha", "chapter-1").status == "paused"
+        assert harness.manager.state("beta", "chapter-2").status == "completed"
     finally:
         await harness.close()
 

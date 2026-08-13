@@ -374,3 +374,70 @@ def test_translation_api_polls_manifest_and_serves_immutable_version(
     assert translated_segment.headers["cache-control"].endswith("immutable")
     assert wrong_version.status_code == 404
     assert unconfirmed.status_code == 422
+
+
+def test_background_translation_api_lists_all_chapters_and_force_stops_idempotently(
+    tmp_path: Path,
+) -> None:
+    api_client, source = catalog_client(tmp_path)
+    history_payload = {
+        "title": "Alpha Comic",
+        "chapterId": "chapter-12",
+        "chapterTitle": "Chapter 12",
+        "pageIndex": 0,
+        "totalPages": 1,
+    }
+
+    with api_client:
+        history = api_client.put("/api/history/alpha-comic", json=history_payload)
+        assert history.status_code == 200
+        repository = api_client.app.state.translation_repository
+        for kind in ("normal", "retranslate"):
+            repository.create_generation(
+                "alpha-comic",
+                "chapter-12",
+                semantic_fingerprint=f"alpha-{kind}",
+                semantic_settings={"pipelineVersion": "progressive-segment-v1"},
+                page_indexes=[0],
+                source_pages={0: "https://img.example/alpha.png"},
+                kind=kind,
+                progressive=True,
+            )
+        repository.create_generation(
+            "beta-comic",
+            "chapter-3",
+            semantic_fingerprint="beta-normal",
+            semantic_settings={"pipelineVersion": "progressive-segment-v1"},
+            page_indexes=[0],
+            source_pages={0: "https://img.example/beta.png"},
+            kind="normal",
+            progressive=True,
+        )
+        source.calls.clear()
+
+        listed = api_client.get("/api/translations/background")
+        stopped = api_client.post(
+            "/api/comics/alpha-comic/chapters/chapter-12/translation/force-stop"
+        )
+        stopped_again = api_client.post(
+            "/api/comics/alpha-comic/chapters/chapter-12/translation/force-stop"
+        )
+        remaining = api_client.get("/api/translations/background")
+        beta_stopped = api_client.post(
+            "/api/comics/beta-comic/chapters/chapter-3/translation/force-stop"
+        )
+
+    assert listed.status_code == 200
+    assert len(listed.json()) == 2
+    alpha, beta = listed.json()
+    assert alpha["comicTitle"] == "Alpha Comic"
+    assert alpha["chapterTitle"] == "Chapter 12"
+    assert alpha["stage"] == "preparing"
+    assert "pages" not in alpha
+    assert beta["comicTitle"] == "beta-comic"
+    assert beta["chapterTitle"] == "chapter-3"
+    assert stopped.json()["stoppedGenerations"] == 2
+    assert stopped_again.json()["stoppedGenerations"] == 0
+    assert [task["comicId"] for task in remaining.json()] == ["beta-comic"]
+    assert beta_stopped.json()["stoppedGenerations"] == 1
+    assert source.calls == []

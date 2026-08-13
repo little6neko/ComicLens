@@ -7,6 +7,7 @@ import uuid
 from typing import Any
 
 from app.domain.translation import (
+    BackgroundTranslationTask,
     CurrentTranslationSegment,
     TranslationError,
     TranslationLayer,
@@ -463,6 +464,151 @@ class TranslationRepository:
             """,
             (comic_id, chapter_id),
         )
+
+    def background_tasks(self) -> list[BackgroundTranslationTask]:
+        rows = self.database.fetchall(
+            """
+            SELECT generations.*,
+                COALESCE((
+                    SELECT SUM(CASE WHEN prepared = 1 THEN 1 ELSE 0 END)
+                    FROM translation_pages prepared_pages
+                    WHERE prepared_pages.generation_id = generations.generation_id
+                ), 0) prepared_pages,
+                current_segments.status current_segment_status,
+                current_pages.status current_page_status,
+                history.title history_comic_title,
+                CASE WHEN history.chapter_id = generations.chapter_id
+                    THEN history.chapter_title ELSE NULL END history_chapter_title
+            FROM translation_generations generations
+            LEFT JOIN translation_segments current_segments
+              ON current_segments.generation_id = generations.generation_id
+             AND current_segments.page_index = generations.current_page_index
+             AND current_segments.segment_index = generations.current_segment_index
+            LEFT JOIN translation_pages current_pages
+              ON current_pages.generation_id = generations.generation_id
+             AND current_pages.page_index = generations.current_page_index
+            LEFT JOIN reading_history history
+              ON history.comic_id = generations.comic_id
+            WHERE generations.status IN (
+                'preparing', 'queued', 'running', 'stopping_after_page',
+                'stopping_after_segment'
+            )
+            ORDER BY generations.created_at ASC, generations.rowid ASC
+            """
+        )
+        tasks: list[BackgroundTranslationTask] = []
+        seen_chapters: set[tuple[str, str]] = set()
+        for row in rows:
+            comic_id = str(row["comic_id"])
+            chapter_id = str(row["chapter_id"])
+            chapter_key = (comic_id, chapter_id)
+            if chapter_key in seen_chapters:
+                continue
+            seen_chapters.add(chapter_key)
+            tasks.append(
+                BackgroundTranslationTask(
+                    comic_id=comic_id,
+                    chapter_id=chapter_id,
+                    comic_title=str(row["history_comic_title"] or comic_id),
+                    chapter_title=str(row["history_chapter_title"] or chapter_id),
+                    generation_id=str(row["generation_id"]),
+                    kind=str(row["kind"]),
+                    status=str(row["status"]),
+                    stage=self._background_stage(row),
+                    current_page_index=(
+                        int(row["current_page_index"])
+                        if row["current_page_index"] is not None
+                        else None
+                    ),
+                    current_segment=(
+                        CurrentTranslationSegment(
+                            page_index=int(row["current_page_index"]),
+                            segment_index=int(row["current_segment_index"]),
+                        )
+                        if row["current_page_index"] is not None
+                        and row["current_segment_index"] is not None
+                        else None
+                    ),
+                    planning_complete=bool(row["planning_complete"]),
+                    total_pages=int(row["total_pages"]),
+                    prepared_pages=int(row["prepared_pages"]),
+                    completed_pages=int(row["completed_pages"]),
+                    failed_pages=int(row["failed_pages"]),
+                    total_segments=int(row["total_segments"]),
+                    completed_segments=int(row["completed_segments"]),
+                    failed_segments=int(row["failed_segments"]),
+                )
+            )
+        return tasks
+
+    def force_pause_chapter(self, comic_id: str, chapter_id: str) -> int:
+        timestamp = self._timestamp()
+        with self.database.transaction() as connection:
+            rows = connection.execute(
+                """
+                SELECT generation_id FROM translation_generations
+                WHERE comic_id = ? AND chapter_id = ?
+                  AND status IN (
+                      'preparing', 'queued', 'running', 'stopping_after_page',
+                      'stopping_after_segment'
+                  )
+                ORDER BY created_at ASC, rowid ASC
+                """,
+                (comic_id, chapter_id),
+            ).fetchall()
+            generation_ids = [str(row["generation_id"]) for row in rows]
+            if not generation_ids:
+                return 0
+            placeholders = ",".join("?" for _ in generation_ids)
+            connection.execute(
+                f"""
+                UPDATE translation_pages SET status = 'pending', updated_at = ?
+                WHERE generation_id IN ({placeholders})
+                  AND status IN ('downloading', 'ocr', 'translating', 'rendering')
+                """,
+                (timestamp, *generation_ids),
+            )
+            connection.execute(
+                f"""
+                UPDATE translation_segments SET status = 'pending', updated_at = ?
+                WHERE generation_id IN ({placeholders})
+                  AND status IN ('ocr', 'translating', 'rendering')
+                """,
+                (timestamp, *generation_ids),
+            )
+            connection.execute(
+                f"""
+                UPDATE translation_generations SET status = 'paused',
+                    stop_requested = 0, current_page_index = NULL,
+                    current_segment_index = NULL, updated_at = ?
+                WHERE generation_id IN ({placeholders})
+                """,
+                (timestamp, *generation_ids),
+            )
+            connection.execute(
+                """
+                UPDATE cache_bundles SET active_task = 0, accessed_at = ?
+                WHERE kind = 'chapter' AND comic_id = ? AND chapter_id = ?
+                """,
+                (timestamp, comic_id, chapter_id),
+            )
+            return len(generation_ids)
+
+    @staticmethod
+    def _background_stage(row: sqlite3.Row) -> str:
+        status = str(row["status"])
+        if status in {"stopping_after_page", "stopping_after_segment"}:
+            return "stopping"
+        if status == "preparing":
+            return "preparing"
+        if status == "queued":
+            return "queued"
+        current_stage = str(row["current_segment_status"] or row["current_page_status"] or "")
+        if current_stage in {"ocr", "translating", "rendering"}:
+            return current_stage
+        if current_stage == "downloading":
+            return "preparing"
+        return "processing"
 
     def set_generation_status(
         self,
