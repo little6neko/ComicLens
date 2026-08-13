@@ -19,7 +19,7 @@ from app.security.secrets import SecretCipher
 DEFAULT_OCR_API_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
 DEFAULT_OCR_MODEL = "PaddleOCR-VL-1.6"
 SETTINGS_SCHEMA_KEY = "settings_schema_version"
-SETTINGS_SCHEMA_VERSION = 2
+SETTINGS_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,7 +47,7 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
     "translation_concurrency": SettingDefinition(2),
     "fallback_proxy_url": SettingDefinition("", True),
     "long_image_threshold": SettingDefinition(8000),
-    "ocr_slice_height": SettingDefinition(4000),
+    "ocr_slice_height": SettingDefinition(1600),
     "ocr_slice_overlap": SettingDefinition(200),
     "reading_slice_height": SettingDefinition(3000),
     "cache_max_mb": SettingDefinition(5120),
@@ -153,7 +153,7 @@ class SettingsService:
 
             if version < SETTINGS_SCHEMA_VERSION:
                 old_values = self._decode_rows(rows)
-                values = self._migrate_legacy_values(old_values, initial_values)
+                values = self._migrate_values(old_values, initial_values, version)
                 self._replace_settings(connection, values, now)
                 self._record_schema_version(connection, now)
                 return
@@ -209,6 +209,24 @@ class SettingsService:
             "deeplx_timeout_seconds",
             SETTING_DEFINITIONS["translation_timeout_seconds"].default,
         )
+        return values
+
+    def _migrate_values(
+        self,
+        old_values: Mapping[str, object],
+        initial_values: Mapping[str, object],
+        version: int,
+    ) -> dict[str, object]:
+        if version < 2:
+            values = self._migrate_legacy_values(old_values, initial_values)
+        else:
+            values = self._new_defaults(initial_values)
+            for key in SETTING_DEFINITIONS:
+                if key in old_values:
+                    values[key] = old_values[key]
+
+        if version < 3 and int(values.get("ocr_slice_height") or 0) == 4000:
+            values["ocr_slice_height"] = 1600
         return values
 
     def _replace_settings(self, connection: Any, values: Mapping[str, object], now: int) -> None:

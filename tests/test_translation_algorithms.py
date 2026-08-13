@@ -216,7 +216,10 @@ async def test_async_ocr_submits_polls_merges_jsonl_and_isolates_token() -> None
     assert b'name="model"' in requests[0].content
     assert b"PaddleOCR-VL-1.6" in requests[0].content
     assert b'name="optionalPayload"' in requests[0].content
-    assert b'"useOcrForImageBlock": true' in requests[0].content
+    assert b'"useDocOrientationClassify": false' in requests[0].content
+    assert b'"useDocUnwarping": false' in requests[0].content
+    assert b'"useChartRecognition": false' in requests[0].content
+    assert b"useOcrForImageBlock" not in requests[0].content
     assert b'name="file"; filename="image.png"' in requests[0].content
     assert requests[0].extensions["timeout"]["read"] == 7
     assert requests[1].headers["authorization"] == "Bearer secret"

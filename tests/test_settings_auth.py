@@ -81,6 +81,8 @@ def test_new_settings_use_async_ocr_deepl_and_auto_language_defaults(tmp_path: P
     assert payload["ocrModel"] == "PaddleOCR-VL-1.6"
     assert payload["ocrPollIntervalSeconds"] == 2.0
     assert payload["ocrTimeoutSeconds"] == 180.0
+    assert payload["ocrSliceHeight"] == 1600
+    assert payload["ocrSliceOverlap"] == 200
     assert payload["translationService"] == "deepl"
     assert payload["deeplApiKey"] == {"configured": False, "masked": None}
     assert payload["translationTimeoutSeconds"] == 30.0
@@ -88,6 +90,35 @@ def test_new_settings_use_async_ocr_deepl_and_auto_language_defaults(tmp_path: P
     assert "ocrAuthMode" not in payload
     assert "ocrBasicPassword" not in payload
     assert "deeplxTimeoutSeconds" not in payload
+
+
+def test_v2_settings_migrate_only_the_old_default_slice_height(tmp_path: Path) -> None:
+    config = config_for(tmp_path)
+    database = Database(config.database_path)
+    cipher = SecretCipher(config.secrets_path, database)
+    settings = SettingsService(database, cipher, config)
+    settings.patch(ServerSettingsPatch(source_language="EN", ocr_slice_height=4000))
+    database.execute(
+        "UPDATE app_metadata SET value = '2' WHERE key = ?",
+        ("settings_schema_version",),
+    )
+
+    migrated = SettingsService(database, cipher, config).values(include_secrets=True)
+    assert migrated["ocr_slice_height"] == 1600
+    assert migrated["ocr_slice_overlap"] == 200
+    assert migrated["source_language"] == "EN"
+
+    database.execute(
+        "UPDATE app_settings SET value = '2400' WHERE key = 'ocr_slice_height'"
+    )
+    database.execute(
+        "UPDATE app_metadata SET value = '2' WHERE key = ?",
+        ("settings_schema_version",),
+    )
+    preserved = SettingsService(database, cipher, config).values(include_secrets=True)
+    database.close()
+
+    assert preserved["ocr_slice_height"] == 2400
 
 
 def test_legacy_settings_migrate_once_and_preserve_existing_deeplx(tmp_path: Path) -> None:

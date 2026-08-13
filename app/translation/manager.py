@@ -56,7 +56,11 @@ from app.translation.translator import (
 logger = logging.getLogger(__name__)
 
 PipelineFactory = Callable[[dict[str, Any], dict[str, Any]], ImageTranslationPipeline]
-PROGRESSIVE_PIPELINE_VERSION = "progressive-segment-v1"
+PROGRESSIVE_PIPELINE_VERSION = "progressive-segment-v2"
+PROGRESSIVE_PIPELINE_VERSIONS = {
+    "progressive-segment-v1",
+    PROGRESSIVE_PIPELINE_VERSION,
+}
 
 
 class TranslationManager:
@@ -677,7 +681,7 @@ class TranslationManager:
         )
         pipeline = self._pipeline_factory(semantic, runtime)
 
-        if semantic.get("pipelineVersion") == PROGRESSIVE_PIPELINE_VERSION:
+        if semantic.get("pipelineVersion") in PROGRESSIVE_PIPELINE_VERSIONS:
             await self._run_progressive_generation(
                 generation_id,
                 comic_id,
@@ -1170,7 +1174,7 @@ class TranslationManager:
             "readingSliceHeight": runtime["reading_slice_height"],
             "longImageAspectRatio": 2.6,
             "pipelineVersion": PROGRESSIVE_PIPELINE_VERSION,
-            "ocrOptionsVersion": "image-block-ocr-v1",
+            "ocrOptionsVersion": "text-block-ocr-v2",
             "rendererVersion": RENDERER_VERSION,
             "fontIdentity": font_identity(),
         }

@@ -300,6 +300,101 @@ def test_repository_commits_segment_plan_and_publishes_atomic_layer(tmp_path: Pa
         harness.database.close()
 
 
+def test_repository_appends_prepared_pages_and_grows_segment_total(tmp_path: Path) -> None:
+    harness = create_harness(tmp_path, page_count=2)
+    try:
+        generation_id = harness.repository.create_generation(
+            "alpha",
+            "chapter-1",
+            semantic_fingerprint="streaming-segments",
+            semantic_settings={"pipelineVersion": "progressive-segment-v2"},
+            page_indexes=[0, 1],
+            source_pages={
+                0: "https://img.example/0.png",
+                1: "https://img.example/1.png",
+            },
+            kind="normal",
+            progressive=True,
+        )
+
+        def page_segments(page_index: int) -> list[dict[str, object]]:
+            return [
+                {
+                    "page_index": page_index,
+                    "segment_index": segment_index,
+                    "source_width": 720,
+                    "source_height": 8000,
+                    "display_top": segment_index * 1600,
+                    "display_bottom": (segment_index + 1) * 1600,
+                    "ocr_top": max(0, segment_index * 1600 - 200),
+                    "ocr_bottom": (segment_index + 1) * 1600,
+                    "ocr_input_path": f"segments/{page_index}-{segment_index}.png",
+                }
+                for segment_index in range(5)
+            ]
+
+        first = page_segments(0)
+        assert harness.repository.append_prepared_page_segments(
+            generation_id,
+            0,
+            source_url="https://img.example/0.png",
+            original_path="originals/0.png",
+            original_checksum="checksum-0",
+            width=720,
+            height=8000,
+            segments=first,
+        ) == 5
+        assert harness.repository.task_state(
+            "alpha", "chapter-1", generation_id
+        ).total_segments == 5
+
+        for segment_index in range(3):
+            harness.repository.complete_segment(
+                generation_id,
+                "alpha",
+                "chapter-1",
+                0,
+                segment_index,
+                translated_path=f"segments/translated-0-{segment_index}.png",
+                translated_version=f"version-{segment_index}",
+            )
+        partial = harness.repository.task_state("alpha", "chapter-1", generation_id)
+        assert (partial.completed_segments, partial.total_segments) == (3, 5)
+
+        assert harness.repository.append_prepared_page_segments(
+            generation_id,
+            1,
+            source_url="https://img.example/1.png",
+            original_path="originals/1.png",
+            original_checksum="checksum-1",
+            width=720,
+            height=8000,
+            segments=page_segments(1),
+        ) == 5
+        grown = harness.repository.task_state("alpha", "chapter-1", generation_id)
+        assert (grown.completed_segments, grown.total_segments) == (3, 10)
+        assert [segment.global_index for page in grown.pages for segment in page.segments] == list(
+            range(10)
+        )
+
+        assert harness.repository.append_prepared_page_segments(
+            generation_id,
+            1,
+            source_url="https://img.example/1.png",
+            original_path="originals/1.png",
+            original_checksum="checksum-1",
+            width=720,
+            height=8000,
+            segments=page_segments(1),
+        ) == 0
+        harness.repository.complete_segment_plan(generation_id)
+        completed_plan = harness.repository.task_state("alpha", "chapter-1", generation_id)
+        assert completed_plan.planning_complete is True
+        assert completed_plan.total_segments == 10
+    finally:
+        harness.database.close()
+
+
 def test_background_tasks_and_force_pause_preserve_segment_checkpoints(tmp_path: Path) -> None:
     harness = create_harness(tmp_path, page_count=1)
     try:

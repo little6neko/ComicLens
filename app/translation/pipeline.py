@@ -40,7 +40,7 @@ class PipelineSettings:
     source_language: str = "AUTO"
     long_image_threshold: int = 2800
     long_image_aspect_ratio: float = 2.6
-    ocr_slice_height: int = 2200
+    ocr_slice_height: int = 1600
     ocr_slice_overlap: int = 180
     reading_slice_height: int = 1800
     font_path: str = ""

@@ -38,8 +38,12 @@ class TranslationRepository:
                 """
                 UPDATE translation_generations
                 SET status = CASE
-                        WHEN semantic_settings_json LIKE
+                        WHEN (
+                             semantic_settings_json LIKE
                              '%"pipelineVersion":"progressive-segment-v1"%'
+                             OR semantic_settings_json LIKE
+                             '%"pipelineVersion":"progressive-segment-v2"%'
+                        )
                              AND status != 'stopping_after_segment'
                             THEN 'queued'
                         ELSE 'paused'
@@ -86,6 +90,8 @@ class TranslationRepository:
               ON generations.generation_id = pages.generation_id
             WHERE generations.semantic_settings_json NOT LIKE
                   '%"pipelineVersion":"progressive-segment-v1"%'
+              AND generations.semantic_settings_json NOT LIKE
+                  '%"pipelineVersion":"progressive-segment-v2"%'
             """
         )
         for row in rows:
@@ -322,6 +328,8 @@ class TranslationRepository:
                 SELECT generation_id FROM translation_generations
                 WHERE semantic_settings_json LIKE
                       '%"pipelineVersion":"progressive-segment-v1"%'
+                   OR semantic_settings_json LIKE
+                      '%"pipelineVersion":"progressive-segment-v2"%'
             )
               AND translated_path NOT IN (SELECT relative_path FROM cache_entries)
             """
@@ -756,6 +764,130 @@ class TranslationRepository:
                 generation_id,
                 page_index,
             ),
+        )
+
+    def append_prepared_page_segments(
+        self,
+        generation_id: str,
+        page_index: int,
+        *,
+        source_url: str,
+        original_path: str,
+        original_checksum: str,
+        width: int,
+        height: int,
+        segments: list[dict[str, object]],
+    ) -> int:
+        """Atomically publish one prepared page and its newly discovered segments."""
+        if not segments:
+            raise ValueError("prepared page must contain at least one segment")
+        if any(int(segment["page_index"]) != page_index for segment in segments):
+            raise ValueError("prepared page segments do not belong to the page")
+
+        timestamp = self._timestamp()
+        with self.database.transaction() as connection:
+            page = connection.execute(
+                """
+                SELECT prepared FROM translation_pages
+                WHERE generation_id = ? AND page_index = ?
+                """,
+                (generation_id, page_index),
+            ).fetchone()
+            if page is None:
+                raise ValueError("translation page does not exist")
+
+            existing_count = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM translation_segments
+                    WHERE generation_id = ? AND page_index = ?
+                    """,
+                    (generation_id, page_index),
+                ).fetchone()[0]
+            )
+            if bool(page["prepared"]):
+                if existing_count != len(segments):
+                    raise ValueError("prepared page segment plan is inconsistent")
+                return 0
+            if existing_count:
+                raise ValueError("unprepared page already contains segments")
+
+            next_global_index = int(
+                connection.execute(
+                    """
+                    SELECT COALESCE(MAX(global_index) + 1, 0)
+                    FROM translation_segments WHERE generation_id = ?
+                    """,
+                    (generation_id,),
+                ).fetchone()[0]
+            )
+            connection.executemany(
+                """
+                INSERT INTO translation_segments(
+                    generation_id, page_index, segment_index, global_index,
+                    status, source_width, source_height, display_top,
+                    display_bottom, ocr_top, ocr_bottom, ocr_input_path,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        generation_id,
+                        page_index,
+                        int(segment["segment_index"]),
+                        next_global_index + offset,
+                        int(segment["source_width"]),
+                        int(segment["source_height"]),
+                        int(segment["display_top"]),
+                        int(segment["display_bottom"]),
+                        int(segment["ocr_top"]),
+                        int(segment["ocr_bottom"]),
+                        str(segment["ocr_input_path"]),
+                        timestamp,
+                        timestamp,
+                    )
+                    for offset, segment in enumerate(segments)
+                ],
+            )
+            connection.execute(
+                """
+                UPDATE translation_pages SET source_url = ?, original_path = ?,
+                    original_checksum = ?, width = ?, height = ?, prepared = 1,
+                    status = 'pending', updated_at = ?
+                WHERE generation_id = ? AND page_index = ?
+                """,
+                (
+                    source_url,
+                    original_path,
+                    original_checksum,
+                    width,
+                    height,
+                    timestamp,
+                    generation_id,
+                    page_index,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE translation_generations SET total_segments = (
+                    SELECT COUNT(*) FROM translation_segments
+                    WHERE generation_id = ?
+                ), updated_at = ? WHERE generation_id = ?
+                """,
+                (generation_id, timestamp, generation_id),
+            )
+        return len(segments)
+
+    def complete_segment_plan(self, generation_id: str) -> None:
+        self.database.execute(
+            """
+            UPDATE translation_generations SET planning_complete = 1,
+                total_segments = (
+                    SELECT COUNT(*) FROM translation_segments
+                    WHERE generation_id = ?
+                ), updated_at = ? WHERE generation_id = ?
+            """,
+            (generation_id, self._timestamp(), generation_id),
         )
 
     def commit_segment_plan(

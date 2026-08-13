@@ -104,7 +104,6 @@ class OCRClient:
             "useDocOrientationClassify": False,
             "useDocUnwarping": False,
             "useChartRecognition": False,
-            "useOcrForImageBlock": True,
         }
         headers = self._request_headers()
         if not job_id:
