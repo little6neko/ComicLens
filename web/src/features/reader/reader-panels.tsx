@@ -1,18 +1,9 @@
 import { Dialog } from "radix-ui";
-import {
-  CheckIcon,
-  ChevronLeftIcon,
-  ChevronRightIcon,
-  Columns2Icon,
-  ImagesIcon,
-  PanelTopIcon,
-  XIcon,
-} from "lucide-react";
-import { useEffect, useMemo, useRef, type ReactNode } from "react";
+import { CheckIcon, XIcon } from "lucide-react";
+import { useEffect, useMemo, useRef } from "react";
 
 import type { ComicChapter } from "@/domain/api";
 import { cn } from "@/lib/utils";
-import type { ReadingMode } from "./types";
 
 const overlayClass =
   "fixed inset-0 z-[70] bg-black/55 backdrop-blur-sm data-[state=closed]:animate-none";
@@ -95,114 +86,5 @@ export function ReaderChapterDirectory({
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
-  );
-}
-
-export function ReaderSettingsPanel({
-  open,
-  onOpenChange,
-  mode,
-  direction,
-  onModeChange,
-  onDirectionChange,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  mode: ReadingMode;
-  direction: "ltr" | "rtl";
-  onModeChange: (mode: ReadingMode) => void;
-  onDirectionChange: (direction: "ltr" | "rtl") => void;
-}) {
-  return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Portal>
-        <Dialog.Overlay className={overlayClass} onClick={(event) => event.stopPropagation()} />
-        <Dialog.Content
-          className="fixed bottom-3 left-1/2 z-[80] w-[min(31rem,calc(100vw-1rem))] -translate-x-1/2 rounded-[1.8rem] border border-white/10 bg-zinc-950 p-5 text-zinc-100 shadow-2xl outline-none sm:bottom-5"
-          onClick={(event) => event.stopPropagation()}
-        >
-          <div className="flex items-center gap-3">
-            <div className="min-w-0 flex-1">
-              <Dialog.Title className="text-lg font-semibold">阅读设置</Dialog.Title>
-              <Dialog.Description className="mt-1 text-xs text-zinc-400">
-                修改后保存到 ComicLens 服务器
-              </Dialog.Description>
-            </div>
-            <Dialog.Close className="flex size-10 items-center justify-center rounded-full text-zinc-300 hover:bg-white/10 hover:text-white">
-              <XIcon className="size-5" />
-              <span className="sr-only">关闭阅读设置</span>
-            </Dialog.Close>
-          </div>
-
-          <div className="mt-5">
-            <p className="mb-2 text-xs font-medium text-zinc-400">阅读模式</p>
-            <div className="grid grid-cols-3 gap-2 rounded-[1.4rem] bg-white/5 p-1.5">
-              <Choice
-                active={mode === "strip"}
-                label="纵向"
-                icon={<ImagesIcon />}
-                onClick={() => onModeChange("strip")}
-              />
-              <Choice
-                active={mode === "page"}
-                label="单页"
-                icon={<PanelTopIcon />}
-                onClick={() => onModeChange("page")}
-              />
-              <Choice
-                active={mode === "double"}
-                label="双页"
-                icon={<Columns2Icon />}
-                onClick={() => onModeChange("double")}
-              />
-            </div>
-          </div>
-
-          <div className="mt-4">
-            <p className="mb-2 text-xs font-medium text-zinc-400">翻页方向</p>
-            <div className="grid grid-cols-2 gap-2 rounded-[1.4rem] bg-white/5 p-1.5">
-              <Choice
-                active={direction === "ltr"}
-                label="从左到右"
-                icon={<ChevronRightIcon />}
-                onClick={() => onDirectionChange("ltr")}
-              />
-              <Choice
-                active={direction === "rtl"}
-                label="从右到左"
-                icon={<ChevronLeftIcon />}
-                onClick={() => onDirectionChange("rtl")}
-              />
-            </div>
-          </div>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
-  );
-}
-
-function Choice({
-  active,
-  label,
-  icon,
-  onClick,
-}: {
-  active: boolean;
-  label: string;
-  icon: ReactNode;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        "flex h-12 items-center justify-center gap-2 rounded-full text-xs transition-colors [&>svg]:size-4",
-        active ? "bg-white text-zinc-950" : "text-zinc-300 hover:bg-white/8 hover:text-white",
-      )}
-    >
-      {icon}
-      {label}
-    </button>
   );
 }

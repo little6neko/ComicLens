@@ -1,15 +1,18 @@
 import {
   BookOpenTextIcon,
+  CheckIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   ListIcon,
   Settings2Icon,
 } from "lucide-react";
+import { DropdownMenu } from "radix-ui";
 import { useEffect, useState, type ReactNode } from "react";
 
 import { Slider } from "@/components/ui/slider";
 import type { ComicChapter } from "@/domain/api";
 import { cn } from "@/lib/utils";
+import type { ReadingMode } from "./types";
 
 export function ReaderBottomBar({
   visible,
@@ -18,9 +21,14 @@ export function ReaderBottomBar({
   pageCount,
   previousChapter,
   nextChapter,
+  settingsOpen,
+  readingMode,
+  pageDirection,
   onPageChange,
   onOpenDirectory,
-  onOpenSettings,
+  onSettingsOpenChange,
+  onModeChange,
+  onDirectionChange,
 }: {
   visible: boolean;
   comicId: string;
@@ -28,9 +36,14 @@ export function ReaderBottomBar({
   pageCount: number;
   previousChapter: ComicChapter | undefined;
   nextChapter: ComicChapter | undefined;
+  settingsOpen: boolean;
+  readingMode: ReadingMode;
+  pageDirection: "ltr" | "rtl";
   onPageChange: (index: number) => void;
   onOpenDirectory: () => void;
-  onOpenSettings: () => void;
+  onSettingsOpenChange: (open: boolean) => void;
+  onModeChange: (mode: ReadingMode) => void;
+  onDirectionChange: (direction: "ltr" | "rtl") => void;
 }) {
   const [previewIndex, setPreviewIndex] = useState(currentPageIndex);
 
@@ -80,9 +93,113 @@ export function ReaderBottomBar({
           chapter={nextChapter}
         />
         <RoundAction label="目录" icon={<ListIcon />} onClick={onOpenDirectory} />
-        <RoundAction label="阅读设置" icon={<Settings2Icon />} onClick={onOpenSettings} />
+        <ReaderSettingsMenu
+          open={settingsOpen}
+          onOpenChange={onSettingsOpenChange}
+          mode={readingMode}
+          direction={pageDirection}
+          onModeChange={onModeChange}
+          onDirectionChange={onDirectionChange}
+        />
       </div>
     </footer>
+  );
+}
+
+function ReaderSettingsMenu({
+  open,
+  onOpenChange,
+  mode,
+  direction,
+  onModeChange,
+  onDirectionChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  mode: ReadingMode;
+  direction: "ltr" | "rtl";
+  onModeChange: (mode: ReadingMode) => void;
+  onDirectionChange: (direction: "ltr" | "rtl") => void;
+}) {
+  return (
+    <DropdownMenu.Root open={open} onOpenChange={onOpenChange} modal={false}>
+      <DropdownMenu.Trigger asChild>
+        <button
+          type="button"
+          className="group flex min-w-14 flex-col items-center gap-1 text-[10px] text-zinc-400 transition-colors hover:text-white data-[state=open]:text-white"
+        >
+          <span className="flex size-10 items-center justify-center rounded-full text-zinc-200 transition-colors group-hover:bg-white/10 group-data-[state=open]:bg-white/10 [&>svg]:size-5">
+            <Settings2Icon />
+          </span>
+          <span>阅读设置</span>
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content
+          side="top"
+          align="end"
+          sideOffset={12}
+          collisionPadding={8}
+          className="reader-settings-menu z-[80] w-64 overflow-hidden rounded-[1.5rem] border border-white/10 bg-zinc-900/95 p-1.5 text-zinc-100 shadow-2xl shadow-black/50 outline-none backdrop-blur-2xl"
+        >
+          <DropdownMenu.Label className="px-3 pt-2 pb-1.5 text-xs font-medium text-zinc-400">
+            阅读模式
+          </DropdownMenu.Label>
+          <DropdownMenu.RadioGroup
+            value={mode}
+            onValueChange={(value) => onModeChange(value as ReadingMode)}
+          >
+            <MenuRadioItem value="strip">条漫</MenuRadioItem>
+            <MenuRadioItem value="page">单页</MenuRadioItem>
+            <MenuRadioItem value="double">双页</MenuRadioItem>
+          </DropdownMenu.RadioGroup>
+
+          {mode !== "strip" && (
+            <>
+              <DropdownMenu.Separator className="my-1.5 h-px bg-white/10" />
+              <DropdownMenu.Label className="px-3 pt-1 pb-1.5 text-xs font-medium text-zinc-400">
+                翻页方向
+              </DropdownMenu.Label>
+              <DropdownMenu.RadioGroup
+                value={direction}
+                onValueChange={(value) => onDirectionChange(value as "ltr" | "rtl")}
+                className="grid grid-cols-2 gap-1"
+              >
+                <DirectionRadioItem value="ltr">从左到右</DirectionRadioItem>
+                <DirectionRadioItem value="rtl">从右到左</DirectionRadioItem>
+              </DropdownMenu.RadioGroup>
+            </>
+          )}
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+  );
+}
+
+function MenuRadioItem({ value, children }: { value: ReadingMode; children: ReactNode }) {
+  return (
+    <DropdownMenu.RadioItem
+      value={value}
+      onSelect={(event) => event.preventDefault()}
+      className="relative flex h-10 cursor-default select-none items-center rounded-xl px-3 pr-9 text-sm text-zinc-200 outline-none transition-colors focus:bg-white/10 focus:text-white data-[state=checked]:text-white"
+    >
+      {children}
+      <DropdownMenu.ItemIndicator className="absolute right-3 flex items-center justify-center">
+        <CheckIcon className="size-4" />
+      </DropdownMenu.ItemIndicator>
+    </DropdownMenu.RadioItem>
+  );
+}
+
+function DirectionRadioItem({ value, children }: { value: "ltr" | "rtl"; children: ReactNode }) {
+  return (
+    <DropdownMenu.RadioItem
+      value={value}
+      onSelect={(event) => event.preventDefault()}
+      className="flex h-9 cursor-default select-none items-center justify-center rounded-full px-2 text-xs text-zinc-400 outline-none transition-colors focus:bg-white/10 focus:text-white data-[state=checked]:bg-white data-[state=checked]:text-zinc-950"
+    >
+      {children}
+    </DropdownMenu.RadioItem>
   );
 }
 

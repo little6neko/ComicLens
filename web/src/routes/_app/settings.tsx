@@ -173,16 +173,18 @@ function SettingsPage() {
               ]}
             />
           </Field>
-          <Field label="翻页方向">
-            <Select
-              value={draft.pageDirection}
-              onChange={(value) => patch("pageDirection", value as Draft["pageDirection"])}
-              options={[
-                ["ltr", "从左到右"],
-                ["rtl", "从右到左"],
-              ]}
-            />
-          </Field>
+          {draft.readingMode !== "strip" && (
+            <Field label="翻页方向">
+              <Select
+                value={draft.pageDirection}
+                onChange={(value) => patch("pageDirection", value as Draft["pageDirection"])}
+                options={[
+                  ["ltr", "从左到右"],
+                  ["rtl", "从右到左"],
+                ]}
+              />
+            </Field>
+          )}
           <ToggleField
             label="进入章节时默认实时翻译"
             description="阅读器内的开关只覆盖当次会话。"

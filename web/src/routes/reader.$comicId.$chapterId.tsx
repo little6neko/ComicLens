@@ -8,7 +8,7 @@ import { ErrorState, LoadingState } from "@/components/query-state";
 import type { ReaderPage, TranslationPageState, TranslationTaskState } from "@/domain/api";
 import { ReaderBottomBar } from "@/features/reader/reader-bottom-bar";
 import { ReaderPageImage } from "@/features/reader/reader-page-image";
-import { ReaderChapterDirectory, ReaderSettingsPanel } from "@/features/reader/reader-panels";
+import { ReaderChapterDirectory } from "@/features/reader/reader-panels";
 import { ReaderTopBar } from "@/features/reader/reader-top-bar";
 import type { EffectiveReaderPage, ReadingMode } from "@/features/reader/types";
 import { useReaderChrome } from "@/features/reader/use-reader-chrome";
@@ -388,9 +388,14 @@ function ReaderPageView() {
         pageCount={totalPages}
         previousChapter={previousChapter}
         nextChapter={nextChapter}
+        settingsOpen={readerSettingsOpen}
+        readingMode={readingMode}
+        pageDirection={pageDirection}
         onPageChange={jumpToPage}
         onOpenDirectory={() => setDirectoryOpen(true)}
-        onOpenSettings={() => setReaderSettingsOpen(true)}
+        onSettingsOpenChange={setReaderSettingsOpen}
+        onModeChange={changeMode}
+        onDirectionChange={changeDirection}
       />
 
       <ReaderChapterDirectory
@@ -400,14 +405,6 @@ function ReaderPageView() {
         comicTitle={comic.data?.title ?? "ComicLens"}
         chapterId={chapterId}
         chapters={comic.data?.chapters ?? []}
-      />
-      <ReaderSettingsPanel
-        open={readerSettingsOpen}
-        onOpenChange={setReaderSettingsOpen}
-        mode={readingMode}
-        direction={pageDirection}
-        onModeChange={changeMode}
-        onDirectionChange={changeDirection}
       />
     </main>
   );
