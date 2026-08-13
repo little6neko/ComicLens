@@ -21,6 +21,7 @@ import { AppPage } from "@/components/app-page";
 import { ErrorState, LoadingState } from "@/components/query-state";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import type {
   SensitiveAction,
@@ -157,7 +158,8 @@ function SettingsPage() {
           <Field label="主题">
             <Select
               value={draft.theme}
-              onChange={(value) => patch("theme", value as Draft["theme"])}
+              onValueChange={(value) => patch("theme", value as Draft["theme"])}
+              ariaLabel="主题"
               options={[
                 ["system", "跟随系统"],
                 ["light", "浅色"],
@@ -168,7 +170,8 @@ function SettingsPage() {
           <Field label="默认阅读模式">
             <Select
               value={draft.readingMode}
-              onChange={(value) => patch("readingMode", value as Draft["readingMode"])}
+              onValueChange={(value) => patch("readingMode", value as Draft["readingMode"])}
+              ariaLabel="默认阅读模式"
               options={[
                 ["strip", "条漫"],
                 ["page", "单页"],
@@ -180,7 +183,8 @@ function SettingsPage() {
             <Field label="翻页方向">
               <Select
                 value={draft.pageDirection}
-                onChange={(value) => patch("pageDirection", value as Draft["pageDirection"])}
+                onValueChange={(value) => patch("pageDirection", value as Draft["pageDirection"])}
+                ariaLabel="翻页方向"
                 options={[
                   ["ltr", "从左到右"],
                   ["rtl", "从右到左"],
@@ -200,7 +204,8 @@ function SettingsPage() {
           <Field label="源语言" hint="目标语言固定为简体中文（ZH-HANS）">
             <Select
               value={draft.sourceLanguage}
-              onChange={(value) => patch("sourceLanguage", value as Draft["sourceLanguage"])}
+              onValueChange={(value) => patch("sourceLanguage", value as Draft["sourceLanguage"])}
+              ariaLabel="源语言"
               options={[
                 ["AUTO", "自动识别（默认）"],
                 ["EN", "英语"],
@@ -257,9 +262,10 @@ function SettingsPage() {
           <Field label="翻译服务" hint="请求失败时不会自动切换到另一服务。">
             <Select
               value={draft.translationService}
-              onChange={(value) =>
+              onValueChange={(value) =>
                 patch("translationService", value as Draft["translationService"])
               }
+              ariaLabel="翻译服务"
               options={[
                 ["deepl", "DeepL 官方 API（默认）"],
                 ["deeplx", "DeepLX"],
@@ -494,30 +500,6 @@ function ToggleField({
   );
 }
 
-function Select({
-  value,
-  options,
-  onChange,
-}: {
-  value: string;
-  options: [string, string][];
-  onChange: (value: string) => void;
-}) {
-  return (
-    <select
-      value={value}
-      onChange={(event) => onChange(event.target.value)}
-      className="h-11 w-full rounded-xl border bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
-    >
-      {options.map(([option, label]) => (
-        <option key={option} value={option}>
-          {label}
-        </option>
-      ))}
-    </select>
-  );
-}
-
 function NumberField({
   label,
   hint,
@@ -579,18 +561,17 @@ function SecretField({
         </span>
       </div>
       <div className="flex gap-2">
-        <select
+        <Select
           value={draft.action}
-          onChange={(event) =>
-            onChange({ action: event.target.value as SecretDraft["action"], value: "" })
-          }
-          className="h-11 w-24 shrink-0 rounded-xl border bg-background px-2 text-xs outline-none focus:ring-2 focus:ring-ring"
-          aria-label={`${label}操作`}
-        >
-          <option value="keep">保留</option>
-          <option value="replace">替换</option>
-          <option value="clear">清除</option>
-        </select>
+          onValueChange={(value) => onChange({ action: value as SecretDraft["action"], value: "" })}
+          options={[
+            ["keep", "保留"],
+            ["replace", "替换"],
+            ["clear", "清除"],
+          ]}
+          className="w-24 shrink-0 text-xs"
+          ariaLabel={`${label}操作`}
+        />
         <Input
           type={type}
           value={draft.value}

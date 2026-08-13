@@ -126,6 +126,64 @@
   }
 }
 
+@keyframes settings-select-content-in {
+  from {
+    opacity: 0;
+    transform: translate3d(var(--settings-select-offset-x), var(--settings-select-offset-y), 0)
+      scale(0.97);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes settings-select-content-out {
+  from {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+
+  to {
+    opacity: 0;
+    transform: translate3d(var(--settings-select-offset-x), var(--settings-select-offset-y), 0)
+      scale(0.97);
+  }
+}
+
+.settings-select-content {
+  --settings-select-offset-x: 0;
+  --settings-select-offset-y: 0;
+
+  transform-origin: var(--radix-select-content-transform-origin);
+  will-change: transform, opacity;
+}
+
+.settings-select-content[data-side="bottom"] {
+  --settings-select-offset-y: -0.375rem;
+}
+
+.settings-select-content[data-side="top"] {
+  --settings-select-offset-y: 0.375rem;
+}
+
+.settings-select-content[data-side="left"] {
+  --settings-select-offset-x: 0.375rem;
+}
+
+.settings-select-content[data-side="right"] {
+  --settings-select-offset-x: -0.375rem;
+}
+
+.settings-select-content[data-state="open"] {
+  animation: settings-select-content-in 150ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.settings-select-content[data-state="closed"] {
+  animation: settings-select-content-out 150ms ease-in forwards;
+}
+
 .reader-settings-menu {
   transform-origin: var(--radix-dropdown-menu-content-transform-origin);
   will-change: transform, opacity;
@@ -140,6 +198,16 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .settings-select-content[data-state="open"],
+  .settings-select-content[data-state="closed"] {
+    animation: none;
+  }
+
+  .settings-select-trigger-icon {
+    transform: none !important;
+    transition-duration: 0ms;
+  }
+
   .reader-settings-menu[data-state="open"],
   .reader-settings-menu[data-state="closed"] {
     animation-duration: 1ms;
