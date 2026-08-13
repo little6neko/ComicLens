@@ -26,6 +26,7 @@ from app.cache.storage import CachedMedia, MediaCache
 from app.domain.comic import (
     ChapterManifest,
     ComicCategory,
+    ComicCreatorArchive,
     ComicDetail,
     ComicListPage,
     HomeFeed,
@@ -33,7 +34,7 @@ from app.domain.comic import (
 )
 from app.errors import AppError
 from app.media.registry import SourceMediaRegistry
-from app.sources.base import ComicOrder, ComicSource
+from app.sources.base import ComicCreatorKind, ComicOrder, ComicSource
 from app.translation.manager import TranslationManager
 
 router = APIRouter()
@@ -100,6 +101,22 @@ async def comics_by_category(
     order: ComicOrder = "latest",
 ) -> ComicListPage:
     return registry.localize_list(await source.category(category_id, page, order))
+
+
+@router.get(
+    "/api/comics/creators/{kind}/{creator_id}",
+    response_model=ComicCreatorArchive,
+    tags=["catalog"],
+)
+async def comics_by_creator(
+    source: ComicSourceDependency,
+    registry: MediaRegistryDependency,
+    kind: ComicCreatorKind,
+    creator_id: Annotated[str, Path(min_length=1, max_length=160)],
+    page: Annotated[int, Query(ge=1)] = 1,
+) -> ComicCreatorArchive:
+    archive = await source.creator(kind, creator_id, page)
+    return archive.model_copy(update={"result": registry.localize_list(archive.result)})
 
 
 @router.get("/api/comics/ranking", response_model=RankingPage, tags=["catalog"])

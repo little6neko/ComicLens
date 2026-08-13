@@ -100,6 +100,65 @@ async def test_category_and_ranking_use_distinct_upstream_pagination() -> None:
 
 
 @pytest.mark.asyncio
+async def test_creator_archives_use_kind_specific_paths_and_parse_pagination() -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        fixture_name = (
+            "creator-page-2.html" if request.url.path.endswith("/2") else "creator-page-1.html"
+        )
+        return html_response(request, fixture_name)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = Manga18fxSource(base_url="https://manga18fx.com", client=client)
+        author = await source.creator("author", "author-one", 1)
+        artist = await source.creator("artist", "artist-one", 2)
+
+    assert paths == ["/manga-author/author-one", "/manga-artist/artist-one/2"]
+    assert author.kind == "author"
+    assert author.creator_id == "author-one"
+    assert author.label == "Author One"
+    assert [item.comic_id for item in author.result.items] == ["alpha-comic"]
+    assert author.result.page == 1
+    assert author.result.has_previous is False
+    assert author.result.has_next is True
+    assert artist.kind == "artist"
+    assert artist.creator_id == "artist-one"
+    assert artist.label == "Author One"
+    assert [item.comic_id for item in artist.result.items] == ["beta-comic"]
+    assert artist.result.page == 2
+    assert artist.result.has_previous is True
+    assert artist.result.has_next is False
+
+
+@pytest.mark.asyncio
+async def test_creator_archive_validates_inputs_and_maps_upstream_not_found() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(404, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = Manga18fxSource(base_url="https://manga18fx.com", client=client)
+        with pytest.raises(AppError) as invalid_kind:
+            await source.creator("writer", "author-one", 1)  # type: ignore[arg-type]
+        with pytest.raises(AppError) as invalid_slug:
+            await source.creator("author", "Not Valid", 1)
+        with pytest.raises(AppError) as missing:
+            await source.creator("author", "missing-author", 1)
+
+    assert invalid_kind.value.status_code == 422
+    assert invalid_slug.value.status_code == 422
+    assert missing.value.code == "CREATOR_NOT_FOUND"
+    assert missing.value.status_code == 404
+    assert missing.value.retryable is False
+    assert calls == 1
+
+
+@pytest.mark.asyncio
 async def test_categories_use_sitemap_and_validate_new_slugs() -> None:
     requested_paths: list[str] = []
 
@@ -164,8 +223,13 @@ async def test_detail_and_chapter_only_parse_scoped_content() -> None:
 
     assert detail.title == "Alpha Comic"
     assert detail.alternative_titles == ["Alpha", "阿尔法"]
-    assert detail.authors == ["Author One"]
-    assert detail.genres == ["Action", "Fantasy"]
+    assert [(item.label, item.slug) for item in detail.authors] == [("Author One", "author-one")]
+    assert [(item.label, item.slug) for item in detail.artists] == [("Artist One", "artist-one")]
+    assert [(item.label, item.slug) for item in detail.genres] == [
+        ("Action", "action"),
+        ("Fantasy", "fantasy"),
+        ("School Life", "school-life"),
+    ]
     assert detail.comic_type == "Webtoon"
     assert detail.release_label == "2025"
     assert detail.status == "OnGoing"
@@ -174,6 +238,47 @@ async def test_detail_and_chapter_only_parse_scoped_content() -> None:
     assert [page.source_url for page in chapter.pages] == [
         "https://img01.manga18fx.com/online/1/12/1.jpg",
         "https://img01.manga18fx.com/online/1/12/2.jpg",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_detail_keeps_metadata_labels_when_links_are_untrusted() -> None:
+    payload = fixture("detail.html").replace(
+        b'<a href="/manga-author/author-one">Author One</a>',
+        (
+            b"<a>Missing Link</a>"
+            b'<a href="https://example.com/manga-author/external">External</a>'
+            b'<a href="/manga-artist/wrong-kind">Wrong Kind</a>'
+            b'<a href="/manga-author/with-query?from=detail">With Query</a>'
+            b'<a href="/manga-author/extra/path">Extra Path</a>'
+            b'<a href="/manga-author/UPPERCASE">Invalid Slug</a>'
+            b'<a href="/manga-author/valid-author">Valid Author</a>'
+            b'<a href="/manga-author/duplicate">Duplicate</a>'
+            b'<a href="/manga-author/ignored">Duplicate</a>'
+        ),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html; charset=utf-8"},
+            content=payload,
+            request=request,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = Manga18fxSource(base_url="https://manga18fx.com", client=client)
+        detail = await source.detail("alpha-comic")
+
+    assert [(item.label, item.slug) for item in detail.authors] == [
+        ("Missing Link", None),
+        ("External", None),
+        ("Wrong Kind", None),
+        ("With Query", None),
+        ("Extra Path", None),
+        ("Invalid Slug", None),
+        ("Valid Author", "valid-author"),
+        ("Duplicate", "duplicate"),
     ]
 
 

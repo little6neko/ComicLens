@@ -4,6 +4,7 @@ from typing import Literal, Protocol
 
 from app.domain.comic import (
     ComicCategory,
+    ComicCreatorArchive,
     ComicDetail,
     ComicListPage,
     HomeFeed,
@@ -11,6 +12,7 @@ from app.domain.comic import (
 )
 
 ComicOrder = Literal["latest", "rating", "views"]
+ComicCreatorKind = Literal["author", "artist"]
 
 
 class ComicSource(Protocol):
@@ -23,6 +25,10 @@ class ComicSource(Protocol):
     async def categories(self) -> list[ComicCategory]: ...
 
     async def category(self, category_id: str, page: int, order: ComicOrder) -> ComicListPage: ...
+
+    async def creator(
+        self, kind: ComicCreatorKind, creator_id: str, page: int
+    ) -> ComicCreatorArchive: ...
 
     async def ranking(self, page: int) -> ComicListPage: ...
 

@@ -11,8 +11,10 @@ from app.config import AppConfig
 from app.domain.comic import (
     ComicCategory,
     ComicChapter,
+    ComicCreatorArchive,
     ComicDetail,
     ComicListPage,
+    ComicMetadataItem,
     ComicSummary,
     FeaturedComic,
     HomeFeed,
@@ -20,7 +22,7 @@ from app.domain.comic import (
     SourcePage,
 )
 from app.main import create_app
-from app.sources.base import ComicOrder
+from app.sources.base import ComicCreatorKind, ComicOrder
 from app.translation.models import TextBlock
 from app.translation.pipeline import OCROutput, RenderOutput, TranslationOutput
 
@@ -57,6 +59,17 @@ class FakeComicSource:
         self.calls.append(("category", category_id, page, order))
         return self._list(page)
 
+    async def creator(
+        self, kind: ComicCreatorKind, creator_id: str, page: int
+    ) -> ComicCreatorArchive:
+        self.calls.append(("creator", kind, creator_id, page))
+        return ComicCreatorArchive(
+            kind=kind,
+            creator_id=creator_id,
+            label="Author One" if kind == "author" else "Artist One",
+            result=self._list(page),
+        )
+
     async def ranking(self, page: int) -> ComicListPage:
         self.calls.append(("ranking", page))
         return self._list(page)
@@ -68,6 +81,9 @@ class FakeComicSource:
             title="Alpha Comic",
             cover_url="https://manga18fx.com/webtoon/alpha.jpg",
             release_label="2025",
+            authors=[ComicMetadataItem(label="Author One", slug="author-one")],
+            artists=[ComicMetadataItem(label="Artist One", slug="artist-one")],
+            genres=[ComicMetadataItem(label="School Life", slug="school-life")],
             chapters=[ComicChapter(chapter_id="chapter-12", title="Chapter 12")],
         )
 
@@ -162,6 +178,7 @@ def test_catalog_api_uses_camel_case_and_controlled_media_urls(tmp_path: Path) -
     with api_client:
         search = api_client.get("/api/comics/search", params={"q": "alpha", "page": 2})
         ranking = api_client.get("/api/comics/ranking", params={"page": 3})
+        creator = api_client.get("/api/comics/creators/author/author-one", params={"page": 2})
         detail = api_client.get("/api/comics/alpha-comic")
 
     assert search.status_code == 200
@@ -175,9 +192,34 @@ def test_catalog_api_uses_camel_case_and_controlled_media_urls(tmp_path: Path) -
     }
     assert ranking.json()["period"] == "week"
     assert ranking.json()["result"]["page"] == 3
+    assert creator.json() == {
+        "kind": "author",
+        "creatorId": "author-one",
+        "label": "Author One",
+        "result": {
+            "items": [
+                {
+                    "comicId": "alpha-comic",
+                    "title": "Alpha Comic",
+                    "coverUrl": "/api/media/covers/alpha-comic",
+                    "rating": None,
+                    "isAdult": False,
+                    "latestChapters": [],
+                }
+            ],
+            "page": 2,
+            "availablePages": [],
+            "hasPrevious": False,
+            "hasNext": False,
+        },
+    }
     assert detail.json()["coverUrl"] == "/api/media/covers/alpha-comic"
     assert detail.json()["releaseLabel"] == "2025"
+    assert detail.json()["authors"] == [{"label": "Author One", "slug": "author-one"}]
+    assert detail.json()["artists"] == [{"label": "Artist One", "slug": "artist-one"}]
+    assert detail.json()["genres"] == [{"label": "School Life", "slug": "school-life"}]
     assert ("search", "alpha", 2) in source.calls
+    assert ("creator", "author", "author-one", 2) in source.calls
 
 
 def test_manifest_registers_only_discovered_page_media(tmp_path: Path) -> None:
@@ -215,10 +257,16 @@ def test_catalog_validation_rejects_invalid_parameters_before_source_call(
         empty_query = api_client.get("/api/comics/search", params={"q": ""})
         invalid_order = api_client.get("/api/comics/categories/action", params={"order": "random"})
         invalid_page = api_client.get("/api/comics/ranking", params={"page": 0})
+        invalid_creator_kind = api_client.get("/api/comics/creators/writer/author-one")
+        invalid_creator_page = api_client.get(
+            "/api/comics/creators/author/author-one", params={"page": 0}
+        )
 
     assert empty_query.status_code == 422
     assert invalid_order.status_code == 422
     assert invalid_page.status_code == 422
+    assert invalid_creator_kind.status_code == 422
+    assert invalid_creator_page.status_code == 422
     assert source.calls == []
 
 

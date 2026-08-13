@@ -13,8 +13,10 @@ from app.domain.comic import (
     ChapterSummary,
     ComicCategory,
     ComicChapter,
+    ComicCreatorArchive,
     ComicDetail,
     ComicListPage,
+    ComicMetadataItem,
     ComicSummary,
     FeaturedComic,
     HomeFeed,
@@ -22,12 +24,14 @@ from app.domain.comic import (
     SourcePage,
 )
 from app.errors import AppError
-from app.sources.base import ComicOrder
+from app.sources.base import ComicCreatorKind, ComicOrder
 
 SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 COMIC_PATH_PATTERN = re.compile(r"^/manga/([^/]+)/?$")
 CHAPTER_PATH_PATTERN = re.compile(r"^/manga/([^/]+)/([^/]+)/?$")
 CATEGORY_PATH_PATTERN = re.compile(r"^/manga-genre/([^/?#]+)/?$")
+AUTHOR_PATH_PATTERN = re.compile(r"^/manga-author/([^/?#]+)/?$")
+ARTIST_PATH_PATTERN = re.compile(r"^/manga-artist/([^/?#]+)/?$")
 ALLOWED_ORDERS: tuple[ComicOrder, ...] = ("latest", "rating", "views")
 SPECIAL_RAW_CATEGORY_ID = "source:raw-feed"
 MAX_SOURCE_PAGES = 500
@@ -220,6 +224,42 @@ class Manga18fxSource:
         soup = await self._get_html(f"{base_path}?orderby={order}")
         return self._parse_list_page(soup, requested_page=page)
 
+    async def creator(
+        self,
+        kind: ComicCreatorKind,
+        creator_id: str,
+        page: int,
+    ) -> ComicCreatorArchive:
+        self._validate_page(page)
+        self._validate_slug(creator_id, "作者或绘者")
+        if kind not in {"author", "artist"}:
+            raise AppError("VALIDATION_ERROR", "作者或绘者类型无效", 422, False)
+        prefix = "manga-author" if kind == "author" else "manga-artist"
+        path = f"/{prefix}/{creator_id}" if page == 1 else f"/{prefix}/{creator_id}/{page}"
+        try:
+            soup = await self._get_html(path)
+        except AppError as exc:
+            if self._upstream_status(exc) == 404:
+                raise AppError(
+                    "CREATOR_NOT_FOUND",
+                    "作者或绘者归档不存在",
+                    404,
+                    False,
+                ) from exc
+            raise
+
+        archive_title = self._text(soup.select_one(".releases h1"))
+        label = re.sub(r"\s+Archives\s*$", "", archive_title, flags=re.IGNORECASE).strip()
+        if not label:
+            raise self._parse_error("作者或绘者归档标题无法识别")
+        result = self._parse_list_page(soup, requested_page=page, allow_empty=True)
+        return ComicCreatorArchive(
+            kind=kind,
+            creator_id=creator_id,
+            label=label,
+            result=result,
+        )
+
     async def ranking(self, page: int) -> ComicListPage:
         self._validate_page(page)
         soup = await self._get_html(f"/hot-manga?page={page}")
@@ -259,9 +299,9 @@ class Manga18fxSource:
             cover_url=self._image_url(cover_node),
             rating=rating,
             alternative_titles=[part.strip() for part in alternative.split("/") if part.strip()],
-            authors=self._metadata_links(metadata, "author(s)"),
-            artists=self._metadata_links(metadata, "artist(s)"),
-            genres=self._metadata_links(metadata, "genre(s)"),
+            authors=self._metadata_items(metadata, "author(s)", AUTHOR_PATH_PATTERN),
+            artists=self._metadata_items(metadata, "artist(s)", ARTIST_PATH_PATTERN),
+            genres=self._metadata_items(metadata, "genre(s)", CATEGORY_PATH_PATTERN),
             comic_type=self._metadata_text(metadata, "type") or None,
             release_label=self._metadata_text(metadata, "release") or None,
             status=self._metadata_text(metadata, "status") or None,
@@ -427,6 +467,15 @@ class Manga18fxSource:
         if isinstance(error, httpx.HTTPStatusError):
             return error.response.status_code == 429 or error.response.status_code >= 500
         return False
+
+    @staticmethod
+    def _upstream_status(error: BaseException | None) -> int | None:
+        current = error
+        while current is not None:
+            if isinstance(current, httpx.HTTPStatusError):
+                return current.response.status_code
+            current = current.__cause__
+        return None
 
     async def _category_exists(self, slug: str) -> bool:
         try:
@@ -607,16 +656,66 @@ class Manga18fxSource:
             content = item.select_one(".summary-content")
             if not heading or content is None:
                 continue
-            links = [self._text(link) for link in content.select("a") if self._text(link)]
+            links = [
+                (self._text(link), str(link.get("href") or "").strip())
+                for link in content.select("a")
+                if self._text(link)
+            ]
             result[heading] = self._text(content)
             if links:
-                result[f"{heading}:links"] = links
+                result[f"{heading}:items"] = links
+            elif result[heading]:
+                result[f"{heading}:items"] = [(result[heading], "")]
         return result
 
-    @staticmethod
-    def _metadata_links(metadata: dict[str, object], key: str) -> list[str]:
-        value = metadata.get(f"{key}:links", [])
-        return list(value) if isinstance(value, list) else []
+    def _metadata_items(
+        self,
+        metadata: dict[str, object],
+        key: str,
+        path_pattern: re.Pattern[str],
+    ) -> list[ComicMetadataItem]:
+        value = metadata.get(f"{key}:items", [])
+        if not isinstance(value, list):
+            return []
+        items: list[ComicMetadataItem] = []
+        seen_labels: set[str] = set()
+        for raw_item in value:
+            if not isinstance(raw_item, tuple) or len(raw_item) != 2:
+                continue
+            label, href = raw_item
+            if not isinstance(label, str) or not isinstance(href, str):
+                continue
+            label = label.strip()
+            if not label or label in seen_labels:
+                continue
+            seen_labels.add(label)
+            items.append(
+                ComicMetadataItem(
+                    label=label,
+                    slug=self._extract_metadata_slug(href, path_pattern),
+                )
+            )
+        return items
+
+    def _extract_metadata_slug(
+        self,
+        href: str,
+        path_pattern: re.Pattern[str],
+    ) -> str | None:
+        if not href:
+            return None
+        parsed = urlparse(urljoin(f"{self.base_url}/", href))
+        if (
+            parsed.scheme not in {"http", "https"}
+            or (parsed.hostname or "").lower() != self.base_host
+            or parsed.query
+            or parsed.fragment
+        ):
+            return None
+        match = path_pattern.fullmatch(parsed.path)
+        if not match or not SLUG_PATTERN.fullmatch(match.group(1)):
+            return None
+        return match.group(1)
 
     @staticmethod
     def _metadata_text(metadata: dict[str, object], key: str) -> str:

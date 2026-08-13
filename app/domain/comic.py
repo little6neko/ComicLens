@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
@@ -56,20 +58,32 @@ class ComicChapter(ComicModel):
     updated_label: str | None = None
 
 
+class ComicMetadataItem(ComicModel):
+    label: str
+    slug: str | None = None
+
+
 class ComicDetail(ComicModel):
     comic_id: str
     title: str
     cover_url: str
     rating: float | None = None
     alternative_titles: list[str] = Field(default_factory=list)
-    authors: list[str] = Field(default_factory=list)
-    artists: list[str] = Field(default_factory=list)
-    genres: list[str] = Field(default_factory=list)
+    authors: list[ComicMetadataItem] = Field(default_factory=list)
+    artists: list[ComicMetadataItem] = Field(default_factory=list)
+    genres: list[ComicMetadataItem] = Field(default_factory=list)
     comic_type: str | None = None
     release_label: str | None = None
     status: str | None = None
     summary: str = ""
     chapters: list[ComicChapter] = Field(default_factory=list)
+
+
+class ComicCreatorArchive(ComicModel):
+    kind: Literal["author", "artist"]
+    creator_id: str
+    label: str
+    result: ComicListPage
 
 
 class SourcePage(ComicModel):
