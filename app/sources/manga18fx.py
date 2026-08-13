@@ -263,6 +263,7 @@ class Manga18fxSource:
             artists=self._metadata_links(metadata, "artist(s)"),
             genres=self._metadata_links(metadata, "genre(s)"),
             comic_type=self._metadata_text(metadata, "type") or None,
+            release_label=self._metadata_text(metadata, "release") or None,
             status=self._metadata_text(metadata, "status") or None,
             summary=self._text(soup.select_one(".panel-story-description .dsct")),
             chapters=chapters,

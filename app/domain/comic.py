@@ -66,6 +66,7 @@ class ComicDetail(ComicModel):
     artists: list[str] = Field(default_factory=list)
     genres: list[str] = Field(default_factory=list)
     comic_type: str | None = None
+    release_label: str | None = None
     status: str | None = None
     summary: str = ""
     chapters: list[ComicChapter] = Field(default_factory=list)

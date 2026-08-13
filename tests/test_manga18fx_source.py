@@ -167,6 +167,7 @@ async def test_detail_and_chapter_only_parse_scoped_content() -> None:
     assert detail.authors == ["Author One"]
     assert detail.genres == ["Action", "Fantasy"]
     assert detail.comic_type == "Webtoon"
+    assert detail.release_label == "2025"
     assert detail.status == "OnGoing"
     assert [item.chapter_id for item in detail.chapters] == ["chapter-12", "chapter-11"]
     assert chapter.title == "Alpha Comic Chapter 12"
@@ -174,6 +175,32 @@ async def test_detail_and_chapter_only_parse_scoped_content() -> None:
         "https://img01.manga18fx.com/online/1/12/1.jpg",
         "https://img01.manga18fx.com/online/1/12/2.jpg",
     ]
+
+
+@pytest.mark.asyncio
+async def test_detail_allows_missing_release_metadata() -> None:
+    release_item = (
+        b'<div class="post-content_item"><div class="summary-heading">'
+        b'<h5>Release</h5></div><div class="summary-content">2025</div></div>'
+    )
+    payload = fixture("detail.html").replace(
+        release_item,
+        b"",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html; charset=utf-8"},
+            content=payload,
+            request=request,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = Manga18fxSource(base_url="https://manga18fx.com", client=client)
+        detail = await source.detail("alpha-comic")
+
+    assert detail.release_label is None
 
 
 @pytest.mark.asyncio

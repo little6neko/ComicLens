@@ -67,6 +67,7 @@ class FakeComicSource:
             comic_id=comic_id,
             title="Alpha Comic",
             cover_url="https://manga18fx.com/webtoon/alpha.jpg",
+            release_label="2025",
             chapters=[ComicChapter(chapter_id="chapter-12", title="Chapter 12")],
         )
 
@@ -175,6 +176,7 @@ def test_catalog_api_uses_camel_case_and_controlled_media_urls(tmp_path: Path) -
     assert ranking.json()["period"] == "week"
     assert ranking.json()["result"]["page"] == 3
     assert detail.json()["coverUrl"] == "/api/media/covers/alpha-comic"
+    assert detail.json()["releaseLabel"] == "2025"
     assert ("search", "alpha", 2) in source.calls
 
 
