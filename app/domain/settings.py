@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import ConfigDict, Field, model_validator
 
 from app.domain.comic import ComicModel
 
@@ -26,8 +26,6 @@ class SensitiveSettingPatch(ComicModel):
 
 
 class ServerSettings(ComicModel):
-    theme: Literal["system", "light", "dark"]
-    reading_mode: Literal["strip", "page", "double"]
     page_direction: Literal["ltr", "rtl"]
     realtime_translation_default: bool
     source_language: Literal["AUTO", "EN", "KO"]
@@ -54,8 +52,8 @@ class ServerSettings(ComicModel):
 
 
 class ServerSettingsPatch(ComicModel):
-    theme: Literal["system", "light", "dark"] | None = None
-    reading_mode: Literal["strip", "page", "double"] | None = None
+    model_config = ConfigDict(extra="forbid")
+
     page_direction: Literal["ltr", "rtl"] | None = None
     realtime_translation_default: bool | None = None
     source_language: Literal["AUTO", "EN", "KO"] | None = None

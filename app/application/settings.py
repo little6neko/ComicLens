@@ -29,8 +29,6 @@ class SettingDefinition:
 
 
 SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
-    "theme": SettingDefinition("system"),
-    "reading_mode": SettingDefinition("strip"),
     "page_direction": SettingDefinition("ltr"),
     "realtime_translation_default": SettingDefinition(False),
     "source_language": SettingDefinition("AUTO"),

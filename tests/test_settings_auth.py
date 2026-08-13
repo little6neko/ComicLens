@@ -49,7 +49,7 @@ def test_database_runs_all_migrations_with_wal_and_foreign_keys(tmp_path: Path) 
     finally:
         database.close()
 
-    assert {row["version"] for row in versions} == {1, 2, 3, 4, 5, 6, 7}
+    assert {row["version"] for row in versions} == {1, 2, 3, 4, 5, 6, 7, 8}
     assert {
         "app_settings",
         "favorites",
@@ -75,6 +75,8 @@ def test_new_settings_use_async_ocr_deepl_and_auto_language_defaults(tmp_path: P
 
     assert settings.status_code == 200
     payload = settings.json()
+    assert "theme" not in payload
+    assert "readingMode" not in payload
     assert payload["sourceLanguage"] == "AUTO"
     assert payload["targetLanguage"] == "ZH-HANS"
     assert payload["ocrApiUrl"]["configured"] is True
@@ -90,6 +92,45 @@ def test_new_settings_use_async_ocr_deepl_and_auto_language_defaults(tmp_path: P
     assert "ocrAuthMode" not in payload
     assert "ocrBasicPassword" not in payload
     assert "deeplxTimeoutSeconds" not in payload
+
+
+def test_browser_preferences_are_removed_from_upgraded_database(tmp_path: Path) -> None:
+    database_path = tmp_path / "comiclens.db"
+    database = Database(database_path)
+    database.execute(
+        "INSERT INTO app_settings(key, value, is_secret, updated_at) VALUES (?, ?, 0, 1)",
+        ("theme", '"dark"'),
+    )
+    database.execute(
+        "INSERT INTO app_settings(key, value, is_secret, updated_at) VALUES (?, ?, 0, 1)",
+        ("reading_mode", '"double"'),
+    )
+    database.execute("DELETE FROM schema_migrations WHERE version = 8")
+    database.close()
+
+    migrated = Database(database_path)
+    try:
+        stored_keys = {
+            str(row["key"])
+            for row in migrated.fetchall("SELECT key FROM app_settings ORDER BY key")
+        }
+    finally:
+        migrated.close()
+
+    assert "theme" not in stored_keys
+    assert "reading_mode" not in stored_keys
+
+
+@pytest.mark.parametrize("payload", [{"theme": "light"}, {"readingMode": "page"}])
+def test_settings_reject_removed_browser_preferences(
+    tmp_path: Path,
+    payload: dict[str, str],
+) -> None:
+    with TestClient(create_app(config_for(tmp_path))) as client:
+        response = client.patch("/api/settings", json=payload)
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "VALIDATION_ERROR"
 
 
 def test_v2_settings_migrate_only_the_old_default_slice_height(tmp_path: Path) -> None:
@@ -216,7 +257,6 @@ def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> N
         updated = client.patch(
             "/api/settings",
             json={
-                "theme": "dark",
                 "ocrToken": {"action": "replace", "value": "new-secret-token"},
                 "deeplApiKey": {"action": "replace", "value": "test-deepl-key:fx"},
                 "deeplxUrl": {
@@ -234,7 +274,6 @@ def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> N
         "masked": "••••cret",
     }
     assert updated.status_code == 200
-    assert updated.json()["theme"] == "dark"
     assert updated.json()["ocrToken"] == {
         "configured": True,
         "masked": "••••oken",
@@ -257,7 +296,6 @@ def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> N
         persisted = client.get("/api/settings")
         cleared = client.patch("/api/settings", json={"ocrToken": {"action": "clear"}})
 
-    assert persisted.json()["theme"] == "dark"
     assert persisted.json()["ocrModel"] == "seed-model"
     assert persisted.json()["ocrToken"]["masked"] == "••••oken"
     assert cleared.json()["ocrToken"] == {"configured": False, "masked": None}
