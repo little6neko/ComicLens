@@ -5,6 +5,8 @@ export const queryKeys = {
   categories: ["categories"] as const,
   category: (categoryId: string, page: number, order: string) =>
     ["category", categoryId, page, order] as const,
+  creator: (kind: string, creatorId: string, page: number) =>
+    ["creator", kind, creatorId, page] as const,
   ranking: (page: number) => ["ranking", page] as const,
   comic: (comicId: string) => ["comic", comicId] as const,
   manifest: (comicId: string, chapterId: string) => ["manifest", comicId, chapterId] as const,

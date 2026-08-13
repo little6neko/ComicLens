@@ -27,6 +27,20 @@ export interface ComicListPage {
   hasNext: boolean;
 }
 
+export interface ComicMetadataItem {
+  label: string;
+  slug: string | null;
+}
+
+export type ComicCreatorKind = "author" | "artist";
+
+export interface ComicCreatorArchive {
+  kind: ComicCreatorKind;
+  creatorId: string;
+  label: string;
+  result: ComicListPage;
+}
+
 export interface FeaturedComic {
   comicId: string;
   title: string;
@@ -60,9 +74,9 @@ export interface ComicDetail {
   coverUrl: string;
   rating: number | null;
   alternativeTitles: string[];
-  authors: string[];
-  artists: string[];
-  genres: string[];
+  authors: ComicMetadataItem[];
+  artists: ComicMetadataItem[];
+  genres: ComicMetadataItem[];
   comicType: string | null;
   releaseLabel: string | null;
   status: string | null;

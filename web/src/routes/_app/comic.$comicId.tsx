@@ -9,12 +9,13 @@ import {
   LoaderCircleIcon,
   StarIcon,
 } from "lucide-react";
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { toast } from "sonner";
 
 import { AppPage } from "@/components/app-page";
 import { ErrorState, LoadingState } from "@/components/query-state";
 import { Button, buttonVariants } from "@/components/ui/button";
+import type { ComicCreatorKind, ComicMetadataItem } from "@/domain/api";
 import { resolveComicReadingTarget } from "@/features/comic-detail/reading-target";
 import { getComicStatusLabel } from "@/features/comic-detail/status-label";
 import { api } from "@/lib/api-client";
@@ -149,9 +150,22 @@ function ComicDetailPage() {
           {detail.genres.length > 0 && (
             <div className="flex flex-wrap gap-2">
               {detail.genres.map((genre) => (
-                <span key={genre} className="rounded-full bg-muted px-3 py-1.5 text-xs font-medium">
-                  {genre}
-                </span>
+                <Fragment key={`${genre.slug ?? "plain"}:${genre.label}`}>
+                  {genre.slug ? (
+                    <Link
+                      to="/explore/category/$categoryId"
+                      params={{ categoryId: genre.slug }}
+                      search={{ page: 1, order: "latest" }}
+                      className="rounded-full bg-muted px-3 py-1.5 text-xs font-medium outline-none transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                    >
+                      {genre.label}
+                    </Link>
+                  ) : (
+                    <span className="rounded-full bg-muted px-3 py-1.5 text-xs font-medium">
+                      {genre.label}
+                    </span>
+                  )}
+                </Fragment>
               ))}
             </div>
           )}
@@ -161,13 +175,17 @@ function ComicDetailPage() {
               {detail.authors.length > 0 && (
                 <div>
                   <dt className="text-muted-foreground">作者</dt>
-                  <dd>{detail.authors.join("、")}</dd>
+                  <dd>
+                    <CreatorLinks items={detail.authors} kind="author" />
+                  </dd>
                 </div>
               )}
               {detail.artists.length > 0 && (
                 <div>
                   <dt className="text-muted-foreground">绘者</dt>
-                  <dd>{detail.artists.join("、")}</dd>
+                  <dd>
+                    <CreatorLinks items={detail.artists} kind="artist" />
+                  </dd>
                 </div>
               )}
               {detail.releaseLabel && (
@@ -229,4 +247,24 @@ function ComicDetailPage() {
       </section>
     </AppPage>
   );
+}
+
+function CreatorLinks({ items, kind }: { items: ComicMetadataItem[]; kind: ComicCreatorKind }) {
+  return items.map((item, index) => (
+    <Fragment key={`${kind}:${item.slug ?? "plain"}:${item.label}`}>
+      {index > 0 && "、"}
+      {item.slug ? (
+        <Link
+          to="/explore/creator/$kind/$creatorId"
+          params={{ kind, creatorId: item.slug }}
+          search={{ page: 1 }}
+          className="rounded-sm underline-offset-4 outline-none transition-colors hover:text-primary hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+        >
+          {item.label}
+        </Link>
+      ) : (
+        <span>{item.label}</span>
+      )}
+    </Fragment>
+  ));
 }

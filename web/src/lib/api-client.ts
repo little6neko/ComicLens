@@ -6,6 +6,8 @@ import type {
   CacheStats,
   ChapterManifest,
   ComicCategory,
+  ComicCreatorArchive,
+  ComicCreatorKind,
   ComicDetail,
   ComicListPage,
   ComicOrder,
@@ -92,6 +94,12 @@ export const api = {
   category: (categoryId: string, page: number, order: ComicOrder) =>
     request<ComicListPage>(
       query(`/api/comics/categories/${encodeURIComponent(categoryId)}`, { page, order }),
+    ),
+  creator: (kind: ComicCreatorKind, creatorId: string, page: number) =>
+    request<ComicCreatorArchive>(
+      query(`/api/comics/creators/${encodeURIComponent(kind)}/${encodeURIComponent(creatorId)}`, {
+        page,
+      }),
     ),
   ranking: (page: number) => request<RankingPage>(query("/api/comics/ranking", { page })),
   comic: (comicId: string) => request<ComicDetail>(`/api/comics/${encodeURIComponent(comicId)}`),

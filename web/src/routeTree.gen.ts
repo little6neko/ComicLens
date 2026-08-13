@@ -22,6 +22,7 @@ import { Route as AppExploreRankingRouteImport } from './routes/_app/explore_.ra
 import { Route as AppExploreSearchRouteImport } from './routes/_app/explore_.search'
 import { Route as ReaderComicIdChapterIdRouteImport } from './routes/reader.$comicId.$chapterId'
 import { Route as AppExploreCategoryCategoryIdRouteImport } from './routes/_app/explore_.category.$categoryId'
+import { Route as AppExploreCreatorKindCreatorIdRouteImport } from './routes/_app/explore_.creator.$kind.$creatorId'
 
 const AppRoute = AppRouteImport.update({
   id: '/_app',
@@ -88,6 +89,12 @@ const AppExploreCategoryCategoryIdRoute =
     path: '/explore/category/$categoryId',
     getParentRoute: () => AppRoute,
   } as any)
+const AppExploreCreatorKindCreatorIdRoute =
+  AppExploreCreatorKindCreatorIdRouteImport.update({
+    id: '/explore_/creator/$kind/$creatorId',
+    path: '/explore/creator/$kind/$creatorId',
+    getParentRoute: () => AppRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
@@ -102,6 +109,7 @@ export interface FileRoutesByFullPath {
   '/explore/search': typeof AppExploreSearchRoute
   '/reader/$comicId/$chapterId': typeof ReaderComicIdChapterIdRoute
   '/explore/category/$categoryId': typeof AppExploreCategoryCategoryIdRoute
+  '/explore/creator/$kind/$creatorId': typeof AppExploreCreatorKindCreatorIdRoute
 }
 export interface FileRoutesByTo {
   '/login': typeof LoginRoute
@@ -116,6 +124,7 @@ export interface FileRoutesByTo {
   '/explore/search': typeof AppExploreSearchRoute
   '/reader/$comicId/$chapterId': typeof ReaderComicIdChapterIdRoute
   '/explore/category/$categoryId': typeof AppExploreCategoryCategoryIdRoute
+  '/explore/creator/$kind/$creatorId': typeof AppExploreCreatorKindCreatorIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -132,6 +141,7 @@ export interface FileRoutesById {
   '/_app/explore_/search': typeof AppExploreSearchRoute
   '/reader/$comicId/$chapterId': typeof ReaderComicIdChapterIdRoute
   '/_app/explore_/category/$categoryId': typeof AppExploreCategoryCategoryIdRoute
+  '/_app/explore_/creator/$kind/$creatorId': typeof AppExploreCreatorKindCreatorIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -148,6 +158,7 @@ export interface FileRouteTypes {
     | '/explore/search'
     | '/reader/$comicId/$chapterId'
     | '/explore/category/$categoryId'
+    | '/explore/creator/$kind/$creatorId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/login'
@@ -162,6 +173,7 @@ export interface FileRouteTypes {
     | '/explore/search'
     | '/reader/$comicId/$chapterId'
     | '/explore/category/$categoryId'
+    | '/explore/creator/$kind/$creatorId'
   id:
     | '__root__'
     | '/_app'
@@ -177,6 +189,7 @@ export interface FileRouteTypes {
     | '/_app/explore_/search'
     | '/reader/$comicId/$chapterId'
     | '/_app/explore_/category/$categoryId'
+    | '/_app/explore_/creator/$kind/$creatorId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -278,6 +291,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppExploreCategoryCategoryIdRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/explore_/creator/$kind/$creatorId': {
+      id: '/_app/explore_/creator/$kind/$creatorId'
+      path: '/explore/creator/$kind/$creatorId'
+      fullPath: '/explore/creator/$kind/$creatorId'
+      preLoaderRoute: typeof AppExploreCreatorKindCreatorIdRouteImport
+      parentRoute: typeof AppRoute
+    }
   }
 }
 
@@ -292,6 +312,7 @@ interface AppRouteChildren {
   AppExploreRankingRoute: typeof AppExploreRankingRoute
   AppExploreSearchRoute: typeof AppExploreSearchRoute
   AppExploreCategoryCategoryIdRoute: typeof AppExploreCategoryCategoryIdRoute
+  AppExploreCreatorKindCreatorIdRoute: typeof AppExploreCreatorKindCreatorIdRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
@@ -305,6 +326,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppExploreRankingRoute: AppExploreRankingRoute,
   AppExploreSearchRoute: AppExploreSearchRoute,
   AppExploreCategoryCategoryIdRoute: AppExploreCategoryCategoryIdRoute,
+  AppExploreCreatorKindCreatorIdRoute: AppExploreCreatorKindCreatorIdRoute,
 }
 
 const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)
