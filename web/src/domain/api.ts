@@ -64,6 +64,7 @@ export interface ComicDetail {
   artists: string[];
   genres: string[];
   comicType: string | null;
+  releaseLabel: string | null;
   status: string | null;
   summary: string;
   chapters: ComicChapter[];

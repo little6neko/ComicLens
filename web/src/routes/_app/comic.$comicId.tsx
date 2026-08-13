@@ -1,18 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import {
-  ArrowLeftIcon,
-  BookOpenIcon,
-  CheckIcon,
-  HeartIcon,
-  LoaderCircleIcon,
-  StarIcon,
-} from "lucide-react";
+import { ArrowLeftIcon, BookOpenIcon, HeartIcon, LoaderCircleIcon, StarIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { AppPage } from "@/components/app-page";
 import { ErrorState, LoadingState } from "@/components/query-state";
 import { Button, buttonVariants } from "@/components/ui/button";
+import { resolveComicReadingTarget } from "@/features/comic-detail/reading-target";
 import { api } from "@/lib/api-client";
 import { queryKeys, queryTimes } from "@/lib/query-keys";
 import { cn } from "@/lib/utils";
@@ -66,17 +60,8 @@ function ComicDetailPage() {
   }
 
   const detail = comic.data;
-  const firstChapter = detail.chapters[0];
   const progress = history.data?.find((item) => item.comic.comicId === comicId);
-  const readingTarget = progress
-    ? {
-        chapterId: progress.chapterId,
-        page: progress.pageIndex + 1,
-        label: "继续阅读",
-      }
-    : firstChapter
-      ? { chapterId: firstChapter.chapterId, page: 1, label: "开始阅读" }
-      : null;
+  const readingTarget = resolveComicReadingTarget(detail, progress);
   const readSet = new Set(readChapters.data?.chapterIds ?? []);
 
   return (
@@ -157,7 +142,7 @@ function ComicDetailPage() {
             </div>
           )}
 
-          {(detail.authors.length > 0 || detail.artists.length > 0) && (
+          {(detail.authors.length > 0 || detail.artists.length > 0 || detail.releaseLabel) && (
             <dl className="grid gap-2 text-sm sm:grid-cols-2">
               {detail.authors.length > 0 && (
                 <div>
@@ -169,6 +154,12 @@ function ComicDetailPage() {
                 <div>
                   <dt className="text-muted-foreground">绘者</dt>
                   <dd>{detail.artists.join("、")}</dd>
+                </div>
+              )}
+              {detail.releaseLabel && (
+                <div>
+                  <dt className="text-muted-foreground">发行日期</dt>
+                  <dd>{detail.releaseLabel}</dd>
                 </div>
               )}
             </dl>
@@ -192,12 +183,16 @@ function ComicDetailPage() {
               <a
                 key={chapter.chapterId}
                 href={`/reader/${encodeURIComponent(comicId)}/${encodeURIComponent(chapter.chapterId)}`}
-                className="flex items-center justify-between gap-4 px-5 py-4 transition-colors hover:bg-muted/60"
+                aria-label={`${chapter.title}${wasRead ? "（已读）" : ""}`}
+                className={cn(
+                  "flex items-center justify-between gap-4 px-5 py-4 outline-none transition-colors hover:bg-muted/60 focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
+                  wasRead &&
+                    "bg-muted text-muted-foreground ring-1 ring-muted-foreground/20 ring-inset hover:bg-muted/70 hover:text-foreground",
+                )}
               >
                 <span className="min-w-0 truncate font-medium">{chapter.title}</span>
                 <span className="flex shrink-0 items-center gap-3 text-xs text-muted-foreground">
                   {chapter.updatedLabel}
-                  {wasRead && <CheckIcon className="size-4 text-foreground" aria-label="已读" />}
                 </span>
               </a>
             );
