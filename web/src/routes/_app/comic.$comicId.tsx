@@ -16,6 +16,7 @@ import { AppPage } from "@/components/app-page";
 import { ErrorState, LoadingState } from "@/components/query-state";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { resolveComicReadingTarget } from "@/features/comic-detail/reading-target";
+import { getComicStatusLabel } from "@/features/comic-detail/status-label";
 import { api } from "@/lib/api-client";
 import { queryKeys, queryTimes } from "@/lib/query-keys";
 import { cn } from "@/lib/utils";
@@ -72,6 +73,7 @@ function ComicDetailPage() {
   const detail = comic.data;
   const progress = history.data?.find((item) => item.comic.comicId === comicId);
   const readingTarget = resolveComicReadingTarget(detail, progress);
+  const statusLabel = getComicStatusLabel(detail.status);
   const readSet = new Set(readChapters.data?.chapterIds ?? []);
   const displayedChapters = chaptersDescending ? detail.chapters : [...detail.chapters].reverse();
   const chapterSortLabel = chaptersDescending ? "当前为逆序，切换为正序" : "当前为正序，切换为逆序";
@@ -101,7 +103,7 @@ function ComicDetailPage() {
                   <StarIcon className="size-4 fill-current" /> {detail.rating.toFixed(1)}
                 </span>
               )}
-              {detail.status && <span>· {detail.status}</span>}
+              {statusLabel && <span>· {statusLabel}</span>}
               {detail.comicType && <span>· {detail.comicType}</span>}
             </div>
             <h1 className="mt-2 text-3xl font-bold tracking-[-0.035em] sm:text-5xl">
