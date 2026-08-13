@@ -92,7 +92,7 @@ export function ReaderBottomBar({
           comicId={comicId}
           chapter={nextChapter}
         />
-        <RoundAction label="目录" icon={<ListIcon />} onClick={onOpenDirectory} />
+        <RoundAction label="章节目录" icon={<ListIcon />} onClick={onOpenDirectory} />
         <ReaderSettingsMenu
           open={settingsOpen}
           onOpenChange={onSettingsOpenChange}

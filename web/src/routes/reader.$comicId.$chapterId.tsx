@@ -60,6 +60,10 @@ function ReaderPageView() {
     ...queryTimes.detail,
   });
   const settings = useQuery({ queryKey: queryKeys.settings, queryFn: api.settings });
+  const readChapters = useQuery({
+    queryKey: queryKeys.readChapters(comicId),
+    queryFn: () => api.readChapters(comicId),
+  });
   const task = useQuery({
     queryKey: taskKey,
     queryFn: () => api.translation(comicId, chapterId),
@@ -414,6 +418,7 @@ function ReaderPageView() {
         comicTitle={comic.data?.title ?? "ComicLens"}
         chapterId={chapterId}
         chapters={comic.data?.chapters ?? []}
+        readChapterIds={readChapters.data?.chapterIds ?? []}
       />
     </main>
   );

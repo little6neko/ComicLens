@@ -1,5 +1,5 @@
 import { Dialog } from "radix-ui";
-import { CheckIcon, XIcon } from "lucide-react";
+import { XIcon } from "lucide-react";
 import { useEffect, useMemo, useRef } from "react";
 
 import type { ComicChapter } from "@/domain/api";
@@ -15,6 +15,7 @@ export function ReaderChapterDirectory({
   comicTitle,
   chapterId,
   chapters,
+  readChapterIds,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -22,9 +23,11 @@ export function ReaderChapterDirectory({
   comicTitle: string;
   chapterId: string;
   chapters: ComicChapter[];
+  readChapterIds: string[];
 }) {
   const listRef = useRef<HTMLDivElement | null>(null);
   const readingOrder = useMemo(() => [...chapters].reverse(), [chapters]);
+  const readSet = useMemo(() => new Set(readChapterIds), [readChapterIds]);
 
   useEffect(() => {
     if (!open) return;
@@ -62,14 +65,19 @@ export function ReaderChapterDirectory({
             <div className="space-y-2">
               {readingOrder.map((chapter, index) => {
                 const current = chapter.chapterId === chapterId;
+                const wasRead = readSet.has(chapter.chapterId);
                 return (
                   <a
                     key={chapter.chapterId}
                     href={`/reader/${encodeURIComponent(comicId)}/${encodeURIComponent(chapter.chapterId)}`}
                     data-current-chapter={current ? "true" : undefined}
                     aria-current={current ? "page" : undefined}
+                    aria-label={`${chapter.title}${wasRead ? "（已读）" : ""}`}
                     className={cn(
                       "flex items-center gap-3 rounded-2xl border border-white/8 bg-white/[0.035] px-4 py-3 text-sm transition-colors hover:bg-white/10",
+                      wasRead &&
+                        !current &&
+                        "border-zinc-600/50 bg-zinc-800/75 text-zinc-400 hover:bg-zinc-700/70 hover:text-zinc-200",
                       current && "border-white/25 bg-white/12 text-white",
                     )}
                   >
@@ -77,7 +85,6 @@ export function ReaderChapterDirectory({
                       {index + 1}
                     </span>
                     <span className="min-w-0 flex-1 truncate">{chapter.title}</span>
-                    {current && <CheckIcon className="size-4 shrink-0" />}
                   </a>
                 );
               })}
