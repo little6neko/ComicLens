@@ -1,6 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { ArrowLeftIcon, BookOpenIcon, HeartIcon, LoaderCircleIcon, StarIcon } from "lucide-react";
+import {
+  ArrowDownNarrowWideIcon,
+  ArrowLeftIcon,
+  ArrowUpNarrowWideIcon,
+  BookOpenIcon,
+  HeartIcon,
+  LoaderCircleIcon,
+  StarIcon,
+} from "lucide-react";
+import { useState } from "react";
 import { toast } from "sonner";
 
 import { AppPage } from "@/components/app-page";
@@ -18,6 +27,7 @@ export const Route = createFileRoute("/_app/comic/$comicId")({
 function ComicDetailPage() {
   const { comicId } = Route.useParams();
   const queryClient = useQueryClient();
+  const [chaptersDescending, setChaptersDescending] = useState(true);
   const comic = useQuery({
     queryKey: queryKeys.comic(comicId),
     queryFn: () => api.comic(comicId),
@@ -63,6 +73,8 @@ function ComicDetailPage() {
   const progress = history.data?.find((item) => item.comic.comicId === comicId);
   const readingTarget = resolveComicReadingTarget(detail, progress);
   const readSet = new Set(readChapters.data?.chapterIds ?? []);
+  const displayedChapters = chaptersDescending ? detail.chapters : [...detail.chapters].reverse();
+  const chapterSortLabel = chaptersDescending ? "当前为逆序，切换为正序" : "当前为正序，切换为逆序";
 
   return (
     <AppPage>
@@ -174,10 +186,24 @@ function ComicDetailPage() {
       <section className="space-y-4">
         <div className="flex items-end justify-between">
           <h2 className="text-2xl font-semibold tracking-tight">章节</h2>
-          <span className="text-sm text-muted-foreground">{detail.chapters.length} 话</span>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            aria-label={chapterSortLabel}
+            title={chapterSortLabel}
+            onClick={() => setChaptersDescending((current) => !current)}
+          >
+            {detail.chapters.length} 话
+            {chaptersDescending ? (
+              <ArrowDownNarrowWideIcon className="size-4" />
+            ) : (
+              <ArrowUpNarrowWideIcon className="size-4" />
+            )}
+          </Button>
         </div>
         <div className="divide-y overflow-hidden rounded-3xl border bg-card">
-          {detail.chapters.map((chapter) => {
+          {displayedChapters.map((chapter) => {
             const wasRead = readSet.has(chapter.chapterId);
             return (
               <a
