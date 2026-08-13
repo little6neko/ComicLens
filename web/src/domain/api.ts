@@ -134,8 +134,6 @@ export interface SensitiveSettingState {
 }
 
 export interface ServerSettings {
-  theme: "system" | "light" | "dark";
-  readingMode: "strip" | "page" | "double";
   pageDirection: "ltr" | "rtl";
   realtimeTranslationDefault: boolean;
   sourceLanguage: "AUTO" | "EN" | "KO";

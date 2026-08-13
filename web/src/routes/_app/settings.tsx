@@ -32,6 +32,7 @@ import type {
 import { BackgroundTranslationTasks } from "@/features/settings/background-translation-tasks";
 import { api } from "@/lib/api-client";
 import { queryKeys } from "@/lib/query-keys";
+import { useReadingMode } from "@/lib/reading-mode-preference";
 import { cn } from "@/lib/utils";
 
 type Draft = Omit<
@@ -65,7 +66,8 @@ export const Route = createFileRoute("/_app/settings")({ component: SettingsPage
 
 function SettingsPage() {
   const queryClient = useQueryClient();
-  const { setTheme } = useTheme();
+  const { theme, setTheme } = useTheme();
+  const [readingMode, setReadingMode] = useReadingMode();
   const settings = useQuery({ queryKey: queryKeys.settings, queryFn: api.settings });
   const cache = useQuery({ queryKey: queryKeys.cache, queryFn: api.cacheStats });
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -82,7 +84,6 @@ function SettingsPage() {
       queryClient.setQueryData(queryKeys.settings, next);
       setDraft(toDraft(next));
       setSecrets(emptySecrets());
-      setTheme(next.theme);
       await queryClient.invalidateQueries({ queryKey: queryKeys.cache });
       toast.success("设置已保存到服务器");
     },
@@ -136,7 +137,9 @@ function SettingsPage() {
           <SettingsIcon className="size-5" />
         </div>
         <h1 className="text-4xl font-bold tracking-tight">设置</h1>
-        <p className="mt-2 text-muted-foreground">阅读、翻译接口和缓存配置都保存在服务器。</p>
+        <p className="mt-2 text-muted-foreground">
+          主题和阅读模式保存在浏览器，其余设置保存在服务器。
+        </p>
       </header>
 
       {settings.data.publicListenerWarning && (
@@ -157,8 +160,8 @@ function SettingsPage() {
         <SettingsSection icon={<BookOpenIcon />} title="阅读">
           <Field label="主题">
             <Select
-              value={draft.theme}
-              onValueChange={(value) => patch("theme", value as Draft["theme"])}
+              value={isTheme(theme) ? theme : "system"}
+              onValueChange={setTheme}
               ariaLabel="主题"
               options={[
                 ["system", "跟随系统"],
@@ -169,8 +172,8 @@ function SettingsPage() {
           </Field>
           <Field label="默认阅读模式">
             <Select
-              value={draft.readingMode}
-              onValueChange={(value) => patch("readingMode", value as Draft["readingMode"])}
+              value={readingMode}
+              onValueChange={(value) => setReadingMode(value as typeof readingMode)}
               ariaLabel="默认阅读模式"
               options={[
                 ["strip", "条漫"],
@@ -179,7 +182,7 @@ function SettingsPage() {
               ]}
             />
           </Field>
-          {draft.readingMode !== "strip" && (
+          {readingMode !== "strip" && (
             <Field label="翻页方向">
               <Select
                 value={draft.pageDirection}
@@ -600,6 +603,10 @@ function toDraft(settings: ServerSettings): Draft {
     ...draft
   } = settings;
   return draft;
+}
+
+function isTheme(value: string | undefined): value is "system" | "light" | "dark" {
+  return value === "system" || value === "light" || value === "dark";
 }
 
 function emptySecrets(): Record<SecretKey, SecretDraft> {

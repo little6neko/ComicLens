@@ -14,6 +14,7 @@ import type { EffectiveReaderPage, ReadingMode } from "@/features/reader/types";
 import { useReaderChrome } from "@/features/reader/use-reader-chrome";
 import { api } from "@/lib/api-client";
 import { queryKeys, queryTimes } from "@/lib/query-keys";
+import { useReadingMode } from "@/lib/reading-mode-preference";
 import { positivePage } from "@/lib/route-search";
 import { cn } from "@/lib/utils";
 
@@ -36,8 +37,8 @@ function ReaderPageView() {
   const queryClient = useQueryClient();
   const taskKey = queryKeys.translation(comicId, chapterId);
   const chapterKey = `${comicId}:${chapterId}`;
+  const [readingMode, setReadingMode] = useReadingMode();
   const [translationEnabled, setTranslationEnabled] = useState<boolean | null>(null);
-  const [modeOverride, setModeOverride] = useState<ReadingMode | null>(null);
   const [directionOverride, setDirectionOverride] = useState<"ltr" | "rtl" | null>(null);
   const [currentPageIndex, setCurrentPageIndex] = useState(requestedPage - 1);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -112,9 +113,8 @@ function ReaderPageView() {
     },
     onError: showActionError,
   });
-  const saveReadingSettings = useMutation({
-    mutationFn: (patch: { readingMode?: ReadingMode; pageDirection?: "ltr" | "rtl" }) =>
-      api.patchSettings(patch),
+  const savePageDirection = useMutation({
+    mutationFn: (pageDirection: "ltr" | "rtl") => api.patchSettings({ pageDirection }),
     onSuccess: (next) => queryClient.setQueryData(queryKeys.settings, next),
     onError: (error) => toast.error(error instanceof Error ? error.message : "阅读设置保存失败"),
   });
@@ -123,7 +123,6 @@ function ReaderPageView() {
     onSuccess: (next) => queryClient.setQueryData(queryKeys.readChapters(comicId), next),
   });
 
-  const readingMode = modeOverride ?? settings.data?.readingMode ?? "strip";
   const pageDirection = directionOverride ?? settings.data?.pageDirection ?? "ltr";
   const effectivePages = useMemo(() => {
     if (!manifest.data) return [];
@@ -143,7 +142,6 @@ function ReaderPageView() {
     if (!settings.isSuccess && !settings.isError) return;
     initializedChapter.current = chapterKey;
     setCurrentPageIndex(requestedPage - 1);
-    setModeOverride(null);
     setDirectionOverride(null);
     setActionError(null);
     const enabled = settings.data?.realtimeTranslationDefault ?? false;
@@ -242,8 +240,7 @@ function ReaderPageView() {
   }
 
   function changeMode(mode: ReadingMode) {
-    setModeOverride(mode);
-    saveReadingSettings.mutate({ readingMode: mode });
+    setReadingMode(mode);
     if (mode === "strip") {
       window.setTimeout(() => pageElements.current.get(clampedCurrent)?.scrollIntoView(), 0);
     }
@@ -251,7 +248,7 @@ function ReaderPageView() {
 
   function changeDirection(direction: "ltr" | "rtl") {
     setDirectionOverride(direction);
-    saveReadingSettings.mutate({ pageDirection: direction });
+    savePageDirection.mutate(direction);
   }
 
   function retranslateChapter() {

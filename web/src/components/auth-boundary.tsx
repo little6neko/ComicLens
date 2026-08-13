@@ -1,6 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
 import { LoaderCircleIcon } from "lucide-react";
-import { useTheme } from "next-themes";
 import { useEffect, type ReactNode } from "react";
 
 import { api } from "@/lib/api-client";
@@ -8,21 +7,12 @@ import { queryKeys } from "@/lib/query-keys";
 
 export function AuthBoundary({ children }: { children: ReactNode }) {
   const path = window.location.pathname;
-  const { setTheme } = useTheme();
   const session = useQuery({
     queryKey: queryKeys.auth,
     queryFn: api.authSession,
     staleTime: 30_000,
     retry: false,
   });
-  const canLoadSettings = !!session.data?.authenticated && path !== "/login";
-  const settings = useQuery({
-    queryKey: queryKeys.settings,
-    queryFn: api.settings,
-    enabled: canLoadSettings,
-    staleTime: 60_000,
-  });
-
   useEffect(() => {
     if (!session.data) return;
     if (session.data.enabled && !session.data.authenticated && path !== "/login") {
@@ -32,10 +22,6 @@ export function AuthBoundary({ children }: { children: ReactNode }) {
       window.location.replace("/");
     }
   }, [path, session.data]);
-
-  useEffect(() => {
-    if (settings.data?.theme) setTheme(settings.data.theme);
-  }, [setTheme, settings.data?.theme]);
 
   const allowed =
     session.data &&

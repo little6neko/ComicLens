@@ -152,7 +152,6 @@
 
 .settings-select-content {
   transform-origin: var(--radix-dropdown-menu-content-transform-origin);
-  will-change: transform, opacity;
 }
 
 .settings-select-content[data-state="open"] {

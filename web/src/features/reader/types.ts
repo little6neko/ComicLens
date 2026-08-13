@@ -6,7 +6,7 @@ import type {
   TranslationSegmentState,
 } from "@/domain/api";
 
-export type ReadingMode = "strip" | "page" | "double";
+export type { ReadingMode } from "@/lib/reading-mode-preference";
 
 export interface EffectiveReaderPage extends ReaderPage {
   effectiveStatus: TranslationPageStatus;
