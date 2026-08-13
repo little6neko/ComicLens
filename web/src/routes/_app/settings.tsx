@@ -28,6 +28,7 @@ import type {
   ServerSettings,
   SettingsPatch,
 } from "@/domain/api";
+import { BackgroundTranslationTasks } from "@/features/settings/background-translation-tasks";
 import { api } from "@/lib/api-client";
 import { queryKeys } from "@/lib/query-keys";
 import { cn } from "@/lib/utils";
@@ -148,6 +149,8 @@ function SettingsPage() {
           </div>
         </div>
       )}
+
+      <BackgroundTranslationTasks />
 
       <form onSubmit={submit} className="space-y-6">
         <SettingsSection icon={<BookOpenIcon />} title="阅读">
@@ -305,7 +308,11 @@ function SettingsPage() {
           />
         </SettingsSection>
 
-        <SettingsSection icon={<SlidersHorizontalIcon />} title="长图高级设置" defaultOpen={false}>
+        <SettingsSection
+          icon={<SlidersHorizontalIcon />}
+          title="OCR 长图高级设置"
+          defaultOpen={false}
+        >
           <NumberField
             label="长图阈值（px）"
             value={draft.longImageThreshold}

@@ -13,6 +13,7 @@ export const queryKeys = {
   readChapters: (comicId: string) => ["readChapters", comicId] as const,
   settings: ["settings"] as const,
   cache: ["cache"] as const,
+  backgroundTranslations: ["backgroundTranslations"] as const,
   translation: (comicId: string, chapterId: string) => ["translation", comicId, chapterId] as const,
 };
 

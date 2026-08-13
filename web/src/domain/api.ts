@@ -260,6 +260,42 @@ export interface TranslationActionResult {
   task: TranslationTaskState;
 }
 
+export type BackgroundTranslationStage =
+  | "preparing"
+  | "queued"
+  | "ocr"
+  | "translating"
+  | "rendering"
+  | "stopping"
+  | "processing";
+
+export interface BackgroundTranslationTask {
+  comicId: string;
+  chapterId: string;
+  comicTitle: string;
+  chapterTitle: string;
+  generationId: string;
+  kind: "normal" | "retranslate" | "retry";
+  status: TranslationTaskStatus;
+  stage: BackgroundTranslationStage;
+  currentPageIndex: number | null;
+  currentSegment: CurrentTranslationSegment | null;
+  planningComplete: boolean;
+  totalPages: number;
+  preparedPages: number;
+  completedPages: number;
+  failedPages: number;
+  totalSegments: number;
+  completedSegments: number;
+  failedSegments: number;
+}
+
+export interface ForceStopTranslationResult {
+  comicId: string;
+  chapterId: string;
+  stoppedGenerations: number;
+}
+
 export interface AuthConfig {
   enabled: boolean;
 }

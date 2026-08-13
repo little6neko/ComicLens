@@ -2,6 +2,7 @@ import type {
   ApiErrorPayload,
   AuthConfig,
   AuthSession,
+  BackgroundTranslationTask,
   CacheStats,
   ChapterManifest,
   ComicCategory,
@@ -9,6 +10,7 @@ import type {
   ComicListPage,
   ComicOrder,
   FavoriteItem,
+  ForceStopTranslationResult,
   HistoryItem,
   HomeFeed,
   RankingPage,
@@ -144,12 +146,19 @@ export const api = {
       `/api/system/cache/comics/${encodeURIComponent(comicId)}/chapters/${encodeURIComponent(chapterId)}`,
       json("DELETE"),
     ),
+  backgroundTranslations: () =>
+    request<BackgroundTranslationTask[]>("/api/translations/background"),
   translation: (comicId: string, chapterId: string) =>
     request<TranslationTaskState>(translationPath(comicId, chapterId)),
   startTranslation: (comicId: string, chapterId: string) =>
     request<TranslationActionResult>(`${translationPath(comicId, chapterId)}/start`, json("POST")),
   pauseTranslation: (comicId: string, chapterId: string) =>
     request<TranslationActionResult>(`${translationPath(comicId, chapterId)}/pause`, json("POST")),
+  forceStopTranslation: (comicId: string, chapterId: string) =>
+    request<ForceStopTranslationResult>(
+      `${translationPath(comicId, chapterId)}/force-stop`,
+      json("POST"),
+    ),
   retranslate: (comicId: string, chapterId: string) =>
     request<TranslationActionResult>(
       `${translationPath(comicId, chapterId)}/retranslate`,
