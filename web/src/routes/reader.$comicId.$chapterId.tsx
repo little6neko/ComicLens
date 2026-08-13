@@ -279,6 +279,13 @@ function ReaderPageView() {
       </main>
     );
   }
+  if (translationEnabled === null) {
+    return (
+      <main className="min-h-dvh bg-zinc-950 text-zinc-100">
+        <LoadingState label="正在载入阅读设置…" />
+      </main>
+    );
+  }
 
   const currentChapterIndex = comic.data?.chapters.findIndex(
     (item) => item.chapterId === chapterId,
@@ -346,6 +353,7 @@ function ReaderPageView() {
               key={page.index}
               page={page}
               translationEnabled={translationEnabled ?? false}
+              totalSegments={task.data?.totalSegments ?? 0}
               retryingSegment={retryingSegment}
               onRetrySegment={(pageIndex, segmentIndex) =>
                 retrySegment.mutate({ pageIndex, segmentIndex })
@@ -371,6 +379,7 @@ function ReaderPageView() {
                 page={page}
                 paged
                 translationEnabled={translationEnabled ?? false}
+                totalSegments={task.data?.totalSegments ?? 0}
                 retryingSegment={retryingSegment}
                 onRetrySegment={(pageIndex, segmentIndex) =>
                   retrySegment.mutate({ pageIndex, segmentIndex })
