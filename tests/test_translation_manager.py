@@ -51,6 +51,9 @@ class FakeTranslationSource:
         self.media_calls: list[str] = []
         self.replacement_urls: dict[int, str] = {}
         self.expired_urls: set[str] = set()
+        self.block_page_index: int | None = None
+        self.blocked_page_started = asyncio.Event()
+        self.blocked_page_release = asyncio.Event()
 
     async def chapter(self, comic_id: str, chapter_id: str) -> SourceChapterManifest:
         return SourceChapterManifest(
@@ -78,6 +81,9 @@ class FakeTranslationSource:
                 response=httpx.Response(403),
             )
         index = int(source_url.rsplit("/", 1)[1].split(".", 1)[0])
+        if index == self.block_page_index:
+            self.blocked_page_started.set()
+            await self.blocked_page_release.wait()
         return make_png((30 + index, 60, 90), self.image_size), "image/png"
 
     async def aclose(self) -> None:
@@ -90,6 +96,7 @@ class ControlledPipeline:
         self.translation_calls = 0
         self.render_calls = 0
         self.block_first_ocr = False
+        self.block_ocr_call: int | None = None
         self.block_next_render = False
         self.fail_translation_calls: set[int] = set()
         self.ocr_started = asyncio.Event()
@@ -99,7 +106,9 @@ class ControlledPipeline:
 
     async def run_ocr(self, original_bytes: bytes) -> OCROutput:
         self.ocr_calls += 1
-        if self.block_first_ocr and self.ocr_calls == 1:
+        if (self.block_first_ocr and self.ocr_calls == 1) or (
+            self.block_ocr_call == self.ocr_calls
+        ):
             self.ocr_started.set()
             await self.ocr_release.wait()
         with Image.open(io.BytesIO(original_bytes)) as opened:
@@ -581,8 +590,8 @@ async def test_pause_finishes_current_segment_then_resumes_next(
         started = await harness.manager.start("alpha", "chapter-1")
         await wait_for(harness.pipeline.ocr_started.is_set)
         during_ocr = harness.manager.state("alpha", "chapter-1")
-        assert len(harness.source.media_calls) == 3
-        assert during_ocr.total_segments == 3
+        assert 1 <= len(harness.source.media_calls) <= 3
+        assert 1 <= during_ocr.total_segments <= 3
         assert during_ocr.completed_segments == 0
 
         stopping = await harness.manager.pause("alpha", "chapter-1")
@@ -610,6 +619,130 @@ async def test_pause_finishes_current_segment_then_resumes_next(
         assert finished.completed_pages == 3
         assert harness.pipeline.ocr_calls == 3
     finally:
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_first_page_starts_ocr_while_second_page_is_still_loading(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path, page_count=2)
+    harness.source.block_page_index = 1
+    harness.pipeline.block_first_ocr = True
+    try:
+        started = await harness.manager.start("alpha", "chapter-1")
+        await wait_for(harness.source.blocked_page_started.is_set)
+        await wait_for(harness.pipeline.ocr_started.is_set)
+
+        streaming = harness.manager.state("alpha", "chapter-1")
+        assert streaming.generation_id == started.generation_id
+        assert streaming.status == "running"
+        assert streaming.planning_complete is False
+        assert streaming.total_segments == 1
+        assert streaming.completed_segments == 0
+        assert streaming.current_segment is not None
+        assert streaming.current_segment.page_index == 0
+        assert harness.repository.page(str(started.generation_id), 0)["prepared"] == 1
+        assert harness.repository.page(str(started.generation_id), 1)["prepared"] == 0
+
+        harness.pipeline.ocr_release.set()
+        harness.source.blocked_page_release.set()
+        await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
+
+        completed = harness.manager.state("alpha", "chapter-1")
+        assert completed.planning_complete is True
+        assert (completed.completed_segments, completed.total_segments) == (2, 2)
+    finally:
+        harness.pipeline.ocr_release.set()
+        harness.source.blocked_page_release.set()
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_consumer_waits_for_more_segments_until_planning_is_complete(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path, page_count=2)
+    harness.source.block_page_index = 1
+    try:
+        await harness.manager.start("alpha", "chapter-1")
+        await wait_for(harness.source.blocked_page_started.is_set)
+        await wait_for(
+            lambda: harness.manager.state("alpha", "chapter-1").completed_segments == 1
+        )
+
+        waiting = harness.manager.state("alpha", "chapter-1")
+        assert waiting.status == "running"
+        assert waiting.planning_complete is False
+        assert (waiting.completed_segments, waiting.total_segments) == (1, 1)
+        assert waiting.current_segment is None
+
+        harness.source.blocked_page_release.set()
+        await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
+        completed = harness.manager.state("alpha", "chapter-1")
+        assert completed.planning_complete is True
+        assert (completed.completed_segments, completed.total_segments) == (2, 2)
+    finally:
+        harness.source.blocked_page_release.set()
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_streaming_segment_denominator_grows_from_five_to_ten(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(
+        tmp_path,
+        page_count=2,
+        image_size=(120, 8000),
+        translation_settings={
+            "long_image_threshold": 1000,
+            "ocr_slice_height": 1800,
+            "ocr_slice_overlap": 200,
+        },
+    )
+    harness.source.block_page_index = 1
+    harness.pipeline.block_ocr_call = 4
+    try:
+        await harness.manager.start("alpha", "chapter-1")
+        await wait_for(harness.source.blocked_page_started.is_set)
+        await wait_for(harness.pipeline.ocr_started.is_set)
+
+        first_page = harness.manager.state("alpha", "chapter-1")
+        assert first_page.planning_complete is False
+        assert (first_page.completed_segments, first_page.total_segments) == (3, 5)
+        assert first_page.current_segment is not None
+        assert (
+            first_page.current_segment.page_index,
+            first_page.current_segment.segment_index,
+        ) == (0, 3)
+
+        harness.source.blocked_page_release.set()
+        await wait_for(
+            lambda: harness.manager.state("alpha", "chapter-1").total_segments == 10
+        )
+        grown = harness.manager.state("alpha", "chapter-1")
+        assert grown.planning_complete is True
+        assert (grown.completed_segments, grown.total_segments) == (3, 10)
+        assert grown.current_segment is not None
+        assert (grown.current_segment.page_index, grown.current_segment.segment_index) == (0, 3)
+
+        harness.pipeline.ocr_release.set()
+        await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
+        completed = harness.manager.state("alpha", "chapter-1")
+        assert (completed.completed_segments, completed.total_segments) == (10, 10)
+        assert [
+            (segment.page_index, segment.segment_index, segment.global_index)
+            for page in completed.pages
+            for segment in page.segments
+        ] == [
+            (page_index, segment_index, page_index * 5 + segment_index)
+            for page_index in range(2)
+            for segment_index in range(5)
+        ]
+    finally:
+        harness.pipeline.ocr_release.set()
+        harness.source.blocked_page_release.set()
         await harness.close()
 
 

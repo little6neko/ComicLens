@@ -567,6 +567,19 @@ class TranslationManager:
                 generation_id = str(generation["generation_id"])
                 self.cache.set_chapter_active(comic_id, chapter_id, True)
                 try:
+                    semantic = self.repository.decode_semantic_settings(generation)
+                    if semantic.get("pipelineVersion") == PROGRESSIVE_PIPELINE_VERSION:
+                        if not self.repository.begin_preparing(generation_id):
+                            current = self.repository.generation(generation_id)
+                            if current is not None and bool(current["stop_requested"]):
+                                self.repository.set_generation_status(
+                                    generation_id,
+                                    "paused",
+                                    stop_requested=False,
+                                )
+                            continue
+                        await self._run_streaming_generation(generation_id)
+                        continue
                     if not bool(generation["planning_complete"]):
                         if not self.repository.begin_preparing(generation_id):
                             continue
@@ -635,11 +648,203 @@ class TranslationManager:
                     self.cache.set_chapter_active(comic_id, chapter_id, False)
                     self.cache.enforce_limit()
 
+    async def _run_streaming_generation(self, generation_id: str) -> None:
+        generation = self.repository.generation(generation_id)
+        if generation is None:
+            return
+        comic_id = str(generation["comic_id"])
+        chapter_id = str(generation["chapter_id"])
+        semantic = self.repository.decode_semantic_settings(generation)
+        source_pages = await self._generation_source_pages(generation)
+        runtime = self._runtime_settings(
+            require_services=True,
+            translation_service=(
+                str(semantic["translationService"])
+                if semantic.get("translationService")
+                else None
+            ),
+        )
+        pipeline = self._pipeline_factory(semantic, runtime)
+        segments_available = asyncio.Event()
+
+        async def produce() -> bool:
+            try:
+                return await self._planner.prepare_incrementally(
+                    generation_id,
+                    comic_id,
+                    chapter_id,
+                    source_pages,
+                    semantic,
+                    should_stop=lambda: bool(
+                        (current := self.repository.generation(generation_id))
+                        and current["stop_requested"]
+                    ),
+                    on_segments_added=segments_available.set,
+                )
+            finally:
+                segments_available.set()
+
+        producer = asyncio.create_task(
+            produce(),
+            name=f"prepare:{comic_id}:{chapter_id}",
+        )
+        consumer = asyncio.create_task(
+            self._consume_streaming_segments(
+                generation_id,
+                comic_id,
+                chapter_id,
+                pipeline,
+                segments_available,
+            ),
+            name=f"consume:{comic_id}:{chapter_id}",
+        )
+        try:
+            producer_result, consumer_result = await asyncio.gather(
+                producer,
+                consumer,
+            )
+        except BaseException:
+            producer.cancel()
+            consumer.cancel()
+            await asyncio.gather(producer, consumer, return_exceptions=True)
+            raise
+
+        if not producer_result or not consumer_result:
+            self.repository.set_generation_status(
+                generation_id,
+                "paused",
+                stop_requested=False,
+            )
+            return
+
+        finished = self.repository.generation(generation_id)
+        if finished is None:
+            return
+        status = (
+            "completed_with_errors"
+            if int(finished["failed_segments"]) > 0
+            else "completed"
+        )
+        self.repository.set_generation_status(
+            generation_id,
+            status,
+            stop_requested=False,
+        )
+
+    async def _consume_streaming_segments(
+        self,
+        generation_id: str,
+        comic_id: str,
+        chapter_id: str,
+        pipeline: ImageTranslationPipeline,
+        segments_available: asyncio.Event,
+    ) -> bool:
+        while True:
+            current = self.repository.generation(generation_id)
+            if current is None:
+                return False
+            if bool(current["stop_requested"]):
+                return False
+
+            pending = self.repository.pending_segments(generation_id)
+            if not pending:
+                if bool(current["planning_complete"]):
+                    await self._finalize_progressive_pages(
+                        generation_id,
+                        comic_id,
+                        chapter_id,
+                    )
+                    self.repository.refresh_counts(generation_id)
+                    return True
+
+                segments_available.clear()
+                current = self.repository.generation(generation_id)
+                if current is None:
+                    return False
+                if bool(current["stop_requested"]):
+                    return False
+                if bool(current["planning_complete"]):
+                    continue
+                if self.repository.pending_segments(generation_id):
+                    continue
+                await segments_available.wait()
+                continue
+
+            segment = pending[0]
+            page_index = int(segment["page_index"])
+            segment_index = int(segment["segment_index"])
+            if not self.repository.begin_segment(
+                generation_id,
+                page_index,
+                segment_index,
+            ):
+                continue
+
+            segment_completed = False
+            try:
+                await self._segment_runner.process(
+                    generation_id,
+                    comic_id,
+                    chapter_id,
+                    page_index,
+                    segment_index,
+                    pipeline,
+                )
+                segment_completed = True
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                failed = self.repository.segment(
+                    generation_id,
+                    page_index,
+                    segment_index,
+                )
+                stage = str(failed["status"] if failed else "ocr")
+                code, message = self._classify_error(stage, exc)
+                self.repository.fail_segment(
+                    generation_id,
+                    page_index,
+                    segment_index,
+                    stage=stage,
+                    code=code,
+                    summary=message,
+                )
+                self.repository.finalize_page_from_segments(generation_id, page_index)
+
+            if segment_completed:
+                await self._segment_runner.publish_page_if_complete(
+                    generation_id,
+                    comic_id,
+                    chapter_id,
+                    page_index,
+                )
+
+            if not self.repository.finish_segment(generation_id):
+                return False
+
     async def _prepare_generation(self, generation_id: str) -> bool:
         generation = self.repository.generation(generation_id)
         if generation is None:
             return False
         semantic = self.repository.decode_semantic_settings(generation)
+        source_pages = await self._generation_source_pages(generation)
+        return await self._planner.prepare(
+            generation_id,
+            str(generation["comic_id"]),
+            str(generation["chapter_id"]),
+            source_pages,
+            semantic,
+            should_stop=lambda: bool(
+                (current := self.repository.generation(generation_id))
+                and current["stop_requested"]
+            ),
+        )
+
+    async def _generation_source_pages(
+        self,
+        generation: Any,
+    ) -> dict[int, str]:
+        generation_id = str(generation["generation_id"])
         pages = self.repository.database.fetchall(
             """
             SELECT page_index, source_url FROM translation_pages
@@ -655,16 +860,7 @@ class TranslationManager:
                 str(generation["comic_id"]),
                 str(generation["chapter_id"]),
             )
-        return await self._planner.prepare(
-            generation_id,
-            str(generation["comic_id"]),
-            str(generation["chapter_id"]),
-            source_pages,
-            semantic,
-            should_stop=lambda: bool(
-                (current := self.repository.generation(generation_id)) and current["stop_requested"]
-            ),
-        )
+        return source_pages
 
     async def _run_generation(self, generation_id: str) -> None:
         generation = self.repository.generation(generation_id)

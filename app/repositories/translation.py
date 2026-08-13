@@ -676,6 +676,44 @@ class TranslationRepository:
             )
         )
 
+    def begin_segment(
+        self,
+        generation_id: str,
+        page_index: int,
+        segment_index: int,
+    ) -> bool:
+        return bool(
+            self.database.execute(
+                """
+                UPDATE translation_generations SET status = 'running',
+                    current_page_index = ?, current_segment_index = ?,
+                    updated_at = ?
+                WHERE generation_id = ? AND stop_requested = 0
+                  AND status IN ('preparing', 'queued', 'running')
+                """,
+                (
+                    page_index,
+                    segment_index,
+                    self._timestamp(),
+                    generation_id,
+                ),
+            )
+        )
+
+    def finish_segment(self, generation_id: str) -> bool:
+        return bool(
+            self.database.execute(
+                """
+                UPDATE translation_generations SET status = 'running',
+                    current_page_index = NULL, current_segment_index = NULL,
+                    updated_at = ?
+                WHERE generation_id = ? AND stop_requested = 0
+                  AND status = 'running'
+                """,
+                (self._timestamp(), generation_id),
+            )
+        )
+
     def request_stop(self, generation_id: str) -> str | None:
         row = self.generation(generation_id)
         if row is None:
