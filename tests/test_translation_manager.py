@@ -99,6 +99,7 @@ class ControlledPipeline:
         self.active_ocr_calls = 0
         self.max_active_ocr_calls = 0
         self.completed_ocr_calls: list[int] = []
+        self.completed_ocr_segments: list[tuple[int, int]] = []
         self.translation_calls = 0
         self.translation_inputs: list[list[str]] = []
         self.render_calls = 0
@@ -106,8 +107,11 @@ class ControlledPipeline:
         self.block_ocr_call: int | None = None
         self.block_next_render = False
         self.fail_translation_calls: set[int] = set()
+        self.fail_ocr_segments: set[tuple[int, int]] = set()
         self.blocked_ocr_calls: set[int] = set()
         self.ocr_call_releases: dict[int, asyncio.Event] = {}
+        self.blocked_ocr_segments: set[tuple[int, int]] = set()
+        self.ocr_segment_releases: dict[tuple[int, int], asyncio.Event] = {}
         self.ocr_started = asyncio.Event()
         self.ocr_release = asyncio.Event()
         self.render_started = asyncio.Event()
@@ -122,6 +126,15 @@ class ControlledPipeline:
     async def _run_ocr(self, original_bytes: bytes) -> OCROutput:
         self.ocr_calls += 1
         call_number = self.ocr_calls
+        task_name = asyncio.current_task().get_name() if asyncio.current_task() else ""
+        name_parts = task_name.rsplit(":", 2)
+        segment_key = (
+            (int(name_parts[-2]), int(name_parts[-1]))
+            if len(name_parts) == 3
+            and name_parts[-2].isdigit()
+            and name_parts[-1].isdigit()
+            else None
+        )
         self.active_ocr_calls += 1
         self.max_active_ocr_calls = max(self.max_active_ocr_calls, self.active_ocr_calls)
         try:
@@ -129,17 +142,25 @@ class ControlledPipeline:
                 (self.block_first_ocr and call_number == 1)
                 or self.block_ocr_call == call_number
                 or call_number in self.blocked_ocr_calls
+                or segment_key in self.blocked_ocr_segments
             ):
                 self.ocr_started.set()
-                release = self.ocr_call_releases.setdefault(call_number, asyncio.Event())
-                if call_number in self.blocked_ocr_calls:
+                if segment_key in self.blocked_ocr_segments:
+                    release = self.ocr_segment_releases.setdefault(segment_key, asyncio.Event())
+                    await release.wait()
+                elif call_number in self.blocked_ocr_calls:
+                    release = self.ocr_call_releases.setdefault(call_number, asyncio.Event())
                     await release.wait()
                 else:
                     await self.ocr_release.wait()
             with Image.open(io.BytesIO(original_bytes)) as opened:
                 image = opened.convert("RGB")
+            if segment_key in self.fail_ocr_segments:
+                raise TimeoutError("simulated OCR timeout")
             block_top = max(10, image.height - 70)
             self.completed_ocr_calls.append(call_number)
+            if segment_key is not None:
+                self.completed_ocr_segments.append(segment_key)
             return OCROutput(
                 image=image,
                 sanitized_bytes=original_bytes,
@@ -953,7 +974,7 @@ async def test_ocr_prefetch_finishes_out_of_order_but_translates_in_order(
             "ocr_slice_overlap": 100,
         },
     )
-    harness.pipeline.blocked_ocr_calls.update({1, 2, 3})
+    harness.pipeline.blocked_ocr_segments.update({(0, 0), (0, 1), (0, 2)})
     try:
         await harness.manager.start("alpha", "chapter-1")
         await wait_for(lambda: harness.pipeline.ocr_calls == 3)
@@ -965,14 +986,16 @@ async def test_ocr_prefetch_finishes_out_of_order_but_translates_in_order(
         assert running.current_segment is not None
         assert running.current_segment.segment_index == 0
 
-        harness.pipeline.ocr_call_releases[3].set()
-        harness.pipeline.ocr_call_releases[2].set()
-        await wait_for(lambda: {2, 3}.issubset(harness.pipeline.completed_ocr_calls))
+        harness.pipeline.ocr_segment_releases[(0, 2)].set()
+        harness.pipeline.ocr_segment_releases[(0, 1)].set()
+        await wait_for(
+            lambda: {(0, 1), (0, 2)}.issubset(harness.pipeline.completed_ocr_segments)
+        )
         await wait_for(lambda: harness.pipeline.ocr_calls == 4)
         assert harness.pipeline.translation_calls == 0
         assert harness.manager.state("alpha", "chapter-1").completed_segments == 0
 
-        harness.pipeline.ocr_call_releases[1].set()
+        harness.pipeline.ocr_segment_releases[(0, 0)].set()
         await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
 
         generation_id = str(harness.manager.state("alpha", "chapter-1").generation_id)
@@ -989,7 +1012,7 @@ async def test_ocr_prefetch_finishes_out_of_order_but_translates_in_order(
             for layer in harness.manager.state("alpha", "chapter-1").pages[0].translation_layers
         ] == [0, 1, 2, 3]
     finally:
-        for event in harness.pipeline.ocr_call_releases.values():
+        for event in harness.pipeline.ocr_segment_releases.values():
             event.set()
         await harness.close()
 
@@ -1026,6 +1049,47 @@ async def test_running_generation_uses_increased_ocr_concurrency_immediately(
     finally:
         for event in harness.pipeline.ocr_call_releases.values():
             event.set()
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_one_prefetched_ocr_failure_does_not_cancel_other_segments(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(
+        tmp_path,
+        page_count=1,
+        image_size=(300, 2400),
+        translation_settings={
+            "ocr_concurrency": 3,
+            "long_image_threshold": 1000,
+            "ocr_slice_height": 700,
+            "ocr_slice_overlap": 100,
+        },
+    )
+    harness.pipeline.fail_ocr_segments.add((0, 1))
+    try:
+        await harness.manager.start("alpha", "chapter-1")
+        await wait_for(
+            lambda: harness.manager.state("alpha", "chapter-1").status
+            == "completed_with_errors"
+        )
+
+        failed = harness.manager.state("alpha", "chapter-1")
+        assert (failed.completed_segments, failed.failed_segments) == (3, 1)
+        assert failed.pages[0].segments[1].error is not None
+        assert failed.pages[0].segments[1].error.code == "OCR_TIMEOUT"
+        assert harness.pipeline.translation_calls == 3
+
+        harness.pipeline.fail_ocr_segments.clear()
+        await harness.manager.retry_segment("alpha", "chapter-1", 0, 1)
+        await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
+
+        retried = harness.manager.state("alpha", "chapter-1")
+        assert (retried.completed_segments, retried.failed_segments) == (4, 0)
+        assert harness.pipeline.translation_calls == 4
+    finally:
+        harness.pipeline.fail_ocr_segments.clear()
         await harness.close()
 
 
@@ -1121,7 +1185,7 @@ async def test_pause_keeps_current_ocr_and_cancels_later_prefetch(tmp_path: Path
             "ocr_slice_overlap": 100,
         },
     )
-    harness.pipeline.blocked_ocr_calls.update({1, 2, 3})
+    harness.pipeline.blocked_ocr_segments.update({(0, 0), (0, 1), (0, 2)})
     try:
         await harness.manager.start("alpha", "chapter-1")
         await wait_for(lambda: harness.pipeline.ocr_calls == 3)
@@ -1140,20 +1204,19 @@ async def test_pause_keeps_current_ocr_and_cancels_later_prefetch(tmp_path: Path
             "pending",
         ]
 
-        for event in harness.pipeline.ocr_call_releases.values():
-            event.set()
+        harness.pipeline.ocr_segment_releases[(0, 0)].set()
         await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "paused")
         paused = harness.manager.state("alpha", "chapter-1")
         assert paused.completed_segments == 1
         assert len(harness.pipeline.completed_ocr_calls) == 1
 
-        harness.pipeline.blocked_ocr_calls.clear()
+        harness.pipeline.blocked_ocr_segments.clear()
         await harness.manager.start("alpha", "chapter-1")
         await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
         assert harness.manager.state("alpha", "chapter-1").completed_segments == 4
     finally:
-        harness.pipeline.blocked_ocr_calls.clear()
-        for event in harness.pipeline.ocr_call_releases.values():
+        harness.pipeline.blocked_ocr_segments.clear()
+        for event in harness.pipeline.ocr_segment_releases.values():
             event.set()
         await harness.close()
 
@@ -1290,6 +1353,7 @@ async def test_manager_selects_only_configured_semantic_translation_service(
         )
         deeplx_pipeline = harness.manager._build_pipeline(deeplx_semantic, runtime)
         assert isinstance(deeplx_pipeline.translator, DeepLXClient)
+        assert deeplx_pipeline.ocr.limiter is harness.manager._ocr_limiter
 
         runtime.update(
             {
