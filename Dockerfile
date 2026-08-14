@@ -8,6 +8,10 @@ RUN npm run build
 
 FROM python:3.12-slim-bookworm AS runtime
 
+ARG VERSION=0.1.0
+
+LABEL org.opencontainers.image.version="${VERSION}"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \

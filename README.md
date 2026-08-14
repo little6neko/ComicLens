@@ -16,7 +16,89 @@ ComicTranslator 的长图切片、OCR、翻译与译文覆写管线集成到阅�
 - PaddleOCR、DeepL/DeepLX、代理、长图参数和阅读默认值均可在 Web 设置页维护。
 - 可选环境变量密码；不填写时不启用登录界面。
 
-## Docker Compose（推荐）
+## Docker 镜像（推荐）
+
+正式版本发布在 GitHub Container Registry，支持 `linux/amd64` 和 `linux/arm64`，Docker
+会自动选择当前主机对应的架构。建议生产部署固定版本标签：
+
+```bash
+docker pull ghcr.io/little6neko/comiclens:v0.1.0
+```
+
+也可以使用始终指向最新正式版本的 `latest`：
+
+```bash
+docker pull ghcr.io/little6neko/comiclens:latest
+```
+
+在准备保存数据的目录中启动固定版本：
+
+```bash
+mkdir -p data
+docker run -d \
+  --name comiclens \
+  --restart unless-stopped \
+  --init \
+  --security-opt no-new-privileges:true \
+  -p 8233:8233 \
+  -v "$(pwd)/data:/app/data" \
+  ghcr.io/little6neko/comiclens:v0.1.0
+```
+
+打开 <http://127.0.0.1:8233>；从其他设备访问时，将 `127.0.0.1` 换成服务器地址。容器监听
+`0.0.0.0:8233`，如需修改宿主机端口，只需将 `-p 8233:8233` 左侧的端口改为目标端口。
+
+不传 `COMICLENS_ACCESS_PASSWORD` 时不会启用密码界面。需要密码时，请用下面的命令首次
+启动，或删除旧容器后使用该命令重新创建：
+
+```bash
+docker run -d \
+  --name comiclens \
+  --restart unless-stopped \
+  --init \
+  --security-opt no-new-privileges:true \
+  -p 8233:8233 \
+  -e COMICLENS_ACCESS_PASSWORD='换成足够长的密码' \
+  -v "$(pwd)/data:/app/data" \
+  ghcr.io/little6neko/comiclens:v0.1.0
+```
+
+部署地区无法直接访问上游时，可以额外添加
+`-e COMICLENS_PROXY_URL='http://代理地址:端口'`；能够直接访问时不要设置代理。
+
+查看状态和日志：
+
+```bash
+docker ps --filter "name=^/comiclens$"
+docker logs -f comiclens
+```
+
+升级时先把变量改成准备部署的版本标签，再拉取镜像并重建容器；`data` 是宿主机目录，停止
+和删除容器不会删除其中的设置、历史、缓存与翻译结果。重新创建时需要保留此前使用的全部
+`-e` 参数，尤其是访问密码和代理；下面仍以不启用密码和代理为例：
+
+```bash
+COMICLENS_VERSION=v0.1.0
+docker pull "ghcr.io/little6neko/comiclens:${COMICLENS_VERSION}"
+docker stop comiclens
+docker rm comiclens
+docker run -d \
+  --name comiclens \
+  --restart unless-stopped \
+  --init \
+  --security-opt no-new-privileges:true \
+  -p 8233:8233 \
+  -v "$(pwd)/data:/app/data" \
+  "ghcr.io/little6neko/comiclens:${COMICLENS_VERSION}"
+```
+
+如果 GHCR 包尚未设为公开，请先创建具有 `read:packages` 权限的 GitHub token，再登录：
+
+```bash
+echo "$GHCR_TOKEN" | docker login ghcr.io -u little6neko --password-stdin
+```
+
+## Docker Compose（源码构建）
 
 要求 Docker Engine 与 Compose 插件。首次运行：
 
@@ -50,7 +132,7 @@ docker compose logs -f comiclens
 
 ## 数据与缓存
 
-Compose 将 `./data` 挂载到容器的 `/app/data`，其中包含：
+上述 `docker run` 和 Compose 均将 `./data` 挂载到容器的 `/app/data`，其中包含：
 
 - `comiclens.db`：设置、收藏、历史、已读和翻译任务状态；
 - `secrets.key`：敏感设置的加密密钥；
@@ -59,12 +141,13 @@ Compose 将 `./data` 挂载到容器的 `/app/data`，其中包含：
 默认缓存上限是 `5120 MB`。内容没有时间过期，只在超过上限时按容量规则淘汰。可以在 Web
 设置页修改上限或清理缓存。
 
-备份时建议先停止容器，再完整复制 `data/`：
+备份时建议先停止容器，再完整复制 `data/`。下面的命令对 Docker 镜像和 Compose 部署均
+适用：
 
 ```bash
-docker compose stop comiclens
+docker stop comiclens
 tar -czf comiclens-data.tar.gz data
-docker compose start comiclens
+docker start comiclens
 ```
 
 恢复时必须同时恢复数据库与 `secrets.key`，不能只恢复其中一个。请妥善保管备份，因为完整
