@@ -38,57 +38,86 @@ class SegmentRunner:
         segment_index: int,
         pipeline: ImageTranslationPipeline,
     ) -> None:
-        segment = self.repository.segment(generation_id, page_index, segment_index)
-        if segment is None:
-            raise ValueError("translation segment does not exist")
-        bundle_key = chapter_bundle_key(comic_id, chapter_id)
-        self.repository.set_segment_stage(
-            generation_id,
-            page_index,
-            segment_index,
-            "ocr",
-            increment_attempts=True,
-        )
-        input_media = await self._load_ocr_input(
+        await self.prepare_ocr(
             generation_id,
             comic_id,
             chapter_id,
             page_index,
-            segment,
+            segment_index,
+            pipeline,
+        )
+        await self.complete_after_ocr(
+            generation_id,
+            comic_id,
+            chapter_id,
+            page_index,
+            segment_index,
+            pipeline,
         )
 
+    async def prepare_ocr(
+        self,
+        generation_id: str,
+        comic_id: str,
+        chapter_id: str,
+        page_index: int,
+        segment_index: int,
+        pipeline: ImageTranslationPipeline,
+    ) -> None:
         segment = self.repository.segment(generation_id, page_index, segment_index)
-        assert segment is not None
-        ocr_path = str(
-            segment["ocr_path"]
-            or generation_segment_path(
+        if segment is None:
+            raise ValueError("translation segment does not exist")
+        if not self.repository.claim_segment_ocr(generation_id, page_index, segment_index):
+            raise RuntimeError("translation segment is not available for OCR")
+        bundle_key = chapter_bundle_key(comic_id, chapter_id)
+        try:
+            segment = self.repository.segment(generation_id, page_index, segment_index)
+            assert segment is not None
+            ocr_path = str(
+                segment["ocr_path"]
+                or generation_segment_path(
+                    comic_id,
+                    chapter_id,
+                    generation_id,
+                    "ocr",
+                    page_index,
+                    segment_index,
+                    "json",
+                )
+            )
+            blocks_path = str(
+                segment["blocks_path"]
+                or generation_segment_path(
+                    comic_id,
+                    chapter_id,
+                    generation_id,
+                    "blocks",
+                    page_index,
+                    segment_index,
+                    "json",
+                )
+            )
+            ocr_media = self.cache.read_bytes(ocr_path, verify_image=False)
+            blocks_media = self.cache.read_bytes(blocks_path, verify_image=False)
+            if ocr_media is not None and blocks_media is not None:
+                if not self.repository.mark_segment_ocr_ready(
+                    generation_id,
+                    page_index,
+                    segment_index,
+                    ocr_path=ocr_path,
+                    blocks_path=blocks_path,
+                ):
+                    raise RuntimeError("translation segment OCR claim was lost")
+                return
+
+            input_media = await self._load_ocr_input(
+                generation_id,
                 comic_id,
                 chapter_id,
-                generation_id,
-                "ocr",
                 page_index,
-                segment_index,
-                "json",
+                segment,
             )
-        )
-        blocks_path = str(
-            segment["blocks_path"]
-            or generation_segment_path(
-                comic_id,
-                chapter_id,
-                generation_id,
-                "blocks",
-                page_index,
-                segment_index,
-                "json",
-            )
-        )
-        ocr_media = self.cache.read_bytes(ocr_path, verify_image=False)
-        blocks_media = self.cache.read_bytes(blocks_path, verify_image=False)
-        image, _normalized = await asyncio.to_thread(sanitize_image, input_media.content)
-        if blocks_media is not None:
-            blocks = [TextBlock.from_dict(value) for value in json.loads(blocks_media.content)]
-        else:
+            image, _normalized = await asyncio.to_thread(sanitize_image, input_media.content)
             if ocr_media is not None:
                 payload = json.loads(ocr_media.content)
                 ocr_output = await self._parse_cached_ocr(pipeline, image, payload)
@@ -143,12 +172,50 @@ class SegmentRunner:
                 "blocks",
                 [block.as_dict() for block in blocks],
             )
+            if not self.repository.mark_segment_ocr_ready(
+                generation_id,
+                page_index,
+                segment_index,
+                ocr_path=ocr_path,
+                blocks_path=blocks_path,
+            ):
+                raise RuntimeError("translation segment OCR claim was lost")
+        except asyncio.CancelledError:
+            self.repository.reset_segment_ocr(generation_id, page_index, segment_index)
+            raise
+
+    async def complete_after_ocr(
+        self,
+        generation_id: str,
+        comic_id: str,
+        chapter_id: str,
+        page_index: int,
+        segment_index: int,
+        pipeline: ImageTranslationPipeline,
+    ) -> None:
+        segment = self.repository.segment(generation_id, page_index, segment_index)
+        if segment is None:
+            raise ValueError("translation segment does not exist")
+        if not segment["ocr_path"] or not segment["blocks_path"]:
+            raise RuntimeError("translation segment OCR checkpoint is incomplete")
+        blocks_media = self.cache.read_bytes(str(segment["blocks_path"]), verify_image=False)
+        if blocks_media is None:
+            raise FileNotFoundError("translation segment OCR blocks cache is missing")
+        blocks = [TextBlock.from_dict(value) for value in json.loads(blocks_media.content)]
+        input_media = await self._load_ocr_input(
+            generation_id,
+            comic_id,
+            chapter_id,
+            page_index,
+            segment,
+        )
+        image, _normalized = await asyncio.to_thread(sanitize_image, input_media.content)
+        bundle_key = chapter_bundle_key(comic_id, chapter_id)
         self.repository.set_segment_stage(
             generation_id,
             page_index,
             segment_index,
             "translating",
-            paths={"ocr_path": ocr_path, "blocks_path": blocks_path},
         )
 
         segment = self.repository.segment(generation_id, page_index, segment_index)

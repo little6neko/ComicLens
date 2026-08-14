@@ -1011,6 +1011,71 @@ class TranslationRepository:
             (generation_id,),
         )
 
+    def claim_segment_ocr(
+        self,
+        generation_id: str,
+        page_index: int,
+        segment_index: int,
+    ) -> bool:
+        return bool(
+            self.database.execute(
+                """
+                UPDATE translation_segments SET status = 'ocr',
+                    attempts = attempts + 1, error_stage = NULL,
+                    error_code = NULL, error_summary = NULL, updated_at = ?
+                WHERE generation_id = ? AND page_index = ? AND segment_index = ?
+                  AND status = 'pending'
+                """,
+                (self._timestamp(), generation_id, page_index, segment_index),
+            )
+        )
+
+    def mark_segment_ocr_ready(
+        self,
+        generation_id: str,
+        page_index: int,
+        segment_index: int,
+        *,
+        ocr_path: str,
+        blocks_path: str,
+    ) -> bool:
+        return bool(
+            self.database.execute(
+                """
+                UPDATE translation_segments SET status = 'pending',
+                    ocr_path = ?, blocks_path = ?, error_stage = NULL,
+                    error_code = NULL, error_summary = NULL, updated_at = ?
+                WHERE generation_id = ? AND page_index = ? AND segment_index = ?
+                  AND status = 'ocr'
+                """,
+                (
+                    ocr_path,
+                    blocks_path,
+                    self._timestamp(),
+                    generation_id,
+                    page_index,
+                    segment_index,
+                ),
+            )
+        )
+
+    def reset_segment_ocr(
+        self,
+        generation_id: str,
+        page_index: int,
+        segment_index: int,
+    ) -> bool:
+        return bool(
+            self.database.execute(
+                """
+                UPDATE translation_segments SET status = 'pending', updated_at = ?
+                WHERE generation_id = ? AND page_index = ? AND segment_index = ?
+                  AND status = 'ocr'
+                """,
+                (self._timestamp(), generation_id, page_index, segment_index),
+            )
+        )
+
     def set_segment_stage(
         self,
         generation_id: str,

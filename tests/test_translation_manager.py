@@ -404,6 +404,69 @@ def test_repository_appends_prepared_pages_and_grows_segment_total(tmp_path: Pat
         harness.database.close()
 
 
+def test_repository_claims_and_releases_segment_ocr_checkpoint(tmp_path: Path) -> None:
+    harness = create_harness(tmp_path, page_count=1)
+    try:
+        generation_id = harness.repository.create_generation(
+            "alpha",
+            "chapter-1",
+            semantic_fingerprint="ocr-claim",
+            semantic_settings={"pipelineVersion": "progressive-segment-v2"},
+            page_indexes=[0],
+            source_pages={0: "https://img.example/0.png"},
+            kind="normal",
+            progressive=True,
+        )
+        harness.repository.commit_segment_plan(
+            generation_id,
+            [
+                {
+                    "page_index": 0,
+                    "segment_index": 0,
+                    "global_index": 0,
+                    "source_width": 120,
+                    "source_height": 180,
+                    "display_top": 0,
+                    "display_bottom": 180,
+                    "ocr_top": 0,
+                    "ocr_bottom": 180,
+                    "ocr_input_path": "segments/0.png",
+                }
+            ],
+        )
+
+        assert harness.repository.claim_segment_ocr(generation_id, 0, 0) is True
+        assert harness.repository.claim_segment_ocr(generation_id, 0, 0) is False
+        claimed = harness.repository.segment(generation_id, 0, 0)
+        assert claimed is not None
+        assert claimed["status"] == "ocr"
+        assert claimed["attempts"] == 1
+
+        assert harness.repository.mark_segment_ocr_ready(
+            generation_id,
+            0,
+            0,
+            ocr_path="ocr/0.json",
+            blocks_path="blocks/0.json",
+        ) is True
+        ready = harness.repository.segment(generation_id, 0, 0)
+        assert ready is not None
+        assert ready["status"] == "pending"
+        assert ready["ocr_path"] == "ocr/0.json"
+        assert ready["blocks_path"] == "blocks/0.json"
+
+        assert harness.repository.claim_segment_ocr(generation_id, 0, 0) is True
+        assert harness.repository.reset_segment_ocr(generation_id, 0, 0) is True
+        reset = harness.repository.segment(generation_id, 0, 0)
+        assert reset is not None
+        assert reset["status"] == "pending"
+        assert reset["attempts"] == 2
+        assert reset["ocr_path"] == "ocr/0.json"
+        assert reset["blocks_path"] == "blocks/0.json"
+    finally:
+        harness.database.close()
+
+
 def test_background_tasks_and_force_pause_preserve_segment_checkpoints(tmp_path: Path) -> None:
     harness = create_harness(tmp_path, page_count=1)
     try:
