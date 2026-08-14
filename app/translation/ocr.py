@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from app.translation.concurrency import DynamicConcurrencyLimiter
 from app.translation.models import TextBlock
 
 TEXT_KEYS = (
@@ -68,6 +69,7 @@ class OCRClient:
         job_timeout: float = 180.0,
         concurrency: int = 1,
         request_timeout: float = 180.0,
+        limiter: DynamicConcurrencyLimiter | None = None,
     ) -> None:
         self.client = client
         self.api_url = api_url.rstrip("/")
@@ -75,9 +77,12 @@ class OCRClient:
         self.job_model = job_model.strip() or "PaddleOCR-VL-1.6"
         self.job_poll_interval = max(0.2, job_poll_interval)
         self.job_timeout = max(self.job_poll_interval, job_timeout)
-        self.concurrency = max(1, concurrency)
         self.request_timeout = max(1.0, request_timeout)
-        self.semaphore = asyncio.Semaphore(self.concurrency)
+        self.limiter = limiter or DynamicConcurrencyLimiter(max(1, concurrency))
+
+    @property
+    def concurrency(self) -> int:
+        return self.limiter.limit
 
     async def analyze_image(
         self,
@@ -86,7 +91,7 @@ class OCRClient:
         job_id: str | None = None,
         on_job_submitted: OCRJobObserver | None = None,
     ) -> dict[str, Any]:
-        async with self.semaphore:
+        async with self.limiter.slot():
             return await self._analyze_image_by_job(
                 image_bytes,
                 job_id=job_id,
