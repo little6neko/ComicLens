@@ -1011,6 +1011,27 @@ class TranslationRepository:
             (generation_id,),
         )
 
+    def segments_needing_ocr(self, generation_id: str) -> list[sqlite3.Row]:
+        return self.database.fetchall(
+            """
+            SELECT * FROM translation_segments
+            WHERE generation_id = ? AND status = 'pending'
+              AND (ocr_path IS NULL OR blocks_path IS NULL)
+            ORDER BY global_index
+            """,
+            (generation_id,),
+        )
+
+    def next_unfinished_segment(self, generation_id: str) -> sqlite3.Row | None:
+        return self.database.fetchone(
+            """
+            SELECT * FROM translation_segments
+            WHERE generation_id = ? AND status NOT IN ('completed', 'failed')
+            ORDER BY global_index LIMIT 1
+            """,
+            (generation_id,),
+        )
+
     def claim_segment_ocr(
         self,
         generation_id: str,
@@ -1235,6 +1256,7 @@ class TranslationRepository:
         *,
         clear_columns: list[str],
         clear_job_id: bool = False,
+        increment_attempts: bool = False,
     ) -> list[str]:
         row = self.segment(generation_id, page_index, segment_index)
         if row is None:
@@ -1255,6 +1277,8 @@ class TranslationRepository:
         )
         if clear_job_id:
             assignments.append("ocr_job_id = NULL")
+        if increment_attempts:
+            assignments.append("attempts = attempts + 1")
         with self.database.transaction() as connection:
             connection.execute(
                 f"""

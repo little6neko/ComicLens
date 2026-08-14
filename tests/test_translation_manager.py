@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from app.media.registry import SourceMediaRegistry
 from app.repositories.database import Database
 from app.repositories.translation import TranslationRepository
 from app.security.secrets import SecretCipher
+from app.translation.concurrency import DynamicConcurrencyLimiter
 from app.translation.manager import TranslationManager
 from app.translation.models import TextBlock
 from app.translation.pipeline import OCROutput, RenderOutput, TranslationOutput
@@ -92,37 +94,70 @@ class FakeTranslationSource:
 
 class ControlledPipeline:
     def __init__(self) -> None:
+        self.ocr_limiter: DynamicConcurrencyLimiter | None = None
         self.ocr_calls = 0
+        self.active_ocr_calls = 0
+        self.max_active_ocr_calls = 0
+        self.completed_ocr_calls: list[int] = []
         self.translation_calls = 0
+        self.translation_inputs: list[list[str]] = []
         self.render_calls = 0
         self.block_first_ocr = False
         self.block_ocr_call: int | None = None
         self.block_next_render = False
         self.fail_translation_calls: set[int] = set()
+        self.blocked_ocr_calls: set[int] = set()
+        self.ocr_call_releases: dict[int, asyncio.Event] = {}
         self.ocr_started = asyncio.Event()
         self.ocr_release = asyncio.Event()
         self.render_started = asyncio.Event()
         self.render_release = asyncio.Event()
 
     async def run_ocr(self, original_bytes: bytes) -> OCROutput:
+        if self.ocr_limiter is not None:
+            async with self.ocr_limiter.slot():
+                return await self._run_ocr(original_bytes)
+        return await self._run_ocr(original_bytes)
+
+    async def _run_ocr(self, original_bytes: bytes) -> OCROutput:
         self.ocr_calls += 1
-        if (self.block_first_ocr and self.ocr_calls == 1) or (
-            self.block_ocr_call == self.ocr_calls
-        ):
-            self.ocr_started.set()
-            await self.ocr_release.wait()
-        with Image.open(io.BytesIO(original_bytes)) as opened:
-            image = opened.convert("RGB")
-        return OCROutput(
-            image=image,
-            sanitized_bytes=original_bytes,
-            payload={"call": self.ocr_calls},
-            blocks=[TextBlock(text=f"text-{self.ocr_calls}", bbox=(10, 10, 90, 60))],
-            segment_count=1,
-        )
+        call_number = self.ocr_calls
+        self.active_ocr_calls += 1
+        self.max_active_ocr_calls = max(self.max_active_ocr_calls, self.active_ocr_calls)
+        try:
+            if (
+                (self.block_first_ocr and call_number == 1)
+                or self.block_ocr_call == call_number
+                or call_number in self.blocked_ocr_calls
+            ):
+                self.ocr_started.set()
+                release = self.ocr_call_releases.setdefault(call_number, asyncio.Event())
+                if call_number in self.blocked_ocr_calls:
+                    await release.wait()
+                else:
+                    await self.ocr_release.wait()
+            with Image.open(io.BytesIO(original_bytes)) as opened:
+                image = opened.convert("RGB")
+            block_top = max(10, image.height - 70)
+            self.completed_ocr_calls.append(call_number)
+            return OCROutput(
+                image=image,
+                sanitized_bytes=original_bytes,
+                payload={"call": call_number},
+                blocks=[
+                    TextBlock(
+                        text=f"text-{call_number}",
+                        bbox=(10, block_top, 90, block_top + 50),
+                    )
+                ],
+                segment_count=1,
+            )
+        finally:
+            self.active_ocr_calls -= 1
 
     async def translate_blocks(self, blocks: list[TextBlock]) -> TranslationOutput:
         self.translation_calls += 1
+        self.translation_inputs.append([block.text for block in blocks])
         if self.translation_calls in self.fail_translation_calls:
             raise TimeoutError("simulated translation timeout")
         for block in blocks:
@@ -205,6 +240,7 @@ def create_harness(
         settings=settings,
         pipeline_factory=lambda _semantic, _runtime: pipeline,  # type: ignore[arg-type]
     )
+    pipeline.ocr_limiter = manager._ocr_limiter
     return ManagerHarness(manager, repository, cache, source, pipeline, database)
 
 
@@ -899,6 +935,226 @@ async def test_long_page_has_exact_segment_total_before_first_ocr_and_publishes_
         ]
         assert harness.pipeline.ocr_calls == 4
     finally:
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_ocr_prefetch_finishes_out_of_order_but_translates_in_order(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(
+        tmp_path,
+        page_count=1,
+        image_size=(300, 2400),
+        translation_settings={
+            "ocr_concurrency": 3,
+            "long_image_threshold": 1000,
+            "ocr_slice_height": 700,
+            "ocr_slice_overlap": 100,
+        },
+    )
+    harness.pipeline.blocked_ocr_calls.update({1, 2, 3})
+    try:
+        await harness.manager.start("alpha", "chapter-1")
+        await wait_for(lambda: harness.pipeline.ocr_calls == 3)
+
+        running = harness.manager.state("alpha", "chapter-1")
+        assert harness.pipeline.active_ocr_calls == 3
+        assert harness.pipeline.max_active_ocr_calls == 3
+        assert running.completed_segments == 0
+        assert running.current_segment is not None
+        assert running.current_segment.segment_index == 0
+
+        harness.pipeline.ocr_call_releases[3].set()
+        harness.pipeline.ocr_call_releases[2].set()
+        await wait_for(lambda: {2, 3}.issubset(harness.pipeline.completed_ocr_calls))
+        await wait_for(lambda: harness.pipeline.ocr_calls == 4)
+        assert harness.pipeline.translation_calls == 0
+        assert harness.manager.state("alpha", "chapter-1").completed_segments == 0
+
+        harness.pipeline.ocr_call_releases[1].set()
+        await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
+
+        generation_id = str(harness.manager.state("alpha", "chapter-1").generation_id)
+        expected_translation_inputs: list[list[str]] = []
+        for segment in harness.repository.segments(generation_id):
+            blocks_media = harness.cache.read_bytes(str(segment["blocks_path"]), verify_image=False)
+            assert blocks_media is not None
+            expected_translation_inputs.append(
+                [str(value["text"]) for value in json.loads(blocks_media.content)]
+            )
+        assert harness.pipeline.translation_inputs == expected_translation_inputs
+        assert [
+            layer.segment_index
+            for layer in harness.manager.state("alpha", "chapter-1").pages[0].translation_layers
+        ] == [0, 1, 2, 3]
+    finally:
+        for event in harness.pipeline.ocr_call_releases.values():
+            event.set()
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_running_generation_uses_increased_ocr_concurrency_immediately(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(
+        tmp_path,
+        page_count=1,
+        image_size=(300, 2400),
+        translation_settings={
+            "ocr_concurrency": 1,
+            "long_image_threshold": 1000,
+            "ocr_slice_height": 700,
+            "ocr_slice_overlap": 100,
+        },
+    )
+    harness.pipeline.blocked_ocr_calls.update({1, 2, 3})
+    try:
+        await harness.manager.start("alpha", "chapter-1")
+        await wait_for(lambda: harness.pipeline.ocr_calls == 1)
+        assert harness.pipeline.active_ocr_calls == 1
+
+        harness.manager.set_ocr_concurrency(3)
+        await wait_for(lambda: harness.pipeline.ocr_calls == 3)
+        assert harness.pipeline.active_ocr_calls == 3
+
+        for event in harness.pipeline.ocr_call_releases.values():
+            event.set()
+        await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
+        assert harness.pipeline.max_active_ocr_calls == 3
+    finally:
+        for event in harness.pipeline.ocr_call_releases.values():
+            event.set()
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_lower_ocr_concurrency_waits_for_existing_permits_to_finish(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(
+        tmp_path,
+        page_count=1,
+        image_size=(300, 2400),
+        translation_settings={
+            "ocr_concurrency": 3,
+            "long_image_threshold": 1000,
+            "ocr_slice_height": 700,
+            "ocr_slice_overlap": 100,
+        },
+    )
+    harness.pipeline.blocked_ocr_calls.update({1, 2, 3, 4})
+    try:
+        await harness.manager.start("alpha", "chapter-1")
+        await wait_for(lambda: harness.pipeline.ocr_calls == 3)
+
+        harness.manager.set_ocr_concurrency(1)
+        harness.pipeline.ocr_call_releases[1].set()
+        harness.pipeline.ocr_call_releases[2].set()
+        await wait_for(lambda: {1, 2}.issubset(harness.pipeline.completed_ocr_calls))
+        await asyncio.sleep(0.05)
+        assert harness.pipeline.ocr_calls == 3
+
+        harness.pipeline.ocr_call_releases[3].set()
+        await wait_for(lambda: harness.pipeline.ocr_calls == 4)
+        assert harness.pipeline.active_ocr_calls == 1
+        harness.pipeline.ocr_call_releases[4].set()
+
+        await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
+        assert harness.pipeline.max_active_ocr_calls == 3
+    finally:
+        for event in harness.pipeline.ocr_call_releases.values():
+            event.set()
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_multiple_chapters_share_one_ocr_concurrency_limit(tmp_path: Path) -> None:
+    harness = create_harness(
+        tmp_path,
+        page_count=1,
+        image_size=(300, 2400),
+        translation_settings={
+            "ocr_concurrency": 2,
+            "long_image_threshold": 1000,
+            "ocr_slice_height": 700,
+            "ocr_slice_overlap": 100,
+        },
+    )
+    harness.pipeline.blocked_ocr_calls.update({1, 2, 3, 4})
+    try:
+        await harness.manager.start("alpha", "chapter-1")
+        await harness.manager.start("beta", "chapter-2")
+        await wait_for(lambda: harness.pipeline.ocr_calls == 2)
+        await asyncio.sleep(0.05)
+        assert harness.pipeline.ocr_calls == 2
+        assert harness.pipeline.max_active_ocr_calls == 2
+
+        harness.pipeline.ocr_call_releases[1].set()
+        await wait_for(lambda: harness.pipeline.ocr_calls == 3)
+        assert harness.pipeline.active_ocr_calls == 2
+
+        harness.pipeline.blocked_ocr_calls.clear()
+        for event in harness.pipeline.ocr_call_releases.values():
+            event.set()
+        await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
+        await wait_for(lambda: harness.manager.state("beta", "chapter-2").status == "completed")
+        assert harness.pipeline.max_active_ocr_calls == 2
+    finally:
+        harness.pipeline.blocked_ocr_calls.clear()
+        for event in harness.pipeline.ocr_call_releases.values():
+            event.set()
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_pause_keeps_current_ocr_and_cancels_later_prefetch(tmp_path: Path) -> None:
+    harness = create_harness(
+        tmp_path,
+        page_count=1,
+        image_size=(300, 2400),
+        translation_settings={
+            "ocr_concurrency": 3,
+            "long_image_threshold": 1000,
+            "ocr_slice_height": 700,
+            "ocr_slice_overlap": 100,
+        },
+    )
+    harness.pipeline.blocked_ocr_calls.update({1, 2, 3})
+    try:
+        await harness.manager.start("alpha", "chapter-1")
+        await wait_for(lambda: harness.pipeline.ocr_calls == 3)
+
+        stopping = await harness.manager.pause("alpha", "chapter-1")
+        assert stopping.status == "stopping_after_segment"
+        await wait_for(lambda: harness.pipeline.active_ocr_calls == 1)
+
+        during_stop = harness.manager.state("alpha", "chapter-1")
+        assert during_stop.current_segment is not None
+        assert during_stop.current_segment.segment_index == 0
+        assert [segment.status for segment in during_stop.pages[0].segments] == [
+            "ocr",
+            "pending",
+            "pending",
+            "pending",
+        ]
+
+        for event in harness.pipeline.ocr_call_releases.values():
+            event.set()
+        await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "paused")
+        paused = harness.manager.state("alpha", "chapter-1")
+        assert paused.completed_segments == 1
+        assert len(harness.pipeline.completed_ocr_calls) == 1
+
+        harness.pipeline.blocked_ocr_calls.clear()
+        await harness.manager.start("alpha", "chapter-1")
+        await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
+        assert harness.manager.state("alpha", "chapter-1").completed_segments == 4
+    finally:
+        harness.pipeline.blocked_ocr_calls.clear()
+        for event in harness.pipeline.ocr_call_releases.values():
+            event.set()
         await harness.close()
 
 

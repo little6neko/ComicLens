@@ -28,6 +28,7 @@ from app.errors import AppError
 from app.media.registry import SourceMediaRegistry
 from app.repositories.translation import TranslationRepository
 from app.sources.base import ComicSource
+from app.translation.concurrency import DynamicConcurrencyLimiter
 from app.translation.image_renderer import (
     RENDERER_VERSION,
     font_identity,
@@ -83,6 +84,10 @@ class TranslationManager:
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._force_stop_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._force_stopping: set[tuple[str, str]] = set()
+        self._generation_events: dict[str, asyncio.Event] = {}
+        self._ocr_limiter = DynamicConcurrencyLimiter(
+            int(settings.values(include_secrets=False)["ocr_concurrency"])
+        )
         self._http_client = httpx.AsyncClient(timeout=httpx.Timeout(60.0))
         self._pipeline_factory = pipeline_factory or self._build_pipeline
         self._planner = SegmentPlanner(repository=repository, cache=cache, source=source)
@@ -103,6 +108,20 @@ class TranslationManager:
             await asyncio.gather(*active_tasks, return_exceptions=True)
         self.repository.recover_interrupted()
         await self._http_client.aclose()
+
+    @property
+    def ocr_concurrency(self) -> int:
+        return self._ocr_limiter.limit
+
+    def set_ocr_concurrency(self, concurrency: int) -> None:
+        self._ocr_limiter.resize(concurrency)
+        for event in self._generation_events.values():
+            event.set()
+
+    def _wake_generation(self, generation_id: str) -> None:
+        event = self._generation_events.get(generation_id)
+        if event is not None:
+            event.set()
 
     async def start(self, comic_id: str, chapter_id: str) -> TranslationTaskState:
         action_lock = self._force_stop_locks.setdefault((comic_id, chapter_id), asyncio.Lock())
@@ -199,7 +218,9 @@ class TranslationManager:
         if not active_rows:
             return self.repository.task_state(comic_id, chapter_id)
         for row in active_rows:
-            self.repository.request_stop(str(row["generation_id"]))
+            generation_id = str(row["generation_id"])
+            self.repository.request_stop(generation_id)
+            self._wake_generation(generation_id)
         latest_id = str(active_rows[-1]["generation_id"])
         return self.repository.task_state(comic_id, chapter_id, latest_id)
 
@@ -392,6 +413,7 @@ class TranslationManager:
             clear_job_id=stage == "ocr"
             and str(segment["error_code"])
             in {"OCR_JOB_FAILED", "OCR_JOB_NOT_FOUND", "OCR_PROTOCOL_ERROR"},
+            increment_attempts=stage != "ocr",
         )
         self.cache.delete_entries(paths)
         if str(generation["status"]) not in {
@@ -666,6 +688,7 @@ class TranslationManager:
         )
         pipeline = self._pipeline_factory(semantic, runtime)
         segments_available = asyncio.Event()
+        self._generation_events[generation_id] = segments_available
 
         async def produce() -> bool:
             try:
@@ -708,6 +731,9 @@ class TranslationManager:
             consumer.cancel()
             await asyncio.gather(producer, consumer, return_exceptions=True)
             raise
+        finally:
+            if self._generation_events.get(generation_id) is segments_available:
+                self._generation_events.pop(generation_id, None)
 
         if not producer_result or not consumer_result:
             self.repository.set_generation_status(
@@ -739,88 +765,252 @@ class TranslationManager:
         pipeline: ImageTranslationPipeline,
         segments_available: asyncio.Event,
     ) -> bool:
-        while True:
-            current = self.repository.generation(generation_id)
-            if current is None:
-                return False
-            if bool(current["stop_requested"]):
-                return False
-
-            pending = self.repository.pending_segments(generation_id)
-            if not pending:
-                if bool(current["planning_complete"]):
-                    await self._finalize_progressive_pages(
-                        generation_id,
-                        comic_id,
-                        chapter_id,
-                    )
-                    self.repository.refresh_counts(generation_id)
-                    return True
-
+        ocr_tasks: dict[tuple[int, int], asyncio.Task[None]] = {}
+        current_key: tuple[int, int] | None = None
+        try:
+            while True:
                 segments_available.clear()
+                self._discard_finished_ocr_tasks(ocr_tasks)
                 current = self.repository.generation(generation_id)
                 if current is None:
                     return False
-                if bool(current["stop_requested"]):
-                    return False
-                if bool(current["planning_complete"]):
-                    continue
-                if self.repository.pending_segments(generation_id):
-                    continue
-                await segments_available.wait()
-                continue
 
-            segment = pending[0]
-            page_index = int(segment["page_index"])
-            segment_index = int(segment["segment_index"])
-            if not self.repository.begin_segment(
+                stopping = bool(current["stop_requested"])
+                if stopping:
+                    await self._cancel_ocr_tasks(ocr_tasks, keep=current_key)
+                    if current_key is None:
+                        return False
+                else:
+                    self._fill_ocr_prefetch(
+                        generation_id,
+                        comic_id,
+                        chapter_id,
+                        pipeline,
+                        segments_available,
+                        ocr_tasks,
+                    )
+
+                segment = self.repository.next_unfinished_segment(generation_id)
+                if segment is None:
+                    if bool(current["planning_complete"]):
+                        await self._finalize_progressive_pages(
+                            generation_id,
+                            comic_id,
+                            chapter_id,
+                        )
+                        self.repository.refresh_counts(generation_id)
+                        return True
+                    current_key = None
+                    await self._wait_for_generation_work(segments_available)
+                    continue
+
+                page_index = int(segment["page_index"])
+                segment_index = int(segment["segment_index"])
+                segment_key = (page_index, segment_index)
+                if current_key != segment_key:
+                    if not self.repository.begin_segment(
+                        generation_id,
+                        page_index,
+                        segment_index,
+                    ):
+                        continue
+                    current_key = segment_key
+
+                segment = self.repository.segment(generation_id, page_index, segment_index)
+                if segment is None:
+                    return False
+                if str(segment["status"]) == "ocr" or not (
+                    segment["ocr_path"] and segment["blocks_path"]
+                ):
+                    task = ocr_tasks.get(segment_key)
+                    if task is None:
+                        if stopping:
+                            return False
+                        self._fill_ocr_prefetch(
+                            generation_id,
+                            comic_id,
+                            chapter_id,
+                            pipeline,
+                            segments_available,
+                            ocr_tasks,
+                        )
+                        task = ocr_tasks.get(segment_key)
+                    if task is None:
+                        await self._wait_for_generation_work(segments_available)
+                    else:
+                        await self._wait_for_ocr_or_generation_work(task, segments_available)
+                    refreshed = self.repository.segment(
+                        generation_id,
+                        page_index,
+                        segment_index,
+                    )
+                    if refreshed is not None and str(refreshed["status"]) == "failed":
+                        current_key = None
+                        if not self.repository.finish_segment(generation_id):
+                            return False
+                    continue
+
+                segment_completed = False
+                try:
+                    await self._segment_runner.complete_after_ocr(
+                        generation_id,
+                        comic_id,
+                        chapter_id,
+                        page_index,
+                        segment_index,
+                        pipeline,
+                    )
+                    segment_completed = True
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    failed = self.repository.segment(
+                        generation_id,
+                        page_index,
+                        segment_index,
+                    )
+                    stage = str(failed["status"] if failed else "translating")
+                    code, message = self._classify_error(stage, exc)
+                    self.repository.fail_segment(
+                        generation_id,
+                        page_index,
+                        segment_index,
+                        stage=stage,
+                        code=code,
+                        summary=message,
+                    )
+                    self.repository.finalize_page_from_segments(generation_id, page_index)
+
+                if segment_completed:
+                    await self._segment_runner.publish_page_if_complete(
+                        generation_id,
+                        comic_id,
+                        chapter_id,
+                        page_index,
+                    )
+
+                current_key = None
+                if not self.repository.finish_segment(generation_id):
+                    return False
+        finally:
+            await self._cancel_ocr_tasks(ocr_tasks)
+
+    def _fill_ocr_prefetch(
+        self,
+        generation_id: str,
+        comic_id: str,
+        chapter_id: str,
+        pipeline: ImageTranslationPipeline,
+        segments_available: asyncio.Event,
+        ocr_tasks: dict[tuple[int, int], asyncio.Task[None]],
+    ) -> None:
+        available = self._ocr_limiter.limit - len(ocr_tasks)
+        if available <= 0:
+            return
+        for segment in self.repository.segments_needing_ocr(generation_id):
+            key = (int(segment["page_index"]), int(segment["segment_index"]))
+            if key in ocr_tasks:
+                continue
+            task = asyncio.create_task(
+                self._prepare_segment_ocr(
+                    generation_id,
+                    comic_id,
+                    chapter_id,
+                    key[0],
+                    key[1],
+                    pipeline,
+                    segments_available,
+                ),
+                name=f"ocr:{comic_id}:{chapter_id}:{key[0]}:{key[1]}",
+            )
+            ocr_tasks[key] = task
+            available -= 1
+            if available == 0:
+                break
+
+    async def _prepare_segment_ocr(
+        self,
+        generation_id: str,
+        comic_id: str,
+        chapter_id: str,
+        page_index: int,
+        segment_index: int,
+        pipeline: ImageTranslationPipeline,
+        segments_available: asyncio.Event,
+    ) -> None:
+        try:
+            await self._segment_runner.prepare_ocr(
+                generation_id,
+                comic_id,
+                chapter_id,
+                page_index,
+                segment_index,
+                pipeline,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            failed = self.repository.segment(generation_id, page_index, segment_index)
+            stage = str(failed["status"] if failed else "ocr")
+            code, message = self._classify_error(stage, exc)
+            self.repository.fail_segment(
                 generation_id,
                 page_index,
                 segment_index,
-            ):
+                stage=stage,
+                code=code,
+                summary=message,
+            )
+            self.repository.finalize_page_from_segments(generation_id, page_index)
+        finally:
+            segments_available.set()
+
+    @staticmethod
+    def _discard_finished_ocr_tasks(
+        ocr_tasks: dict[tuple[int, int], asyncio.Task[None]],
+    ) -> None:
+        for key, task in list(ocr_tasks.items()):
+            if task.done():
+                ocr_tasks.pop(key, None)
+
+    @staticmethod
+    async def _cancel_ocr_tasks(
+        ocr_tasks: dict[tuple[int, int], asyncio.Task[None]],
+        *,
+        keep: tuple[int, int] | None = None,
+    ) -> None:
+        cancelled: list[asyncio.Task[None]] = []
+        for key, task in list(ocr_tasks.items()):
+            if key == keep:
                 continue
+            ocr_tasks.pop(key, None)
+            if not task.done():
+                task.cancel()
+            cancelled.append(task)
+        if cancelled:
+            await asyncio.gather(*cancelled, return_exceptions=True)
 
-            segment_completed = False
-            try:
-                await self._segment_runner.process(
-                    generation_id,
-                    comic_id,
-                    chapter_id,
-                    page_index,
-                    segment_index,
-                    pipeline,
-                )
-                segment_completed = True
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                failed = self.repository.segment(
-                    generation_id,
-                    page_index,
-                    segment_index,
-                )
-                stage = str(failed["status"] if failed else "ocr")
-                code, message = self._classify_error(stage, exc)
-                self.repository.fail_segment(
-                    generation_id,
-                    page_index,
-                    segment_index,
-                    stage=stage,
-                    code=code,
-                    summary=message,
-                )
-                self.repository.finalize_page_from_segments(generation_id, page_index)
+    @staticmethod
+    async def _wait_for_generation_work(event: asyncio.Event) -> None:
+        await event.wait()
 
-            if segment_completed:
-                await self._segment_runner.publish_page_if_complete(
-                    generation_id,
-                    comic_id,
-                    chapter_id,
-                    page_index,
-                )
-
-            if not self.repository.finish_segment(generation_id):
-                return False
+    @staticmethod
+    async def _wait_for_ocr_or_generation_work(
+        ocr_task: asyncio.Task[None],
+        event: asyncio.Event,
+    ) -> None:
+        if ocr_task.done():
+            return
+        event_waiter = asyncio.create_task(event.wait())
+        try:
+            await asyncio.wait(
+                {ocr_task, event_waiter},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            if not event_waiter.done():
+                event_waiter.cancel()
+                await asyncio.gather(event_waiter, return_exceptions=True)
 
     async def _prepare_generation(self, generation_id: str) -> bool:
         generation = self.repository.generation(generation_id)
@@ -1394,6 +1584,7 @@ class TranslationManager:
             job_timeout=float(runtime["ocr_timeout_seconds"]),
             concurrency=int(runtime["ocr_concurrency"]),
             request_timeout=float(runtime["ocr_timeout_seconds"]),
+            limiter=self._ocr_limiter,
         )
         service = str(semantic.get("translationService") or runtime["translation_service"])
         self._require_translation_service(runtime, service)
