@@ -1,11 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import {
+  BadgeCheckIcon,
   BookOpenIcon,
   DatabaseIcon,
   KeyRoundIcon,
   LanguagesIcon,
   LogOutIcon,
+  PackageIcon,
   SaveIcon,
   ServerCogIcon,
   SettingsIcon,
@@ -34,6 +36,7 @@ import { api } from "@/lib/api-client";
 import { queryKeys } from "@/lib/query-keys";
 import { useReadingMode } from "@/lib/reading-mode-preference";
 import { cn } from "@/lib/utils";
+import { APP_VERSION } from "@/lib/version";
 
 type Draft = Omit<
   ServerSettings,
@@ -157,6 +160,19 @@ function SettingsPage() {
       <BackgroundTranslationTasks />
 
       <form onSubmit={submit} className="space-y-6">
+        <SettingsSection icon={<PackageIcon />} title="版本">
+          <div className="flex items-center justify-between gap-4 sm:col-span-2">
+            <div className="min-w-0">
+              <p className="font-medium">ComicLens</p>
+              <p className="mt-1 text-sm text-muted-foreground">当前应用版本</p>
+            </div>
+            <span className="flex h-8 min-w-24 shrink-0 items-center justify-center gap-1.5 rounded-full border bg-background px-3 text-sm font-medium tabular-nums">
+              <BadgeCheckIcon className="size-4 text-muted-foreground" aria-hidden="true" />v
+              {APP_VERSION}
+            </span>
+          </div>
+        </SettingsSection>
+
         <SettingsSection icon={<BookOpenIcon />} title="阅读">
           <Field label="主题">
             <Select
