@@ -9,7 +9,7 @@ ComicTranslator 的长图切片、OCR、翻译与译文覆写管线集成到阅�
 - Maia 风格的移动端优先 UI，支持搜索、55 个分类入口、三种排序和周榜分页。
 - Comic 收藏、阅读历史、已读章节和阅读进度保存在服务器。
 - 条漫、单页、双页阅读模式；阅读器使用可自动隐藏的顶部控制栏和底部阅读胶囊。
-- 翻译前先缓存整话源图并确定完整分片数；OCR、翻译和渲染严格按分片顺序执行，完成一片立即显示一片。
+- 翻译任务随源图到达持续累加分片；OCR 可按设置的全服务并发数预取，翻译、渲染与展示仍严格按分片顺序，完成一片立即显示一片。
 - 关闭实时翻译后立即显示原图，后端完成当前分片后暂停。
 - 支持重新翻译本话，以及 OCR/翻译/渲染失败后的单分片重试。
 - 原图、OCR 结果和译图无时间 TTL，在默认 5 GB 上限内长期保留并按 LRU 淘汰。
@@ -22,7 +22,7 @@ ComicTranslator 的长图切片、OCR、翻译与译文覆写管线集成到阅�
 会自动选择当前主机对应的架构。建议生产部署固定版本标签：
 
 ```bash
-docker pull ghcr.io/little6neko/comiclens:v0.1.0
+docker pull ghcr.io/little6neko/comiclens:v0.1.1
 ```
 
 也可以使用始终指向最新正式版本的 `latest`：
@@ -42,7 +42,7 @@ docker run -d \
   --security-opt no-new-privileges:true \
   -p 8233:8233 \
   -v "$(pwd)/data:/app/data" \
-  ghcr.io/little6neko/comiclens:v0.1.0
+  ghcr.io/little6neko/comiclens:v0.1.1
 ```
 
 打开 <http://127.0.0.1:8233>；从其他设备访问时，将 `127.0.0.1` 换成服务器地址。容器监听
@@ -60,7 +60,7 @@ docker run -d \
   -p 8233:8233 \
   -e COMICLENS_ACCESS_PASSWORD='换成足够长的密码' \
   -v "$(pwd)/data:/app/data" \
-  ghcr.io/little6neko/comiclens:v0.1.0
+  ghcr.io/little6neko/comiclens:v0.1.1
 ```
 
 部署地区无法直接访问上游时，可以额外添加
@@ -78,7 +78,7 @@ docker logs -f comiclens
 `-e` 参数，尤其是访问密码和代理；下面仍以不启用密码和代理为例：
 
 ```bash
-COMICLENS_VERSION=v0.1.0
+COMICLENS_VERSION=v0.1.1
 docker pull "ghcr.io/little6neko/comiclens:${COMICLENS_VERSION}"
 docker stop comiclens
 docker rm comiclens
