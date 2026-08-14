@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -100,6 +101,8 @@ class ControlledPipeline:
         self.max_active_ocr_calls = 0
         self.completed_ocr_calls: list[int] = []
         self.completed_ocr_segments: list[tuple[int, int]] = []
+        self.ocr_job_inputs: list[str | None] = []
+        self.submitted_ocr_jobs: list[str] = []
         self.translation_calls = 0
         self.translation_inputs: list[list[str]] = []
         self.render_calls = 0
@@ -122,6 +125,20 @@ class ControlledPipeline:
             async with self.ocr_limiter.slot():
                 return await self._run_ocr(original_bytes)
         return await self._run_ocr(original_bytes)
+
+    async def run_segment_ocr(
+        self,
+        original_bytes: bytes,
+        *,
+        job_id: str | None,
+        on_job_submitted: Callable[[str], None],
+    ) -> OCROutput:
+        self.ocr_job_inputs.append(job_id)
+        if job_id is None:
+            submitted_job_id = f"fake-job-{len(self.submitted_ocr_jobs) + 1}"
+            self.submitted_ocr_jobs.append(submitted_job_id)
+            on_job_submitted(submitted_job_id)
+        return await self.run_ocr(original_bytes)
 
     async def _run_ocr(self, original_bytes: bytes) -> OCROutput:
         self.ocr_calls += 1
@@ -1088,6 +1105,42 @@ async def test_one_prefetched_ocr_failure_does_not_cancel_other_segments(
         retried = harness.manager.state("alpha", "chapter-1")
         assert (retried.completed_segments, retried.failed_segments) == (4, 0)
         assert harness.pipeline.translation_calls == 4
+    finally:
+        harness.pipeline.fail_ocr_segments.clear()
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_manual_ocr_retry_submits_a_fresh_cloud_job(tmp_path: Path) -> None:
+    harness = create_harness(tmp_path, page_count=1)
+    harness.pipeline.fail_ocr_segments.add((0, 0))
+    try:
+        await harness.manager.start("alpha", "chapter-1")
+        await wait_for(
+            lambda: harness.manager.state("alpha", "chapter-1").status == "completed_with_errors"
+        )
+
+        failed = harness.repository.segment(
+            str(harness.manager.state("alpha", "chapter-1").generation_id),
+            0,
+            0,
+        )
+        assert failed is not None
+        assert failed["error_code"] == "OCR_TIMEOUT"
+        assert failed["ocr_job_id"] == "fake-job-1"
+
+        harness.pipeline.fail_ocr_segments.clear()
+        await harness.manager.retry_segment("alpha", "chapter-1", 0, 0)
+        await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
+
+        completed = harness.manager.state("alpha", "chapter-1")
+        segment = harness.repository.segment(str(completed.generation_id), 0, 0)
+        assert segment is not None
+        assert harness.pipeline.ocr_job_inputs == [None, None]
+        assert harness.pipeline.submitted_ocr_jobs == ["fake-job-1", "fake-job-2"]
+        assert segment["ocr_job_id"] == "fake-job-2"
+        assert completed.pages[0].segments[0].attempts == 2
+        assert completed.pages[0].segments[0].error is None
     finally:
         harness.pipeline.fail_ocr_segments.clear()
         await harness.close()

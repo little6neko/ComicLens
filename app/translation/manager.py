@@ -410,9 +410,7 @@ class TranslationManager:
             page_index,
             segment_index,
             clear_columns=clear_by_stage.get(stage, ["translated_path"]),
-            clear_job_id=stage == "ocr"
-            and str(segment["error_code"])
-            in {"OCR_JOB_FAILED", "OCR_JOB_NOT_FOUND", "OCR_PROTOCOL_ERROR"},
+            clear_job_id=stage == "ocr",
             increment_attempts=stage != "ocr",
         )
         self.cache.delete_entries(paths)
