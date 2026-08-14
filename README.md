@@ -22,7 +22,7 @@ ComicTranslator 的长图切片、OCR、翻译与译文覆写管线集成到阅�
 会自动选择当前主机对应的架构。建议生产部署固定版本标签：
 
 ```bash
-docker pull ghcr.io/little6neko/comiclens:v0.1.1
+docker pull ghcr.io/little6neko/comiclens:v0.1.2
 ```
 
 也可以使用始终指向最新正式版本的 `latest`：
@@ -42,7 +42,7 @@ docker run -d \
   --security-opt no-new-privileges:true \
   -p 8233:8233 \
   -v "$(pwd)/data:/app/data" \
-  ghcr.io/little6neko/comiclens:v0.1.1
+  ghcr.io/little6neko/comiclens:v0.1.2
 ```
 
 打开 <http://127.0.0.1:8233>；从其他设备访问时，将 `127.0.0.1` 换成服务器地址。容器监听
@@ -60,7 +60,7 @@ docker run -d \
   -p 8233:8233 \
   -e COMICLENS_ACCESS_PASSWORD='换成足够长的密码' \
   -v "$(pwd)/data:/app/data" \
-  ghcr.io/little6neko/comiclens:v0.1.1
+  ghcr.io/little6neko/comiclens:v0.1.2
 ```
 
 部署地区无法直接访问上游时，可以额外添加
@@ -78,7 +78,7 @@ docker logs -f comiclens
 `-e` 参数，尤其是访问密码和代理；下面仍以不启用密码和代理为例：
 
 ```bash
-COMICLENS_VERSION=v0.1.1
+COMICLENS_VERSION=v0.1.2
 docker pull "ghcr.io/little6neko/comiclens:${COMICLENS_VERSION}"
 docker stop comiclens
 docker rm comiclens
