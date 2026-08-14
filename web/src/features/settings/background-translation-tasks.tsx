@@ -78,10 +78,10 @@ export function BackgroundTranslationTasks() {
               {taskItems.length > 0 ? `${taskItems.length} 话正在处理` : "任务状态暂时无法读取"}
             </p>
           </div>
-          {tasks.isFetching && !tasks.isError && (
+          {taskItems.length > 0 && !tasks.isError && (
             <LoaderCircleIcon
               className="size-4 animate-spin text-muted-foreground"
-              aria-label="刷新中"
+              aria-label="后台任务处理中"
             />
           )}
         </div>
