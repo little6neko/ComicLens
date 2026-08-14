@@ -5,7 +5,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { ErrorState, LoadingState } from "@/components/query-state";
-import type { ReaderPage, TranslationPageState, TranslationTaskState } from "@/domain/api";
+import type {
+  ReadChapterState,
+  ReaderPage,
+  TranslationPageState,
+  TranslationTaskState,
+} from "@/domain/api";
 import { ReaderBottomBar } from "@/features/reader/reader-bottom-bar";
 import { ReaderPageImage } from "@/features/reader/reader-page-image";
 import { ReaderChapterDirectory } from "@/features/reader/reader-panels";
@@ -25,6 +30,12 @@ const activeTaskStatuses = new Set([
   "stopping_after_page",
   "stopping_after_segment",
 ]);
+
+interface MarkReadTarget {
+  comicId: string;
+  chapterId: string;
+  chapterKey: string;
+}
 
 export const Route = createFileRoute("/reader/$comicId/$chapterId")({
   validateSearch: (search: Record<string, unknown>) => ({ page: positivePage(search.page) }),
@@ -119,8 +130,35 @@ function ReaderPageView() {
     onError: (error) => toast.error(error instanceof Error ? error.message : "阅读设置保存失败"),
   });
   const markRead = useMutation({
-    mutationFn: () => api.setChapterRead(comicId, chapterId),
-    onSuccess: (next) => queryClient.setQueryData(queryKeys.readChapters(comicId), next),
+    mutationFn: (target: MarkReadTarget) => api.setChapterRead(target.comicId, target.chapterId),
+    onMutate: async (target) => {
+      const readChaptersKey = queryKeys.readChapters(target.comicId);
+      await queryClient.cancelQueries({ queryKey: readChaptersKey });
+      const current = queryClient.getQueryData<ReadChapterState>(readChaptersKey);
+      const wasAlreadyRead = current?.chapterIds.includes(target.chapterId) ?? false;
+      queryClient.setQueryData<ReadChapterState>(readChaptersKey, (state) =>
+        addReadChapter(state, target.comicId, target.chapterId),
+      );
+      return { wasAlreadyRead };
+    },
+    onSuccess: (next, target) => {
+      queryClient.setQueryData<ReadChapterState>(
+        queryKeys.readChapters(target.comicId),
+        (current) => mergeReadChapterStates(current, next),
+      );
+    },
+    onError: (_error, target, context) => {
+      const readChaptersKey = queryKeys.readChapters(target.comicId);
+      if (!context?.wasAlreadyRead) {
+        queryClient.setQueryData<ReadChapterState>(readChaptersKey, (current) =>
+          removeReadChapter(current, target.chapterId),
+        );
+      }
+      if (markedReadChapter.current === target.chapterKey) {
+        markedReadChapter.current = null;
+      }
+      void queryClient.invalidateQueries({ queryKey: readChaptersKey });
+    },
   });
 
   const pageDirection = directionOverride ?? settings.data?.pageDirection ?? "ltr";
@@ -132,10 +170,6 @@ function ReaderPageView() {
   const totalPages = effectivePages.length;
   const rawCurrent = clamp(currentPageIndex, 0, Math.max(0, totalPages - 1));
   const clampedCurrent = readingMode === "double" ? Math.floor(rawCurrent / 2) * 2 : rawCurrent;
-  const completionPageIndex =
-    readingMode === "double"
-      ? Math.floor(Math.max(0, totalPages - 1) / 2) * 2
-      : Math.max(0, totalPages - 1);
 
   useEffect(() => {
     if (initializedChapter.current === chapterKey || !manifest.isSuccess) return;
@@ -201,16 +235,12 @@ function ReaderPageView() {
   }, [chapterId, clampedCurrent, comic.data, manifest.data, queryClient, totalPages]);
 
   useEffect(() => {
-    if (
-      totalPages === 0 ||
-      clampedCurrent < completionPageIndex ||
-      markedReadChapter.current === chapterKey
-    ) {
+    if (!manifest.isSuccess || totalPages === 0 || markedReadChapter.current === chapterKey) {
       return;
     }
     markedReadChapter.current = chapterKey;
-    markRead.mutate();
-  }, [chapterKey, clampedCurrent, completionPageIndex, totalPages]);
+    markRead.mutate({ comicId, chapterId, chapterKey });
+  }, [chapterId, chapterKey, comicId, manifest.isSuccess, totalPages]);
 
   useEffect(() => {
     if (readingMode === "strip") return;
@@ -435,6 +465,44 @@ function mergePage(
       ? taskPage.translationLayers
       : (page.translationLayers ?? []),
     segments: taskPage?.segments ?? [],
+  };
+}
+
+function addReadChapter(
+  current: ReadChapterState | undefined,
+  comicId: string,
+  chapterId: string,
+): ReadChapterState {
+  if (current?.chapterIds.includes(chapterId)) return current;
+  return {
+    comicId,
+    chapterIds: [...(current?.chapterIds ?? []), chapterId],
+  };
+}
+
+function mergeReadChapterStates(
+  current: ReadChapterState | undefined,
+  next: ReadChapterState,
+): ReadChapterState {
+  if (!current) return next;
+  const chapterIds = [...next.chapterIds];
+  const seen = new Set(chapterIds);
+  for (const chapterId of current.chapterIds) {
+    if (seen.has(chapterId)) continue;
+    seen.add(chapterId);
+    chapterIds.push(chapterId);
+  }
+  return chapterIds.length === next.chapterIds.length ? next : { ...next, chapterIds };
+}
+
+function removeReadChapter(
+  current: ReadChapterState | undefined,
+  chapterId: string,
+): ReadChapterState | undefined {
+  if (!current?.chapterIds.includes(chapterId)) return current;
+  return {
+    ...current,
+    chapterIds: current.chapterIds.filter((candidate) => candidate !== chapterId),
   };
 }
 
