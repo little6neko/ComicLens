@@ -83,6 +83,7 @@ def test_new_settings_use_async_ocr_deepl_and_auto_language_defaults(tmp_path: P
     assert payload["ocrModel"] == "PaddleOCR-VL-1.6"
     assert payload["ocrPollIntervalSeconds"] == 2.0
     assert payload["ocrTimeoutSeconds"] == 180.0
+    assert payload["ocrConcurrency"] == 1
     assert payload["ocrSliceHeight"] == 1600
     assert payload["ocrSliceOverlap"] == 200
     assert payload["translationService"] == "deepl"
@@ -92,6 +93,22 @@ def test_new_settings_use_async_ocr_deepl_and_auto_language_defaults(tmp_path: P
     assert "ocrAuthMode" not in payload
     assert "ocrBasicPassword" not in payload
     assert "deeplxTimeoutSeconds" not in payload
+
+
+def test_saved_ocr_concurrency_updates_running_manager_immediately(tmp_path: Path) -> None:
+    with TestClient(create_app(config_for(tmp_path))) as client:
+        manager = client.app.state.translation_manager
+        assert manager.ocr_concurrency == 1
+
+        updated = client.patch("/api/settings", json={"ocrConcurrency": 3})
+        assert updated.status_code == 200
+        assert updated.json()["ocrConcurrency"] == 3
+        assert manager.ocr_concurrency == 3
+
+        rejected = client.patch("/api/settings", json={"ocrConcurrency": 0})
+        assert rejected.status_code == 422
+        assert manager.ocr_concurrency == 3
+        assert client.get("/api/settings").json()["ocrConcurrency"] == 3
 
 
 def test_browser_preferences_are_removed_from_upgraded_database(tmp_path: Path) -> None:

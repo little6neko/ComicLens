@@ -272,7 +272,7 @@ function SettingsPage() {
           />
           <NumberField
             label="OCR 并发"
-            hint="分片渐进翻译固定按顺序单片执行；此值仅为旧任务兼容保留。"
+            hint="全服务最多同时运行的 OCR 云端任务数，保存后立即生效。"
             value={draft.ocrConcurrency}
             min={1}
             max={16}

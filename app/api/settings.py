@@ -27,6 +27,9 @@ async def patch_settings(
 ) -> ServerSettings:
     try:
         updated = settings.patch(payload)
+        translation_manager = request.app.state.translation_manager
+        if translation_manager.ocr_concurrency != updated.ocr_concurrency:
+            translation_manager.set_ocr_concurrency(updated.ocr_concurrency)
         request.app.state.media_cache.max_bytes = updated.cache_max_mb * 1024 * 1024
         request.app.state.media_cache.enforce_limit()
         return updated
