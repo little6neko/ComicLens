@@ -27,7 +27,6 @@ class SensitiveSettingPatch(ComicModel):
 
 class ServerSettings(ComicModel):
     page_direction: Literal["ltr", "rtl"]
-    realtime_translation_default: bool
     source_language: Literal["AUTO", "EN", "KO"]
     target_language: Literal["ZH-HANS"] = "ZH-HANS"
     ocr_mode: Literal["auto", "direct", "job"]
@@ -59,7 +58,6 @@ class ServerSettingsPatch(ComicModel):
     model_config = ConfigDict(extra="forbid")
 
     page_direction: Literal["ltr", "rtl"] | None = None
-    realtime_translation_default: bool | None = None
     source_language: Literal["AUTO", "EN", "KO"] | None = None
     ocr_mode: Literal["auto", "direct", "job"] | None = None
     ocr_auth_mode: Literal["none", "bearer", "basic"] | None = None

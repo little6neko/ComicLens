@@ -19,7 +19,7 @@ from app.security.secrets import SecretCipher
 DEFAULT_OCR_API_URL = "http://example.com/layout-parsing"
 DEFAULT_OCR_MODEL = "PaddleOCR-VL-1.6"
 SETTINGS_SCHEMA_KEY = "settings_schema_version"
-SETTINGS_SCHEMA_VERSION = 5
+SETTINGS_SCHEMA_VERSION = 6
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,7 +30,6 @@ class SettingDefinition:
 
 SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
     "page_direction": SettingDefinition("ltr"),
-    "realtime_translation_default": SettingDefinition(False),
     "source_language": SettingDefinition("AUTO"),
     "ocr_mode": SettingDefinition("auto"),
     "ocr_auth_mode": SettingDefinition("none"),
@@ -41,7 +40,7 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
     "ocr_model": SettingDefinition(DEFAULT_OCR_MODEL),
     "ocr_poll_interval_seconds": SettingDefinition(2.0),
     "ocr_timeout_seconds": SettingDefinition(180.0),
-    "ocr_concurrency": SettingDefinition(1),
+    "ocr_concurrency": SettingDefinition(2),
     "translation_service": SettingDefinition("deepl"),
     "deepl_api_key": SettingDefinition("", True),
     "deeplx_url": SettingDefinition("", True),

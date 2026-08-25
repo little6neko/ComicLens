@@ -88,7 +88,8 @@ def test_new_settings_use_auto_ocr_without_auth_and_sync_example_url(tmp_path: P
     assert payload["ocrModel"] == "PaddleOCR-VL-1.6"
     assert payload["ocrPollIntervalSeconds"] == 2.0
     assert payload["ocrTimeoutSeconds"] == 180.0
-    assert payload["ocrConcurrency"] == 1
+    assert payload["ocrConcurrency"] == 2
+    assert "realtimeTranslationDefault" not in payload
     assert payload["ocrSliceHeight"] == 1600
     assert payload["ocrSliceOverlap"] == 200
     assert payload["translationService"] == "deepl"
@@ -109,7 +110,7 @@ def test_new_settings_use_auto_ocr_without_auth_and_sync_example_url(tmp_path: P
 def test_saved_ocr_concurrency_updates_running_manager_immediately(tmp_path: Path) -> None:
     with TestClient(create_app(config_for(tmp_path))) as client:
         manager = client.app.state.translation_manager
-        assert manager.ocr_concurrency == 1
+        assert manager.ocr_concurrency == 2
 
         updated = client.patch("/api/settings", json={"ocrConcurrency": 3})
         assert updated.status_code == 200
@@ -174,7 +175,14 @@ def test_browser_preferences_are_removed_from_upgraded_database(tmp_path: Path) 
     assert "reading_mode" not in stored_keys
 
 
-@pytest.mark.parametrize("payload", [{"theme": "light"}, {"readingMode": "page"}])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"theme": "light"},
+        {"readingMode": "page"},
+        {"realtimeTranslationDefault": True},
+    ],
+)
 def test_settings_reject_removed_browser_preferences(
     tmp_path: Path,
     payload: dict[str, str],
@@ -184,6 +192,49 @@ def test_settings_reject_removed_browser_preferences(
 
     assert response.status_code == 422
     assert response.json()["code"] == "VALIDATION_ERROR"
+
+
+def test_v5_settings_drop_realtime_translation_default_and_preserve_other_values(
+    tmp_path: Path,
+) -> None:
+    config = config_for(tmp_path)
+    database = Database(config.database_path)
+    cipher = SecretCipher(config.secrets_path, database)
+    settings = SettingsService(database, cipher, config)
+    settings.patch(
+        ServerSettingsPatch(
+            page_direction="rtl",
+            ocr_concurrency=1,
+            ocr_token={"action": "replace", "value": "preserved-secret"},
+        )
+    )
+    database.execute(
+        """
+        INSERT INTO app_settings(key, value, is_secret, updated_at)
+        VALUES ('realtime_translation_default', 'true', 0, 1)
+        """
+    )
+    database.execute(
+        "UPDATE app_metadata SET value = '5' WHERE key = ?",
+        ("settings_schema_version",),
+    )
+
+    migrated = SettingsService(database, cipher, config).values(include_secrets=True)
+    stored_keys = {
+        str(row["key"]) for row in database.fetchall("SELECT key FROM app_settings ORDER BY key")
+    }
+    schema_version = database.scalar(
+        "SELECT value FROM app_metadata WHERE key = ?",
+        ("settings_schema_version",),
+    )
+    database.close()
+
+    assert "realtime_translation_default" not in migrated
+    assert "realtime_translation_default" not in stored_keys
+    assert migrated["page_direction"] == "rtl"
+    assert migrated["ocr_concurrency"] == 1
+    assert migrated["ocr_token"] == "preserved-secret"
+    assert schema_version == "6"
 
 
 def test_v2_settings_migrate_only_the_old_default_slice_height(tmp_path: Path) -> None:
@@ -390,7 +441,7 @@ def test_v4_settings_drop_fallback_proxy_without_copying_its_value(
     assert migrated["proxy_url"] == expected_proxy_url
     assert "fallback_proxy_url" not in stored_keys
     assert "proxy_url" in stored_keys
-    assert schema_version == "5"
+    assert schema_version == "6"
 
 
 def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> None:
