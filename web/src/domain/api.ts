@@ -277,6 +277,11 @@ export interface TranslationActionResult {
   task: TranslationTaskState;
 }
 
+export interface RetryFailedTranslationResult {
+  task: TranslationTaskState;
+  retriedCount: number;
+}
+
 export type BackgroundTranslationStage =
   | "preparing"
   | "queued"
@@ -284,7 +289,8 @@ export type BackgroundTranslationStage =
   | "translating"
   | "rendering"
   | "stopping"
-  | "processing";
+  | "processing"
+  | "needs_retry";
 
 export interface BackgroundTranslationTask {
   comicId: string;

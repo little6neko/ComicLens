@@ -18,6 +18,7 @@ import { ReaderTopBar } from "@/features/reader/reader-top-bar";
 import type { EffectiveReaderPage, ReadingMode } from "@/features/reader/types";
 import { useReaderChrome } from "@/features/reader/use-reader-chrome";
 import { api } from "@/lib/api-client";
+import { formatReaderChapterTitle } from "@/lib/chapter-title";
 import { queryKeys, queryTimes } from "@/lib/query-keys";
 import { useReadingMode } from "@/lib/reading-mode-preference";
 import { positivePage } from "@/lib/route-search";
@@ -112,6 +113,18 @@ function ReaderPageView() {
     onSuccess: (result) => {
       updateTask(result.task);
       toast.success("已开始重新翻译本话");
+    },
+    onError: showActionError,
+  });
+  const retryFailed = useMutation({
+    mutationFn: () => api.retryFailedTranslation(comicId, chapterId),
+    onSuccess: (result) => {
+      updateTask(result.task);
+      toast.success(
+        result.retriedCount > 0
+          ? `已加入 ${result.retriedCount} 个失败项`
+          : "当前没有需要重试的失败项",
+      );
     },
     onError: showActionError,
   });
@@ -287,6 +300,11 @@ function ReaderPageView() {
     retranslate.mutate();
   }
 
+  function retryFailedItems() {
+    setTranslationEnabled(true);
+    retryFailed.mutate();
+  }
+
   function jumpToPage(index: number) {
     const selected = clamp(index, 0, Math.max(0, totalPages - 1));
     const target = readingMode === "double" ? Math.floor(selected / 2) * 2 : selected;
@@ -321,6 +339,10 @@ function ReaderPageView() {
   const currentChapterIndex = comic.data?.chapters.findIndex(
     (item) => item.chapterId === chapterId,
   );
+  const currentChapter =
+    currentChapterIndex !== undefined && currentChapterIndex >= 0
+      ? comic.data?.chapters[currentChapterIndex]
+      : undefined;
   const nextChapter =
     currentChapterIndex !== undefined && currentChapterIndex > 0
       ? comic.data?.chapters[currentChapterIndex - 1]
@@ -347,12 +369,14 @@ function ReaderPageView() {
         visible={chrome.visible}
         comicId={comicId}
         comicTitle={comic.data?.title ?? "ComicLens"}
-        chapterTitle={manifest.data.title}
+        chapterTitle={formatReaderChapterTitle(currentChapter?.title, chapterId)}
         translationEnabled={translationEnabled ?? false}
         translationBusy={startTranslation.isPending || pauseTranslation.isPending}
+        retryingFailed={retryFailed.isPending}
         retranslating={retranslate.isPending}
         task={task.data}
         onToggleTranslation={toggleTranslation}
+        onRetryFailed={retryFailedItems}
         onRetranslate={retranslateChapter}
       />
 

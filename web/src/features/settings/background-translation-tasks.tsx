@@ -1,5 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircleIcon, LoaderCircleIcon, OctagonXIcon, ScanTextIcon } from "lucide-react";
+import {
+  AlertCircleIcon,
+  LoaderCircleIcon,
+  OctagonXIcon,
+  RefreshCwIcon,
+  RotateCwIcon,
+  ScanTextIcon,
+} from "lucide-react";
 import { useState, type Dispatch, type SetStateAction } from "react";
 import { toast } from "sonner";
 
@@ -17,7 +24,16 @@ const stageLabels: Record<BackgroundTranslationStage, string> = {
   rendering: "渲染",
   stopping: "正在停止",
   processing: "处理中",
+  needs_retry: "等待重试",
 };
+
+const activeTaskStatuses = new Set<BackgroundTranslationTask["status"]>([
+  "preparing",
+  "queued",
+  "running",
+  "stopping_after_page",
+  "stopping_after_segment",
+]);
 
 interface TaskIdentity {
   comicId: string;
@@ -27,6 +43,8 @@ interface TaskIdentity {
 export function BackgroundTranslationTasks() {
   const queryClient = useQueryClient();
   const [stopping, setStopping] = useState<Set<string>>(() => new Set());
+  const [retryingFailed, setRetryingFailed] = useState<Set<string>>(() => new Set());
+  const [retranslating, setRetranslating] = useState<Set<string>>(() => new Set());
   const tasks = useQuery({
     queryKey: queryKeys.backgroundTranslations,
     queryFn: api.backgroundTranslations,
@@ -37,7 +55,7 @@ export function BackgroundTranslationTasks() {
   const forceStop = useMutation({
     mutationFn: ({ comicId, chapterId }: TaskIdentity) =>
       api.forceStopTranslation(comicId, chapterId),
-    onMutate: (target) => updateStopping(setStopping, target, true),
+    onMutate: (target) => updatePending(setStopping, target, true),
     onSuccess: async (_result, target) => {
       queryClient.setQueryData<BackgroundTranslationTask[]>(
         queryKeys.backgroundTranslations,
@@ -57,10 +75,65 @@ export function BackgroundTranslationTasks() {
     onError: (error) => {
       toast.error(error instanceof Error ? error.message : "强制停止失败");
     },
-    onSettled: (_result, _error, target) => updateStopping(setStopping, target, false),
+    onSettled: (_result, _error, target) => updatePending(setStopping, target, false),
+  });
+  const retryFailed = useMutation({
+    mutationFn: ({ comicId, chapterId }: TaskIdentity) =>
+      api.retryFailedTranslation(comicId, chapterId),
+    onMutate: (target) => updatePending(setRetryingFailed, target, true),
+    onSuccess: async (result, target) => {
+      queryClient.setQueryData(
+        queryKeys.translation(target.comicId, target.chapterId),
+        result.task,
+      );
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.backgroundTranslations }),
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.translation(target.comicId, target.chapterId),
+        }),
+      ]);
+      toast.success(
+        result.retriedCount > 0
+          ? `已加入 ${result.retriedCount} 个失败项`
+          : "当前没有需要重试的失败项",
+      );
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "重试失败项失败");
+    },
+    onSettled: (_result, _error, target) => updatePending(setRetryingFailed, target, false),
+  });
+  const retranslate = useMutation({
+    mutationFn: ({ comicId, chapterId }: TaskIdentity) => api.retranslate(comicId, chapterId),
+    onMutate: (target) => updatePending(setRetranslating, target, true),
+    onSuccess: async (result, target) => {
+      queryClient.setQueryData(
+        queryKeys.translation(target.comicId, target.chapterId),
+        result.task,
+      );
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.backgroundTranslations }),
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.translation(target.comicId, target.chapterId),
+        }),
+      ]);
+      toast.success("已开始重新翻译本话");
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "全部重试失败");
+    },
+    onSettled: (_result, _error, target) => updatePending(setRetranslating, target, false),
   });
 
   const taskItems = tasks.data ?? [];
+  const activeCount = taskItems.filter((task) => activeTaskStatuses.has(task.status)).length;
+  const waitingCount = taskItems.length - activeCount;
+  const taskSummary = [
+    activeCount > 0 ? `${activeCount} 话正在处理` : null,
+    waitingCount > 0 ? `${waitingCount} 话等待重试` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
   if (taskItems.length === 0 && !tasks.isError) return null;
 
   return (
@@ -74,11 +147,9 @@ export function BackgroundTranslationTasks() {
             <h2 id="background-translation-heading" className="font-semibold">
               后台 OCR 翻译
             </h2>
-            <p className="text-xs text-muted-foreground">
-              {taskItems.length > 0 ? `${taskItems.length} 话正在处理` : "任务状态暂时无法读取"}
-            </p>
+            <p className="text-xs text-muted-foreground">{taskSummary || "任务状态暂时无法读取"}</p>
           </div>
-          {taskItems.length > 0 && !tasks.isError && (
+          {activeCount > 0 && !tasks.isError && (
             <LoaderCircleIcon
               className="size-4 animate-spin text-muted-foreground"
               aria-label="后台任务处理中"
@@ -100,6 +171,20 @@ export function BackgroundTranslationTasks() {
               key={key}
               task={task}
               stopping={stopping.has(key)}
+              retryingFailed={retryingFailed.has(key)}
+              retranslating={retranslating.has(key)}
+              onRetryFailed={() => {
+                retryFailed.mutate({ comicId: task.comicId, chapterId: task.chapterId });
+              }}
+              onRetranslate={() => {
+                if (
+                  window.confirm(
+                    `全部重试「${task.comicTitle} · ${task.chapterTitle}」？\n\n这会再次调用 OCR 和翻译接口，已经成功的项目也会重新处理。`,
+                  )
+                ) {
+                  retranslate.mutate({ comicId: task.comicId, chapterId: task.chapterId });
+                }
+              }}
               onForceStop={() => {
                 if (
                   window.confirm(
@@ -120,16 +205,30 @@ export function BackgroundTranslationTasks() {
 function BackgroundTaskRow({
   task,
   stopping,
+  retryingFailed,
+  retranslating,
+  onRetryFailed,
+  onRetranslate,
   onForceStop,
 }: {
   task: BackgroundTranslationTask;
   stopping: boolean;
+  retryingFailed: boolean;
+  retranslating: boolean;
+  onRetryFailed: () => void;
+  onRetranslate: () => void;
   onForceStop: () => void;
 }) {
-  const discovered = task.totalSegments > 0;
-  const percentage = discovered
-    ? Math.min(100, Math.round((task.completedSegments / task.totalSegments) * 100))
-    : null;
+  const usesSegments = task.totalSegments > 0 || task.planningComplete;
+  const totalItems = usesSegments ? task.totalSegments : task.totalPages;
+  const completedItems = usesSegments ? task.completedSegments : task.completedPages;
+  const failedItems = usesSegments ? task.failedSegments : task.failedPages;
+  const percentage =
+    totalItems > 0 ? Math.min(100, Math.round((completedItems / totalItems) * 100)) : null;
+  const active = activeTaskStatuses.has(task.status);
+  const stoppingStatus =
+    task.status === "stopping_after_page" || task.status === "stopping_after_segment";
+  const actionPending = stopping || retryingFailed || retranslating;
   const readerUrl = `/reader/${encodeURIComponent(task.comicId)}/${encodeURIComponent(task.chapterId)}`;
 
   return (
@@ -155,24 +254,42 @@ function BackgroundTaskRow({
               className={cn(
                 "shrink-0 rounded-full bg-muted px-2.5 py-1 text-[11px] font-medium text-muted-foreground",
                 task.stage === "stopping" && "bg-amber-500/15 text-amber-700 dark:text-amber-300",
+                task.stage === "needs_retry" &&
+                  "bg-amber-500/15 text-amber-700 dark:text-amber-300",
               )}
             >
               {stageLabels[task.stage]}
             </span>
             <Button
               type="button"
-              variant="destructive"
+              variant="outline"
               size="sm"
-              disabled={stopping}
-              onClick={onForceStop}
+              disabled={actionPending || stoppingStatus}
+              onClick={onRetranslate}
             >
-              {stopping ? (
+              {retranslating ? (
                 <LoaderCircleIcon className="size-3.5 animate-spin" />
               ) : (
-                <OctagonXIcon className="size-3.5" />
+                <RefreshCwIcon className="size-3.5" />
               )}
-              {stopping ? "停止中…" : "强制停止"}
+              {retranslating ? "提交中…" : "全部重试"}
             </Button>
+            {active && (
+              <Button
+                type="button"
+                variant="destructive"
+                size="sm"
+                disabled={actionPending || stoppingStatus}
+                onClick={onForceStop}
+              >
+                {stopping || stoppingStatus ? (
+                  <LoaderCircleIcon className="size-3.5 animate-spin" />
+                ) : (
+                  <OctagonXIcon className="size-3.5" />
+                )}
+                {stopping || stoppingStatus ? "停止中…" : "强制停止"}
+              </Button>
+            )}
           </div>
         </div>
 
@@ -192,14 +309,31 @@ function BackgroundTaskRow({
               <span>正在发现分片</span>
             ) : (
               <span className="tabular-nums">
-                {task.completedSegments} / {task.totalSegments} 个分片 · {percentage}%
+                {completedItems} / {totalItems} {usesSegments ? "个分片" : "张图片"} · {percentage}%
               </span>
             )}
             <span className="shrink-0 tabular-nums">
               已缓存 {task.preparedPages} / {task.totalPages} 张源图
             </span>
-            {task.failedSegments > 0 && (
-              <span className="w-full text-destructive">{task.failedSegments} 个失败</span>
+            {failedItems > 0 && (
+              <span className="flex w-full items-center gap-2 text-destructive">
+                <span className="tabular-nums">{failedItems} 个失败</span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 border-destructive/30 px-2.5 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                  disabled={actionPending || stoppingStatus}
+                  onClick={onRetryFailed}
+                >
+                  {retryingFailed ? (
+                    <LoaderCircleIcon className="size-3.5 animate-spin" />
+                  ) : (
+                    <RotateCwIcon className="size-3.5" />
+                  )}
+                  {retryingFailed ? "提交中…" : "重试失败"}
+                </Button>
+              </span>
             )}
           </div>
         </div>
@@ -212,7 +346,7 @@ function taskKey(task: TaskIdentity): string {
   return `${task.comicId}\u0000${task.chapterId}`;
 }
 
-function updateStopping(
+function updatePending(
   setter: Dispatch<SetStateAction<Set<string>>>,
   target: TaskIdentity,
   active: boolean,

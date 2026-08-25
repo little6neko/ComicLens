@@ -4,6 +4,7 @@ import {
   LanguagesIcon,
   LoaderCircleIcon,
   RefreshCwIcon,
+  RotateCwIcon,
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -24,9 +25,11 @@ export function ReaderTopBar({
   chapterTitle,
   translationEnabled,
   translationBusy,
+  retryingFailed,
   retranslating,
   task,
   onToggleTranslation,
+  onRetryFailed,
   onRetranslate,
 }: {
   visible: boolean;
@@ -35,14 +38,23 @@ export function ReaderTopBar({
   chapterTitle: string;
   translationEnabled: boolean;
   translationBusy: boolean;
+  retryingFailed: boolean;
   retranslating: boolean;
   task: TranslationTaskState | undefined;
   onToggleTranslation: () => void;
+  onRetryFailed: () => void;
   onRetranslate: () => void;
 }) {
   const total = task?.totalSegments ?? task?.totalPages ?? 0;
   const completed = task?.completedSegments ?? task?.completedPages ?? 0;
   const progress = total > 0 ? Math.min(100, (completed / total) * 100) : 0;
+  const failedCount = task
+    ? task.totalSegments > 0 || task.planningComplete
+      ? task.failedSegments
+      : task.failedPages
+    : 0;
+  const stopping =
+    task?.status === "stopping_after_page" || task?.status === "stopping_after_segment";
 
   return (
     <header
@@ -93,10 +105,29 @@ export function ReaderTopBar({
           />
         </button>
 
+        {failedCount > 0 && (
+          <button
+            type="button"
+            className="flex h-10 shrink-0 items-center gap-1.5 rounded-full border border-amber-300/25 bg-amber-300/10 px-2.5 text-xs font-medium text-amber-100 transition-colors hover:bg-amber-300/20 disabled:opacity-45 md:px-3"
+            disabled={retryingFailed || retranslating || stopping}
+            onClick={onRetryFailed}
+            aria-label={`重试本话 ${failedCount} 个失败项`}
+            title={`重试本话 ${failedCount} 个失败项`}
+          >
+            {retryingFailed ? (
+              <LoaderCircleIcon className="size-4 animate-spin" />
+            ) : (
+              <RotateCwIcon className="size-4" />
+            )}
+            <span className="hidden md:inline">重试失败</span>
+            <span className="tabular-nums">{failedCount}</span>
+          </button>
+        )}
+
         <button
           type="button"
           className="flex size-10 shrink-0 items-center justify-center rounded-full text-zinc-300 transition-colors hover:bg-white/10 hover:text-white disabled:opacity-45"
-          disabled={retranslating}
+          disabled={retranslating || retryingFailed || stopping}
           onClick={onRetranslate}
           aria-label="重新翻译本话"
           title="重新翻译本话"

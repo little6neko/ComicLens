@@ -17,6 +17,7 @@ import type {
   HomeFeed,
   RankingPage,
   ReadChapterState,
+  RetryFailedTranslationResult,
   ServerSettings,
   SettingsPatch,
   TranslationActionResult,
@@ -171,6 +172,11 @@ export const api = {
     request<TranslationActionResult>(
       `${translationPath(comicId, chapterId)}/retranslate`,
       json("POST", { confirmed: true }),
+    ),
+  retryFailedTranslation: (comicId: string, chapterId: string) =>
+    request<RetryFailedTranslationResult>(
+      `${translationPath(comicId, chapterId)}/retry-failed`,
+      json("POST"),
     ),
   retryPage: (comicId: string, chapterId: string, pageIndex: number) =>
     request<TranslationActionResult>(
