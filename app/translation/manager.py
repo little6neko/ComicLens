@@ -1837,7 +1837,7 @@ class TranslationManager:
             auth_mode=str(runtime.get("ocr_auth_mode") or "none"),
             basic_username=str(runtime.get("ocr_basic_username") or ""),
             basic_password=str(runtime.get("ocr_basic_password") or ""),
-            mode=str(semantic.get("ocrProtocol") or "job"),
+            mode=str(runtime["ocr_mode"]),
             job_model=str(semantic.get("ocrModel") or "PaddleOCR-VL-1.6"),
             job_poll_interval=float(runtime["ocr_poll_interval_seconds"]),
             job_timeout=float(runtime["ocr_timeout_seconds"]),

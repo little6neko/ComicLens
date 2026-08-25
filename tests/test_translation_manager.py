@@ -1194,6 +1194,57 @@ async def test_force_stop_cancels_current_segment_immediately_and_can_resume(
 
 
 @pytest.mark.asyncio
+async def test_retry_failed_after_force_stop_uses_current_ocr_mode(tmp_path: Path) -> None:
+    harness = create_harness(
+        tmp_path,
+        page_count=1,
+        image_size=(300, 2400),
+        translation_settings={
+            "ocr_mode": "job",
+            "ocr_concurrency": 1,
+            "long_image_threshold": 1000,
+            "ocr_slice_height": 700,
+            "ocr_slice_overlap": 100,
+        },
+    )
+    pipeline_builds: list[tuple[str | None, str]] = []
+
+    def build_pipeline(semantic: dict[str, object], runtime: dict[str, object]):
+        pipeline_builds.append(
+            (
+                str(semantic["ocrProtocol"]) if semantic.get("ocrProtocol") else None,
+                str(runtime["ocr_mode"]),
+            )
+        )
+        return harness.pipeline
+
+    harness.manager._pipeline_factory = build_pipeline  # type: ignore[assignment]
+    harness.pipeline.fail_ocr_segments.add((0, 0))
+    harness.pipeline.block_next_render = True
+    try:
+        started = await harness.manager.start("alpha", "chapter-1")
+        await wait_for(harness.pipeline.render_started.is_set)
+        assert harness.manager.state("alpha", "chapter-1").failed_segments == 1
+
+        stopped = await harness.manager.force_stop("alpha", "chapter-1")
+        assert stopped.stopped_generations == 1
+        assert harness.manager.state("alpha", "chapter-1").status == "paused"
+
+        harness.manager.settings.patch(ServerSettingsPatch(ocr_mode="direct"))
+        harness.pipeline.fail_ocr_segments.clear()
+        retried, retried_count = await harness.manager.retry_failed("alpha", "chapter-1")
+
+        assert retried.generation_id == started.generation_id
+        assert retried_count == 1
+        await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
+        assert pipeline_builds == [("job", "job"), ("job", "direct")]
+    finally:
+        harness.pipeline.fail_ocr_segments.clear()
+        harness.pipeline.render_release.set()
+        await harness.close()
+
+
+@pytest.mark.asyncio
 async def test_force_stop_does_not_cancel_another_chapter_worker(tmp_path: Path) -> None:
     harness = create_harness(tmp_path, page_count=1)
     harness.pipeline.block_first_ocr = True
@@ -1632,7 +1683,23 @@ def test_prepare_failed_retries_supports_legacy_pages(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_retry_failed_resumes_same_generation_and_is_idempotent(tmp_path: Path) -> None:
-    harness = create_harness(tmp_path, page_count=2)
+    harness = create_harness(
+        tmp_path,
+        page_count=2,
+        translation_settings={"ocr_mode": "job"},
+    )
+    pipeline_builds: list[tuple[str | None, str]] = []
+
+    def build_pipeline(semantic: dict[str, object], runtime: dict[str, object]):
+        pipeline_builds.append(
+            (
+                str(semantic["ocrProtocol"]) if semantic.get("ocrProtocol") else None,
+                str(runtime["ocr_mode"]),
+            )
+        )
+        return harness.pipeline
+
+    harness.manager._pipeline_factory = build_pipeline  # type: ignore[assignment]
     harness.pipeline.fail_ocr_segments.update({(0, 0), (1, 0)})
     try:
         started = await harness.manager.start("alpha", "chapter-1")
@@ -1643,6 +1710,7 @@ async def test_retry_failed_resumes_same_generation_and_is_idempotent(tmp_path: 
         assert len(waiting_retry) == 1
         assert waiting_retry[0].stage == "needs_retry"
 
+        harness.manager.settings.patch(ServerSettingsPatch(ocr_mode="direct"))
         harness.pipeline.fail_ocr_segments.clear()
         retried, retried_count = await harness.manager.retry_failed("alpha", "chapter-1")
         repeated, repeated_count = await harness.manager.retry_failed("alpha", "chapter-1")
@@ -1655,6 +1723,7 @@ async def test_retry_failed_resumes_same_generation_and_is_idempotent(tmp_path: 
         completed = harness.manager.state("alpha", "chapter-1")
         assert (completed.completed_segments, completed.failed_segments) == (2, 0)
         assert harness.manager.background_tasks() == []
+        assert pipeline_builds == [("job", "job"), ("job", "direct")]
     finally:
         harness.pipeline.fail_ocr_segments.clear()
         await harness.close()
@@ -2108,7 +2177,7 @@ async def test_manager_http_client_trusts_env_and_ignores_comic_proxy_setting(
 
 
 @pytest.mark.asyncio
-async def test_manager_fingerprints_resolved_ocr_protocol_and_defaults_legacy_to_job(
+async def test_manager_fingerprints_resolved_ocr_protocol_but_pipeline_uses_runtime_mode(
     tmp_path: Path,
 ) -> None:
     harness = create_harness(tmp_path, page_count=1)
@@ -2147,15 +2216,20 @@ async def test_manager_fingerprints_resolved_ocr_protocol_and_defaults_legacy_to
             & auto_semantic.keys()
         )
 
-        direct_pipeline = harness.manager._build_pipeline(direct_semantic, runtime)
-        job_pipeline = harness.manager._build_pipeline(job_semantic, runtime)
+        runtime["ocr_mode"] = "direct"
+        direct_pipeline = harness.manager._build_pipeline(job_semantic, runtime)
+
+        runtime["ocr_mode"] = "job"
+        job_pipeline = harness.manager._build_pipeline(direct_semantic, runtime)
+
         legacy_semantic = dict(direct_semantic)
         legacy_semantic.pop("ocrProtocol")
+        runtime["ocr_mode"] = "auto"
         legacy_pipeline = harness.manager._build_pipeline(legacy_semantic, runtime)
 
         assert direct_pipeline.ocr.protocol == "direct"
         assert job_pipeline.ocr.protocol == "job"
-        assert legacy_pipeline.ocr.protocol == "job"
+        assert legacy_pipeline.ocr.protocol == "direct"
     finally:
         await harness.close()
 
