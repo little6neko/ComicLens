@@ -43,16 +43,19 @@ function HomePage() {
       {recent && (
         <section className="space-y-4">
           <SectionHeading title="继续阅读" />
-          <a
-            href={`/reader/${encodeURIComponent(recent.comic.comicId)}/${encodeURIComponent(recent.chapterId)}?page=${recent.pageIndex + 1}`}
-            className="group flex items-center gap-4 rounded-3xl border bg-card p-4 shadow-sm transition-shadow hover:shadow-md"
-          >
+          <div className="group relative flex items-center gap-4 rounded-3xl border bg-card p-4 shadow-sm transition-shadow hover:shadow-md">
+            <Link
+              to="/comic/$comicId"
+              params={{ comicId: recent.comic.comicId }}
+              aria-label={`查看《${recent.comic.title}》详情`}
+              className="absolute inset-0 z-10 rounded-3xl outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+            />
             <img
               src={recent.comic.coverUrl}
               alt={recent.comic.title}
-              className="h-28 w-21 shrink-0 rounded-2xl object-cover"
+              className="pointer-events-none relative z-20 h-28 w-21 shrink-0 rounded-2xl object-cover"
             />
-            <div className="min-w-0 flex-1">
+            <div className="pointer-events-none relative z-20 min-w-0 flex-1">
               <p className="truncate font-semibold sm:text-lg">{recent.comic.title}</p>
               <p className="mt-1 truncate text-sm text-muted-foreground">{recent.chapterTitle}</p>
               <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-muted">
@@ -65,10 +68,17 @@ function HomePage() {
                 第 {recent.pageIndex + 1} / {recent.totalPages} 页
               </p>
             </div>
-            <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground">
-              <BookOpenIcon className="size-4" />
-            </span>
-          </a>
+            <Link
+              to="/reader/$comicId/$chapterId"
+              params={{ comicId: recent.comic.comicId, chapterId: recent.chapterId }}
+              search={{ page: recent.pageIndex + 1 }}
+              aria-label={`继续阅读《${recent.comic.title}》，第 ${recent.pageIndex + 1} 页`}
+              title={`继续阅读，第 ${recent.pageIndex + 1} 页`}
+              className="relative z-20 flex size-10 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground outline-none transition-colors hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+            >
+              <BookOpenIcon aria-hidden="true" className="size-4" />
+            </Link>
+          </div>
         </section>
       )}
 
