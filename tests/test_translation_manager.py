@@ -15,6 +15,7 @@ from app.application.settings import SettingsService
 from app.cache.storage import MediaCache
 from app.config import AppConfig
 from app.domain.comic import SourceChapterManifest, SourcePage
+from app.errors import AppError
 from app.media.registry import SourceMediaRegistry
 from app.repositories.database import Database
 from app.repositories.translation import TranslationRepository
@@ -1407,6 +1408,8 @@ async def test_manager_selects_only_configured_semantic_translation_service(
         deeplx_pipeline = harness.manager._build_pipeline(deeplx_semantic, runtime)
         assert isinstance(deeplx_pipeline.translator, DeepLXClient)
         assert deeplx_pipeline.ocr.limiter is harness.manager._ocr_limiter
+        assert deeplx_pipeline.ocr.protocol == "direct"
+        assert deeplx_pipeline.ocr.auth_mode == "none"
 
         runtime.update(
             {
@@ -1423,8 +1426,105 @@ async def test_manager_selects_only_configured_semantic_translation_service(
         assert isinstance(deepl_pipeline.translator, DeepLClient)
         assert deepl_semantic["translationService"] == "deepl"
         assert deepl_semantic["targetLanguage"] == "ZH-HANS"
+        assert deepl_semantic["ocrProtocol"] == "direct"
         assert "ocrMode" not in deepl_semantic
         assert deepl_fingerprint != deeplx_fingerprint
+    finally:
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_manager_fingerprints_resolved_ocr_protocol_and_defaults_legacy_to_job(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path, page_count=1)
+    try:
+        runtime = harness.manager._runtime_settings(require_services=True)
+        auto_semantic, auto_fingerprint = harness.manager._semantic_settings(
+            {0: "https://img.example/0.png"},
+            runtime,
+        )
+
+        runtime["ocr_mode"] = "direct"
+        direct_semantic, direct_fingerprint = harness.manager._semantic_settings(
+            {0: "https://img.example/0.png"},
+            runtime,
+        )
+
+        runtime["ocr_mode"] = "job"
+        job_semantic, job_fingerprint = harness.manager._semantic_settings(
+            {0: "https://img.example/0.png"},
+            runtime,
+        )
+
+        assert auto_semantic["ocrProtocol"] == "direct"
+        assert direct_semantic["ocrProtocol"] == "direct"
+        assert auto_fingerprint == direct_fingerprint
+        assert job_semantic["ocrProtocol"] == "job"
+        assert job_fingerprint != direct_fingerprint
+        assert (
+            not {
+                "ocrApiUrl",
+                "ocrAuthMode",
+                "ocrToken",
+                "ocrBasicUsername",
+                "ocrBasicPassword",
+            }
+            & auto_semantic.keys()
+        )
+
+        direct_pipeline = harness.manager._build_pipeline(direct_semantic, runtime)
+        job_pipeline = harness.manager._build_pipeline(job_semantic, runtime)
+        legacy_semantic = dict(direct_semantic)
+        legacy_semantic.pop("ocrProtocol")
+        legacy_pipeline = harness.manager._build_pipeline(legacy_semantic, runtime)
+
+        assert direct_pipeline.ocr.protocol == "direct"
+        assert job_pipeline.ocr.protocol == "job"
+        assert legacy_pipeline.ocr.protocol == "job"
+    finally:
+        await harness.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ocr_settings", "expected_error"),
+    [
+        ({"ocr_auth_mode": "none", "ocr_token": ""}, None),
+        ({"ocr_auth_mode": "bearer", "ocr_token": "configured-token"}, None),
+        ({"ocr_auth_mode": "bearer", "ocr_token": ""}, "OCR_AUTH_NOT_CONFIGURED"),
+        (
+            {
+                "ocr_auth_mode": "basic",
+                "ocr_token": "",
+                "ocr_basic_username": "test-user",
+                "ocr_basic_password": "test-password",
+            },
+            None,
+        ),
+        (
+            {
+                "ocr_auth_mode": "basic",
+                "ocr_basic_username": "test-user",
+                "ocr_basic_password": "",
+            },
+            "OCR_AUTH_NOT_CONFIGURED",
+        ),
+    ],
+)
+async def test_manager_validates_only_credentials_required_by_ocr_auth_mode(
+    tmp_path: Path,
+    ocr_settings: dict[str, object],
+    expected_error: str | None,
+) -> None:
+    harness = create_harness(tmp_path, page_count=1, translation_settings=ocr_settings)
+    try:
+        if expected_error is None:
+            harness.manager._runtime_settings(require_services=True)
+            return
+        with pytest.raises(AppError) as error:
+            harness.manager._runtime_settings(require_services=True)
+        assert error.value.code == expected_error
     finally:
         await harness.close()
 

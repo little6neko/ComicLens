@@ -40,6 +40,7 @@ from app.translation.ocr import (
     OCRJobFailedError,
     OCRJobNotFoundError,
     OCRProtocolError,
+    resolve_ocr_protocol,
 )
 from app.translation.pipeline import ImageTranslationPipeline, PipelineSettings
 from app.translation.segment_planner import SegmentPlanner
@@ -1510,13 +1511,40 @@ class TranslationManager:
         if require_services:
             if not str(values.get("ocr_api_url") or "").strip():
                 raise AppError("OCR_NOT_CONFIGURED", "请先在设置中配置 OCR 接口", 409, False)
-            if not str(values.get("ocr_token") or "").strip():
-                raise AppError("OCR_AUTH_NOT_CONFIGURED", "请先配置 OCR Token", 409, False)
+            self._require_ocr_auth(values)
             self._require_translation_service(
                 values,
                 translation_service or str(values.get("translation_service") or "deepl"),
             )
         return values
+
+    @staticmethod
+    def _require_ocr_auth(values: dict[str, Any]) -> None:
+        auth_mode = str(values.get("ocr_auth_mode") or "none").strip().lower()
+        if auth_mode == "none":
+            return
+        if auth_mode == "bearer":
+            if not str(values.get("ocr_token") or "").strip():
+                raise AppError(
+                    "OCR_AUTH_NOT_CONFIGURED",
+                    "请先配置 OCR Token",
+                    409,
+                    False,
+                )
+            return
+        if auth_mode == "basic":
+            if (
+                not str(values.get("ocr_basic_username") or "").strip()
+                or not str(values.get("ocr_basic_password") or "").strip()
+            ):
+                raise AppError(
+                    "OCR_AUTH_NOT_CONFIGURED",
+                    "请先配置 OCR Basic Auth 用户名和密码",
+                    409,
+                    False,
+                )
+            return
+        raise AppError("OCR_AUTH_INVALID", "OCR 鉴权模式设置无效", 409, False)
 
     @staticmethod
     def _require_translation_service(values: dict[str, Any], service: str) -> None:
@@ -1543,6 +1571,10 @@ class TranslationManager:
     def _semantic_settings(
         self, source_pages: dict[int, str], runtime: dict[str, Any]
     ) -> tuple[dict[str, object], str]:
+        ocr_protocol = resolve_ocr_protocol(
+            str(runtime.get("ocr_mode") or "auto"),
+            str(runtime.get("ocr_api_url") or ""),
+        )
         semantic: dict[str, object] = {
             "sourcePages": [
                 {"index": index, "identity": hashlib.sha256(url.encode()).hexdigest()}
@@ -1551,6 +1583,7 @@ class TranslationManager:
             "sourceLanguage": runtime["source_language"],
             "targetLanguage": "ZH-HANS",
             "ocrModel": runtime["ocr_model"],
+            "ocrProtocol": ocr_protocol,
             "translationService": runtime["translation_service"],
             "longImageThreshold": runtime["long_image_threshold"],
             "ocrSliceHeight": runtime["ocr_slice_height"],
@@ -1577,6 +1610,10 @@ class TranslationManager:
             self._http_client,
             str(runtime["ocr_api_url"]),
             token=str(runtime.get("ocr_token") or ""),
+            auth_mode=str(runtime.get("ocr_auth_mode") or "none"),
+            basic_username=str(runtime.get("ocr_basic_username") or ""),
+            basic_password=str(runtime.get("ocr_basic_password") or ""),
+            mode=str(semantic.get("ocrProtocol") or "job"),
             job_model=str(semantic.get("ocrModel") or "PaddleOCR-VL-1.6"),
             job_poll_interval=float(runtime["ocr_poll_interval_seconds"]),
             job_timeout=float(runtime["ocr_timeout_seconds"]),
