@@ -139,6 +139,32 @@ docker compose ps
 docker compose logs -f comiclens
 ```
 
+## 诊断日志
+
+ComicLens 默认以 `COMICLENS_LOG_LEVEL=INFO` 将入站访问日志和安全的业务诊断事件写到容器
+stdout/stderr，不创建日志文件。业务事件采用 `级别 服务 event=类型 字段...` 的固定格式，
+服务名位于最前，便于直接区分漫画、OCR、翻译与任务阶段。例如：
+
+```text
+INFO manga event=request operation=detail request_ref=00000001 method=GET endpoint=https://manga.example/manga/demo route=environment_or_direct attempt=1 redirect_index=0
+INFO manga event=response operation=detail request_ref=00000001 status=200 duration_ms=184 response_bytes=48231 content_type=text/html endpoint=https://manga.example/manga/demo attempt=1 redirect_index=0
+INFO ocr event=request operation=analyze request_ref=00000002 protocol=direct auth=bearer image_bytes=248391 payload_bytes=331298 method=POST endpoint=https://ocr.example/layout-parsing attempt=1
+INFO ocr event=state operation=poll protocol=job job_ref=7c9a12ef state=running poll_count=2
+INFO deepl event=response operation=translate_batch request_ref=00000003 auth=api_key text_count=8 total_chars=214 payload_bytes=301 source_lang=EN target_lang=ZH-HANS status=200 duration_ms=326 response_bytes=418 content_type=application/json endpoint=https://api.deepl.com/v2/translate attempt=1
+INFO task event=stage_complete stage=render duration_ms=41 cached=false output_bytes=198204 generation_ref=23f7b1ac comic=demo chapter=chapter-1 page_index=0 segment_index=1 global_index=1
+```
+
+INFO 会记录每次外部请求/响应、重试与最终失败、OCR 异步状态变化、翻译任务阶段和相关缓存
+命中。重复的 OCR poll 请求/响应不会出现在 INFO；将 `COMICLENS_LOG_LEVEL=DEBUG` 写入 `.env`
+并重建 Compose 容器后，才会显示每次 poll，以及非 2xx 或协议异常响应的脱敏、最多 1024
+字符 JSON 摘要。`docker run` 部署可在创建容器时添加
+`-e COMICLENS_LOG_LEVEL=DEBUG`。
+
+即使使用 DEBUG，日志也不会输出成功响应正文、源图/Base64、OCR 文本、原文/译文、请求
+Header、Cookie、Token、API Key、Basic 或代理凭据。普通 endpoint 会删除 userinfo、query 和
+fragment；OCR 异步结果地址只显示 origin。Compose 的 `json-file` 日志轮转保持为单文件
+`10m`、最多 `3` 个文件。
+
 ## 数据与缓存
 
 上述 `docker run` 和 Compose 均将 `./data` 挂载到容器的 `/app/data`，其中包含：
