@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +19,7 @@ from app.domain.comic import SourceChapterManifest, SourcePage
 from app.domain.settings import ServerSettingsPatch
 from app.errors import AppError
 from app.media.registry import SourceMediaRegistry
+from app.observability import current_log_context, short_ref
 from app.repositories.database import Database
 from app.repositories.translation import TranslationRepository
 from app.security.secrets import SecretCipher
@@ -54,6 +56,7 @@ class FakeTranslationSource:
         self.page_count = page_count
         self.image_size = image_size
         self.media_calls: list[str] = []
+        self.media_log_contexts: list[dict[str, object]] = []
         self.replacement_urls: dict[int, str] = {}
         self.expired_urls: set[str] = set()
         self.block_page_index: int | None = None
@@ -79,6 +82,7 @@ class FakeTranslationSource:
 
     async def fetch_media(self, source_url: str) -> tuple[bytes, str]:
         self.media_calls.append(source_url)
+        self.media_log_contexts.append(current_log_context())
         if source_url in self.expired_urls:
             raise httpx.HTTPStatusError(
                 "expired",
@@ -104,6 +108,7 @@ class ControlledPipeline:
         self.completed_ocr_calls: list[int] = []
         self.completed_ocr_segments: list[tuple[int, int]] = []
         self.ocr_job_inputs: list[str | None] = []
+        self.ocr_log_contexts: list[dict[str, object]] = []
         self.submitted_ocr_jobs: list[str] = []
         self.translation_calls = 0
         self.translation_inputs: list[list[str]] = []
@@ -143,15 +148,14 @@ class ControlledPipeline:
         return await self.run_ocr(original_bytes)
 
     async def _run_ocr(self, original_bytes: bytes) -> OCROutput:
+        self.ocr_log_contexts.append(current_log_context())
         self.ocr_calls += 1
         call_number = self.ocr_calls
         task_name = asyncio.current_task().get_name() if asyncio.current_task() else ""
         name_parts = task_name.rsplit(":", 2)
         segment_key = (
             (int(name_parts[-2]), int(name_parts[-1]))
-            if len(name_parts) == 3
-            and name_parts[-2].isdigit()
-            and name_parts[-1].isdigit()
+            if len(name_parts) == 3 and name_parts[-2].isdigit() and name_parts[-1].isdigit()
             else None
         )
         self.active_ocr_calls += 1
@@ -419,19 +423,22 @@ def test_repository_appends_prepared_pages_and_grows_segment_total(tmp_path: Pat
             ]
 
         first = page_segments(0)
-        assert harness.repository.append_prepared_page_segments(
-            generation_id,
-            0,
-            source_url="https://img.example/0.png",
-            original_path="originals/0.png",
-            original_checksum="checksum-0",
-            width=720,
-            height=8000,
-            segments=first,
-        ) == 5
-        assert harness.repository.task_state(
-            "alpha", "chapter-1", generation_id
-        ).total_segments == 5
+        assert (
+            harness.repository.append_prepared_page_segments(
+                generation_id,
+                0,
+                source_url="https://img.example/0.png",
+                original_path="originals/0.png",
+                original_checksum="checksum-0",
+                width=720,
+                height=8000,
+                segments=first,
+            )
+            == 5
+        )
+        assert (
+            harness.repository.task_state("alpha", "chapter-1", generation_id).total_segments == 5
+        )
 
         for segment_index in range(3):
             harness.repository.complete_segment(
@@ -446,32 +453,38 @@ def test_repository_appends_prepared_pages_and_grows_segment_total(tmp_path: Pat
         partial = harness.repository.task_state("alpha", "chapter-1", generation_id)
         assert (partial.completed_segments, partial.total_segments) == (3, 5)
 
-        assert harness.repository.append_prepared_page_segments(
-            generation_id,
-            1,
-            source_url="https://img.example/1.png",
-            original_path="originals/1.png",
-            original_checksum="checksum-1",
-            width=720,
-            height=8000,
-            segments=page_segments(1),
-        ) == 5
+        assert (
+            harness.repository.append_prepared_page_segments(
+                generation_id,
+                1,
+                source_url="https://img.example/1.png",
+                original_path="originals/1.png",
+                original_checksum="checksum-1",
+                width=720,
+                height=8000,
+                segments=page_segments(1),
+            )
+            == 5
+        )
         grown = harness.repository.task_state("alpha", "chapter-1", generation_id)
         assert (grown.completed_segments, grown.total_segments) == (3, 10)
         assert [segment.global_index for page in grown.pages for segment in page.segments] == list(
             range(10)
         )
 
-        assert harness.repository.append_prepared_page_segments(
-            generation_id,
-            1,
-            source_url="https://img.example/1.png",
-            original_path="originals/1.png",
-            original_checksum="checksum-1",
-            width=720,
-            height=8000,
-            segments=page_segments(1),
-        ) == 0
+        assert (
+            harness.repository.append_prepared_page_segments(
+                generation_id,
+                1,
+                source_url="https://img.example/1.png",
+                original_path="originals/1.png",
+                original_checksum="checksum-1",
+                width=720,
+                height=8000,
+                segments=page_segments(1),
+            )
+            == 0
+        )
         harness.repository.complete_segment_plan(generation_id)
         completed_plan = harness.repository.task_state("alpha", "chapter-1", generation_id)
         assert completed_plan.planning_complete is True
@@ -518,13 +531,16 @@ def test_repository_claims_and_releases_segment_ocr_checkpoint(tmp_path: Path) -
         assert claimed["status"] == "ocr"
         assert claimed["attempts"] == 1
 
-        assert harness.repository.mark_segment_ocr_ready(
-            generation_id,
-            0,
-            0,
-            ocr_path="ocr/0.json",
-            blocks_path="blocks/0.json",
-        ) is True
+        assert (
+            harness.repository.mark_segment_ocr_ready(
+                generation_id,
+                0,
+                0,
+                ocr_path="ocr/0.json",
+                blocks_path="blocks/0.json",
+            )
+            is True
+        )
         ready = harness.repository.segment(generation_id, 0, 0)
         assert ready is not None
         assert ready["status"] == "pending"
@@ -836,6 +852,190 @@ async def test_pause_finishes_current_segment_then_resumes_next(
 
 
 @pytest.mark.asyncio
+async def test_task_stage_cache_logs_and_prefetched_ocr_inherit_segment_context(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    harness = create_harness(tmp_path, page_count=2)
+    try:
+        with caplog.at_level(logging.INFO, logger="comiclens.events"):
+            started = await harness.manager.start("alpha", "chapter-1")
+            await wait_for(
+                lambda: harness.manager.state("alpha", "chapter-1").status == "completed"
+            )
+            await wait_for(
+                lambda: any(
+                    "event=task_completed" in record.getMessage() for record in caplog.records
+                )
+            )
+
+        assert len(harness.pipeline.ocr_log_contexts) == 2
+        generation_ref = short_ref(str(started.generation_id))
+        assert {
+            (
+                context.get("generation_ref"),
+                context.get("comic"),
+                context.get("chapter"),
+                context.get("page_index"),
+                context.get("segment_index"),
+                context.get("global_index"),
+            )
+            for context in harness.pipeline.ocr_log_contexts
+        } == {
+            (generation_ref, "alpha", "chapter-1", 0, 0, 0),
+            (generation_ref, "alpha", "chapter-1", 1, 0, 1),
+        }
+        assert {
+            (
+                context.get("generation_ref"),
+                context.get("comic"),
+                context.get("chapter"),
+                context.get("page_index"),
+            )
+            for context in harness.source.media_log_contexts
+        } == {
+            (generation_ref, "alpha", "chapter-1", 0),
+            (generation_ref, "alpha", "chapter-1", 1),
+        }
+
+        messages = [
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith("task ")
+        ]
+        assert any(message.startswith("task event=task_queued") for message in messages)
+        assert any(message.startswith("task event=task_started") for message in messages)
+        assert any(message.startswith("task event=task_completed") for message in messages)
+        assert any(
+            "event=stage_start" in message and "stage=ocr" in message for message in messages
+        )
+        assert any(
+            "event=stage_complete" in message
+            and "stage=translation" in message
+            and "translated=1" in message
+            for message in messages
+        )
+        assert any(
+            "event=stage_complete" in message
+            and "stage=render" in message
+            and "output_bytes=" in message
+            for message in messages
+        )
+        assert any(
+            "event=cache_miss" in message and "artifact=ocr" in message for message in messages
+        )
+        assert any(
+            "event=cache_hit" in message and "artifact=ocr_input" in message for message in messages
+        )
+        assert all(f"generation_ref={generation_ref}" in message for message in messages)
+        assert all(str(started.generation_id) not in message for message in messages)
+        assert all("text-" not in message for message in messages)
+        assert all("zh-text-" not in message for message in messages)
+    finally:
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_task_logs_pause_resume_and_bulk_failed_retry(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    harness = create_harness(
+        tmp_path,
+        page_count=1,
+        translation_settings={"ocr_concurrency": 1},
+    )
+    harness.pipeline.block_first_ocr = True
+    try:
+        with caplog.at_level(logging.INFO, logger="comiclens.events"):
+            started = await harness.manager.start("alpha", "chapter-1")
+            await wait_for(harness.pipeline.ocr_started.is_set)
+            await harness.manager.pause("alpha", "chapter-1")
+            harness.pipeline.ocr_release.set()
+            await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "paused")
+            await wait_for(
+                lambda: any("event=task_paused" in record.getMessage() for record in caplog.records)
+            )
+            await harness.manager.start("alpha", "chapter-1")
+            await wait_for(
+                lambda: harness.manager.state("alpha", "chapter-1").status == "completed"
+            )
+            await harness.manager.retry_failed("alpha", "chapter-1")
+
+        messages = [
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith("task ")
+        ]
+        generation_ref = short_ref(str(started.generation_id))
+        assert any("event=pause_requested" in message for message in messages)
+        assert any("event=task_paused" in message for message in messages)
+        assert any("event=task_resumed" in message for message in messages)
+        assert any("event=task_completed" in message for message in messages)
+        assert any(
+            "event=retry_failed_requested" in message and "retried_count=0" in message
+            for message in messages
+        )
+        assert all(f"generation_ref={generation_ref}" in message for message in messages)
+    finally:
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_page_generation_uses_the_same_task_stage_logging(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    harness = create_harness(tmp_path, page_count=1)
+    try:
+        source_pages = await harness.manager._ensure_source_pages("legacy", "chapter-old")
+        runtime = harness.manager._runtime_settings(require_services=True)
+        semantic, fingerprint = harness.manager._semantic_settings(source_pages, runtime)
+        semantic["pipelineVersion"] = "full-page-v1"
+        generation_id = harness.repository.create_generation(
+            "legacy",
+            "chapter-old",
+            semantic_fingerprint=fingerprint,
+            semantic_settings=semantic,
+            page_indexes=[0],
+            source_pages=source_pages,
+            kind="normal",
+            progressive=False,
+        )
+
+        with caplog.at_level(logging.INFO, logger="comiclens.events"):
+            harness.manager._ensure_worker("legacy", "chapter-old")
+            await wait_for(
+                lambda: harness.manager.state("legacy", "chapter-old").status == "completed"
+            )
+            await wait_for(
+                lambda: any(
+                    "event=task_completed" in record.getMessage() for record in caplog.records
+                )
+            )
+
+        messages = [
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith("task ")
+        ]
+        assert any(
+            "event=task_started" in message and "pipeline=full-page-v1" in message
+            for message in messages
+        )
+        assert {
+            message.split("stage=", 1)[1].split(" ", 1)[0]
+            for message in messages
+            if "event=stage_complete" in message
+        } >= {"download", "ocr", "translation", "render"}
+        assert any("event=task_completed" in message for message in messages)
+        assert all(f"generation_ref={short_ref(generation_id)}" in message for message in messages)
+        assert all("page_index=0" in message for message in messages if "event=stage_" in message)
+    finally:
+        await harness.close()
+
+
+@pytest.mark.asyncio
 async def test_first_page_starts_ocr_while_second_page_is_still_loading(
     tmp_path: Path,
 ) -> None:
@@ -880,9 +1080,7 @@ async def test_consumer_waits_for_more_segments_until_planning_is_complete(
     try:
         await harness.manager.start("alpha", "chapter-1")
         await wait_for(harness.source.blocked_page_started.is_set)
-        await wait_for(
-            lambda: harness.manager.state("alpha", "chapter-1").completed_segments == 1
-        )
+        await wait_for(lambda: harness.manager.state("alpha", "chapter-1").completed_segments == 1)
 
         waiting = harness.manager.state("alpha", "chapter-1")
         assert waiting.status == "running"
@@ -932,9 +1130,7 @@ async def test_streaming_segment_denominator_grows_from_five_to_ten(
         ) == (0, 3)
 
         harness.source.blocked_page_release.set()
-        await wait_for(
-            lambda: harness.manager.state("alpha", "chapter-1").total_segments == 10
-        )
+        await wait_for(lambda: harness.manager.state("alpha", "chapter-1").total_segments == 10)
         grown = harness.manager.state("alpha", "chapter-1")
         assert grown.planning_complete is True
         assert (grown.completed_segments, grown.total_segments) == (3, 10)
@@ -1086,9 +1282,7 @@ async def test_ocr_prefetch_finishes_out_of_order_but_translates_in_order(
 
         harness.pipeline.ocr_segment_releases[(0, 2)].set()
         harness.pipeline.ocr_segment_releases[(0, 1)].set()
-        await wait_for(
-            lambda: {(0, 1), (0, 2)}.issubset(harness.pipeline.completed_ocr_segments)
-        )
+        await wait_for(lambda: {(0, 1), (0, 2)}.issubset(harness.pipeline.completed_ocr_segments))
         await wait_for(lambda: harness.pipeline.ocr_calls == 4)
         assert harness.pipeline.translation_calls == 0
         assert harness.manager.state("alpha", "chapter-1").completed_segments == 0
@@ -1169,8 +1363,7 @@ async def test_one_prefetched_ocr_failure_does_not_cancel_other_segments(
     try:
         await harness.manager.start("alpha", "chapter-1")
         await wait_for(
-            lambda: harness.manager.state("alpha", "chapter-1").status
-            == "completed_with_errors"
+            lambda: harness.manager.state("alpha", "chapter-1").status == "completed_with_errors"
         )
 
         failed = harness.manager.state("alpha", "chapter-1")
@@ -1444,8 +1637,7 @@ async def test_retry_failed_resumes_same_generation_and_is_idempotent(tmp_path: 
     try:
         started = await harness.manager.start("alpha", "chapter-1")
         await wait_for(
-            lambda: harness.manager.state("alpha", "chapter-1").status
-            == "completed_with_errors"
+            lambda: harness.manager.state("alpha", "chapter-1").status == "completed_with_errors"
         )
         waiting_retry = harness.manager.background_tasks()
         assert len(waiting_retry) == 1
@@ -1478,8 +1670,7 @@ async def test_retry_failed_continues_when_invalidated_cache_cleanup_fails(
     try:
         await harness.manager.start("alpha", "chapter-1")
         await wait_for(
-            lambda: harness.manager.state("alpha", "chapter-1").status
-            == "completed_with_errors"
+            lambda: harness.manager.state("alpha", "chapter-1").status == "completed_with_errors"
         )
         harness.pipeline.fail_ocr_segments.clear()
 
@@ -1560,8 +1751,7 @@ async def test_retry_failed_rejects_a_generation_that_is_stopping(tmp_path: Path
     try:
         await harness.manager.start("alpha", "chapter-1")
         await wait_for(
-            lambda: harness.manager.state("alpha", "chapter-1").status
-            == "completed_with_errors"
+            lambda: harness.manager.state("alpha", "chapter-1").status == "completed_with_errors"
         )
         generation_id = str(harness.manager.state("alpha", "chapter-1").generation_id)
         harness.repository.set_generation_status(
@@ -1877,9 +2067,7 @@ async def test_manager_http_client_trusts_env_and_ignores_comic_proxy_setting(
         assert shared_client._trust_env is True
 
         harness.manager.settings.patch(
-            ServerSettingsPatch(
-                proxy_url="http://comic-only-proxy.example:8080"
-            )
+            ServerSettingsPatch(proxy_url="http://comic-only-proxy.example:8080")
         )
         configured_runtime = harness.manager._runtime_settings(require_services=True)
         configured_semantic, _fingerprint = harness.manager._semantic_settings(

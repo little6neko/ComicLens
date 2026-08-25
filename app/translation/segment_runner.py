@@ -9,6 +9,7 @@ from PIL import Image
 
 from app.cache.keys import chapter_bundle_key, generation_segment_path
 from app.cache.storage import MediaCache
+from app.observability import log_event, logged_stage, task_log_context
 from app.repositories.translation import TranslationRepository
 from app.sources.base import ComicSource
 from app.translation.image_renderer import image_to_png_bytes, sanitize_image
@@ -65,6 +66,39 @@ class SegmentRunner:
         pipeline: ImageTranslationPipeline,
     ) -> None:
         segment = self.repository.segment(generation_id, page_index, segment_index)
+        global_index = int(segment["global_index"]) if segment is not None else None
+        with (
+            task_log_context(
+                generation_id=generation_id,
+                comic=comic_id,
+                chapter=chapter_id,
+                page_index=page_index,
+                segment_index=segment_index,
+                global_index=global_index,
+            ),
+            logged_stage("ocr") as summary,
+        ):
+            summary.update(
+                await self._prepare_ocr_in_context(
+                    generation_id,
+                    comic_id,
+                    chapter_id,
+                    page_index,
+                    segment_index,
+                    pipeline,
+                )
+            )
+
+    async def _prepare_ocr_in_context(
+        self,
+        generation_id: str,
+        comic_id: str,
+        chapter_id: str,
+        page_index: int,
+        segment_index: int,
+        pipeline: ImageTranslationPipeline,
+    ) -> dict[str, object]:
+        segment = self.repository.segment(generation_id, page_index, segment_index)
         if segment is None:
             raise ValueError("translation segment does not exist")
         if not self.repository.claim_segment_ocr(generation_id, page_index, segment_index):
@@ -99,6 +133,16 @@ class SegmentRunner:
             )
             ocr_media = self.cache.read_bytes(ocr_path, verify_image=False)
             blocks_media = self.cache.read_bytes(blocks_path, verify_image=False)
+            log_event(
+                "task",
+                "cache_hit" if ocr_media is not None else "cache_miss",
+                artifact="ocr",
+            )
+            log_event(
+                "task",
+                "cache_hit" if blocks_media is not None else "cache_miss",
+                artifact="blocks",
+            )
             if ocr_media is not None and blocks_media is not None:
                 if not self.repository.mark_segment_ocr_ready(
                     generation_id,
@@ -108,7 +152,10 @@ class SegmentRunner:
                     blocks_path=blocks_path,
                 ):
                     raise RuntimeError("translation segment OCR claim was lost")
-                return
+                return {
+                    "cached": True,
+                    "output_bytes": len(ocr_media.content) + len(blocks_media.content),
+                }
 
             input_media = await self._load_ocr_input(
                 generation_id,
@@ -121,6 +168,7 @@ class SegmentRunner:
             if ocr_media is not None:
                 payload = json.loads(ocr_media.content)
                 ocr_output = await self._parse_cached_ocr(pipeline, image, payload)
+                ocr_bytes = len(ocr_media.content)
             else:
                 persisted_job_id = str(segment["ocr_job_id"]) if segment["ocr_job_id"] else None
                 try:
@@ -155,7 +203,7 @@ class SegmentRunner:
                             job_id,
                         ),
                     )
-                self._put_json(
+                ocr_bytes = self._put_json(
                     bundle_key,
                     comic_id,
                     chapter_id,
@@ -164,7 +212,7 @@ class SegmentRunner:
                     ocr_output.payload,
                 )
             blocks = self._owned_blocks(ocr_output.blocks, segment)
-            self._put_json(
+            blocks_bytes = self._put_json(
                 bundle_key,
                 comic_id,
                 chapter_id,
@@ -180,6 +228,12 @@ class SegmentRunner:
                 blocks_path=blocks_path,
             ):
                 raise RuntimeError("translation segment OCR claim was lost")
+            return {
+                "ocr_cached": ocr_media is not None,
+                "input_bytes": len(input_media.content),
+                "output_bytes": ocr_bytes + blocks_bytes,
+                "blocks": len(blocks),
+            }
         except asyncio.CancelledError:
             self.repository.reset_segment_ocr(generation_id, page_index, segment_index)
             raise
@@ -194,11 +248,44 @@ class SegmentRunner:
         pipeline: ImageTranslationPipeline,
     ) -> None:
         segment = self.repository.segment(generation_id, page_index, segment_index)
+        global_index = int(segment["global_index"]) if segment is not None else None
+        with task_log_context(
+            generation_id=generation_id,
+            comic=comic_id,
+            chapter=chapter_id,
+            page_index=page_index,
+            segment_index=segment_index,
+            global_index=global_index,
+        ):
+            await self._complete_after_ocr_in_context(
+                generation_id,
+                comic_id,
+                chapter_id,
+                page_index,
+                segment_index,
+                pipeline,
+            )
+
+    async def _complete_after_ocr_in_context(
+        self,
+        generation_id: str,
+        comic_id: str,
+        chapter_id: str,
+        page_index: int,
+        segment_index: int,
+        pipeline: ImageTranslationPipeline,
+    ) -> None:
+        segment = self.repository.segment(generation_id, page_index, segment_index)
         if segment is None:
             raise ValueError("translation segment does not exist")
         if not segment["ocr_path"] or not segment["blocks_path"]:
             raise RuntimeError("translation segment OCR checkpoint is incomplete")
         blocks_media = self.cache.read_bytes(str(segment["blocks_path"]), verify_image=False)
+        log_event(
+            "task",
+            "cache_hit" if blocks_media is not None else "cache_miss",
+            artifact="blocks",
+        )
         if blocks_media is None:
             raise FileNotFoundError("translation segment OCR blocks cache is missing")
         blocks = [TextBlock.from_dict(value) for value in json.loads(blocks_media.content)]
@@ -217,36 +304,51 @@ class SegmentRunner:
             segment_index,
             "translating",
         )
-
-        segment = self.repository.segment(generation_id, page_index, segment_index)
-        assert segment is not None
-        translations_path = str(
-            segment["translations_path"]
-            or generation_segment_path(
-                comic_id,
-                chapter_id,
-                generation_id,
-                "translations",
-                page_index,
-                segment_index,
-                "json",
+        with logged_stage(
+            "translation",
+            blocks=len(blocks),
+            input_bytes=len(blocks_media.content),
+        ) as translation_summary:
+            segment = self.repository.segment(generation_id, page_index, segment_index)
+            assert segment is not None
+            translations_path = str(
+                segment["translations_path"]
+                or generation_segment_path(
+                    comic_id,
+                    chapter_id,
+                    generation_id,
+                    "translations",
+                    page_index,
+                    segment_index,
+                    "json",
+                )
             )
-        )
-        translations_media = self.cache.read_bytes(translations_path, verify_image=False)
-        if translations_media is not None:
-            translated_blocks = [
-                TextBlock.from_dict(value) for value in json.loads(translations_media.content)
-            ]
-        else:
-            translation_output = await pipeline.translate_blocks(blocks)
-            translated_blocks = translation_output.blocks
-            self._put_json(
-                bundle_key,
-                comic_id,
-                chapter_id,
-                translations_path,
-                "translations",
-                [block.as_dict() for block in translated_blocks],
+            translations_media = self.cache.read_bytes(translations_path, verify_image=False)
+            log_event(
+                "task",
+                "cache_hit" if translations_media is not None else "cache_miss",
+                artifact="translations",
+            )
+            if translations_media is not None:
+                translated_blocks = [
+                    TextBlock.from_dict(value) for value in json.loads(translations_media.content)
+                ]
+                translations_bytes = len(translations_media.content)
+            else:
+                translation_output = await pipeline.translate_blocks(blocks)
+                translated_blocks = translation_output.blocks
+                translations_bytes = self._put_json(
+                    bundle_key,
+                    comic_id,
+                    chapter_id,
+                    translations_path,
+                    "translations",
+                    [block.as_dict() for block in translated_blocks],
+                )
+            translation_summary.update(
+                cached=translations_media is not None,
+                translated=sum(block.translation is not None for block in translated_blocks),
+                output_bytes=translations_bytes,
             )
         self.repository.set_segment_stage(
             generation_id,
@@ -270,38 +372,53 @@ class SegmentRunner:
             media_type="image/png",
             verify_image=True,
         )
-        if translated_media is None:
-            segment = self.repository.segment(generation_id, page_index, segment_index)
-            assert segment is not None
-            display_image = image.crop(
-                (
-                    0,
-                    int(segment["display_top"]) - int(segment["ocr_top"]),
-                    image.width,
-                    int(segment["display_bottom"]) - int(segment["ocr_top"]),
-                )
-            )
-            render_output = await pipeline.render(display_image, translated_blocks)
-            translated_media = self.cache.put_bytes(
-                bundle_key=bundle_key,
-                bundle_kind="chapter",
-                comic_id=comic_id,
-                chapter_id=chapter_id,
-                relative_path=translated_path,
-                entry_kind="translated_segment",
-                content=render_output.translated_bytes,
-                media_type="image/png",
-                verify_image=True,
-            )
-        self.repository.complete_segment(
-            generation_id,
-            comic_id,
-            chapter_id,
-            page_index,
-            segment_index,
-            translated_path=translated_path,
-            translated_version=translated_media.etag,
+        log_event(
+            "task",
+            "cache_hit" if translated_media is not None else "cache_miss",
+            artifact="translated_image",
         )
+        render_cached = translated_media is not None
+        with logged_stage(
+            "render",
+            blocks=len(translated_blocks),
+            input_bytes=len(input_media.content),
+        ) as render_summary:
+            if translated_media is None:
+                segment = self.repository.segment(generation_id, page_index, segment_index)
+                assert segment is not None
+                display_image = image.crop(
+                    (
+                        0,
+                        int(segment["display_top"]) - int(segment["ocr_top"]),
+                        image.width,
+                        int(segment["display_bottom"]) - int(segment["ocr_top"]),
+                    )
+                )
+                render_output = await pipeline.render(display_image, translated_blocks)
+                translated_media = self.cache.put_bytes(
+                    bundle_key=bundle_key,
+                    bundle_kind="chapter",
+                    comic_id=comic_id,
+                    chapter_id=chapter_id,
+                    relative_path=translated_path,
+                    entry_kind="translated_segment",
+                    content=render_output.translated_bytes,
+                    media_type="image/png",
+                    verify_image=True,
+                )
+            self.repository.complete_segment(
+                generation_id,
+                comic_id,
+                chapter_id,
+                page_index,
+                segment_index,
+                translated_path=translated_path,
+                translated_version=translated_media.etag,
+            )
+            render_summary.update(
+                cached=render_cached,
+                output_bytes=len(translated_media.content),
+            )
 
     async def publish_page_if_complete(
         self,
@@ -334,6 +451,11 @@ class SegmentRunner:
             protect=True,
             verify_image=True,
         )
+        log_event(
+            "task",
+            "cache_hit" if input_media is not None else "cache_miss",
+            artifact="ocr_input",
+        )
         if input_media is not None:
             return input_media
 
@@ -344,6 +466,11 @@ class SegmentRunner:
             str(page["original_path"]),
             protect=True,
             verify_image=True,
+        )
+        log_event(
+            "task",
+            "cache_hit" if original is not None else "cache_miss",
+            artifact="original_image",
         )
         if original is None:
             source_url = str(page["source_url"] or "")
@@ -466,7 +593,12 @@ class SegmentRunner:
         relative_path: str,
         entry_kind: str,
         value: object,
-    ) -> None:
+    ) -> int:
+        content = json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
         self.cache.put_bytes(
             bundle_key=bundle_key,
             bundle_kind="chapter",
@@ -474,11 +606,8 @@ class SegmentRunner:
             chapter_id=chapter_id,
             relative_path=relative_path,
             entry_kind=entry_kind,
-            content=json.dumps(
-                value,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ).encode("utf-8"),
+            content=content,
             media_type="application/json",
             verify_image=False,
         )
+        return len(content)

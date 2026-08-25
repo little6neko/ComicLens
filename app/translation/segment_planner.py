@@ -11,6 +11,7 @@ from app.cache.keys import (
     original_path,
 )
 from app.cache.storage import MediaCache
+from app.observability import log_event, task_log_context
 from app.repositories.translation import TranslationRepository
 from app.sources.base import ComicSource
 from app.translation.image_renderer import sanitize_image
@@ -87,16 +88,17 @@ class SegmentPlanner:
         global_index = 0
 
         for page_index, source_url in sorted(source_pages.items()):
-            prepared = await self._prepare_page(
-                generation_id,
-                comic_id,
-                chapter_id,
-                page_index,
-                source_url,
-                semantic,
-                bundle_key=bundle_key,
-                global_index_start=global_index,
-            )
+            with task_log_context(page_index=page_index):
+                prepared = await self._prepare_page(
+                    generation_id,
+                    comic_id,
+                    chapter_id,
+                    page_index,
+                    source_url,
+                    semantic,
+                    bundle_key=bundle_key,
+                    global_index_start=global_index,
+                )
             self.repository.save_prepared_page(
                 generation_id,
                 page_index,
@@ -139,16 +141,17 @@ class SegmentPlanner:
             if should_stop():
                 return False
 
-            prepared = await self._prepare_page(
-                generation_id,
-                comic_id,
-                chapter_id,
-                page_index,
-                source_url,
-                semantic,
-                bundle_key=bundle_key,
-                global_index_start=0,
-            )
+            with task_log_context(page_index=page_index):
+                prepared = await self._prepare_page(
+                    generation_id,
+                    comic_id,
+                    chapter_id,
+                    page_index,
+                    source_url,
+                    semantic,
+                    bundle_key=bundle_key,
+                    global_index_start=0,
+                )
             self.repository.append_prepared_page_segments(
                 generation_id,
                 page_index,
@@ -193,6 +196,11 @@ class SegmentPlanner:
             protect=True,
             verify_image=True,
         )
+        log_event(
+            "task",
+            "cache_hit" if original is not None else "cache_miss",
+            artifact="original_image",
+        )
         if original is None:
             resolved_source_url = source_url
 
@@ -203,11 +211,7 @@ class SegmentPlanner:
                 except Exception:
                     refreshed = await self.source.chapter(comic_id, chapter_id)
                     replacement = next(
-                        (
-                            item.source_url
-                            for item in refreshed.pages
-                            if item.index == page_index
-                        ),
+                        (item.source_url for item in refreshed.pages if item.index == page_index),
                         None,
                     )
                     if not replacement or replacement == resolved_source_url:
@@ -241,8 +245,7 @@ class SegmentPlanner:
             verify_image=True,
         )
         source_unchanged = bool(
-            page["original_checksum"]
-            and str(page["original_checksum"]) == normalized_media.etag
+            page["original_checksum"] and str(page["original_checksum"]) == normalized_media.etag
         )
         ocr_slices = await asyncio.to_thread(
             plan_vertical_slices,
@@ -272,6 +275,12 @@ class SegmentPlanner:
                 )
                 if source_unchanged
                 else None
+            )
+            log_event(
+                "task",
+                "cache_hit" if existing_input is not None else "cache_miss",
+                artifact="ocr_input",
+                segment_index=segment_index,
             )
             if existing_input is None:
                 cropped = await asyncio.to_thread(crop_vertical_slice, image, image_slice)

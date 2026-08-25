@@ -26,6 +26,7 @@ from app.domain.translation import (
 )
 from app.errors import AppError
 from app.media.registry import SourceMediaRegistry
+from app.observability import log_event, logged_stage, task_log_context
 from app.repositories.translation import (
     TranslationRepository,
     page_retry_clear_columns,
@@ -128,6 +129,40 @@ class TranslationManager:
         if event is not None:
             event.set()
 
+    @staticmethod
+    def _log_task_event(
+        event: str,
+        *,
+        comic_id: str,
+        chapter_id: str,
+        generation_id: str | None = None,
+        level: int = logging.INFO,
+        **fields: object,
+    ) -> None:
+        with task_log_context(
+            generation_id=generation_id,
+            comic=comic_id,
+            chapter=chapter_id,
+        ):
+            log_event("task", event, level=level, **fields)
+
+    def _log_terminal_generation(self, generation_id: str) -> None:
+        generation = self.repository.generation(generation_id)
+        if generation is None:
+            return
+        status = str(generation["status"])
+        fields = {
+            "status": status,
+            "completed_pages": int(generation["completed_pages"]),
+            "failed_pages": int(generation["failed_pages"]),
+            "completed_segments": int(generation["completed_segments"]),
+            "failed_segments": int(generation["failed_segments"]),
+        }
+        if status in {"completed", "completed_with_errors"}:
+            log_event("task", "task_completed", **fields)
+        elif status == "paused":
+            log_event("task", "task_paused", **fields)
+
     async def start(self, comic_id: str, chapter_id: str) -> TranslationTaskState:
         action_lock = self._force_stop_locks.setdefault((comic_id, chapter_id), asyncio.Lock())
         async with action_lock:
@@ -147,6 +182,13 @@ class TranslationManager:
         ):
             generation_id = str(latest["generation_id"])
             self.repository.resume(generation_id)
+            self._log_task_event(
+                "task_resumed",
+                comic_id=comic_id,
+                chapter_id=chapter_id,
+                generation_id=generation_id,
+                reason="start",
+            )
             self._ensure_worker(comic_id, chapter_id)
             return self.repository.task_state(comic_id, chapter_id, generation_id)
         matching = self.repository.matching_generation(comic_id, chapter_id, fingerprint)
@@ -175,6 +217,13 @@ class TranslationManager:
                     current_page_index=current_page_index,
                     current_segment_index=current_segment_index,
                 )
+                self._log_task_event(
+                    "task_resumed",
+                    comic_id=comic_id,
+                    chapter_id=chapter_id,
+                    generation_id=str(active["generation_id"]),
+                    reason="stop_cancelled",
+                )
             self._ensure_worker(comic_id, chapter_id)
             return self.repository.task_state(comic_id, chapter_id, str(active["generation_id"]))
 
@@ -183,10 +232,24 @@ class TranslationManager:
             status = str(matching["status"])
             if status == "paused":
                 self.repository.resume(generation_id)
+                self._log_task_event(
+                    "task_resumed",
+                    comic_id=comic_id,
+                    chapter_id=chapter_id,
+                    generation_id=generation_id,
+                    reason="start",
+                )
             elif status in {"completed", "completed_with_errors"}:
                 return self.repository.task_state(comic_id, chapter_id, generation_id)
             elif status == "failed":
                 self.repository.resume(generation_id)
+                self._log_task_event(
+                    "task_resumed",
+                    comic_id=comic_id,
+                    chapter_id=chapter_id,
+                    generation_id=generation_id,
+                    reason="retry",
+                )
             if active is not None and str(active["generation_id"]) != generation_id:
                 self.repository.request_stop(str(active["generation_id"]))
             self._ensure_worker(comic_id, chapter_id)
@@ -204,6 +267,13 @@ class TranslationManager:
         )
         if active is not None:
             self.repository.request_stop(str(active["generation_id"]))
+        self._log_task_event(
+            "task_queued",
+            comic_id=comic_id,
+            chapter_id=chapter_id,
+            generation_id=generation_id,
+            kind="normal",
+        )
         self._ensure_worker(comic_id, chapter_id)
         return self.repository.task_state(comic_id, chapter_id, generation_id)
 
@@ -226,6 +296,12 @@ class TranslationManager:
             generation_id = str(row["generation_id"])
             self.repository.request_stop(generation_id)
             self._wake_generation(generation_id)
+            self._log_task_event(
+                "pause_requested",
+                comic_id=comic_id,
+                chapter_id=chapter_id,
+                generation_id=generation_id,
+            )
         latest_id = str(active_rows[-1]["generation_id"])
         return self.repository.task_state(comic_id, chapter_id, latest_id)
 
@@ -257,6 +333,14 @@ class TranslationManager:
                 self._force_stopping.discard(key)
             if self.repository.active_generation(comic_id, chapter_id) is not None:
                 self._ensure_worker(comic_id, chapter_id)
+            if stopped:
+                self._log_task_event(
+                    "task_cancelled",
+                    comic_id=comic_id,
+                    chapter_id=chapter_id,
+                    stopped_generations=stopped,
+                    reason="force_stop",
+                )
             return ForceStopTranslationResult(
                 comic_id=comic_id,
                 chapter_id=chapter_id,
@@ -289,6 +373,13 @@ class TranslationManager:
             generation_id = str(rows[0]["generation_id"])
             if str(rows[0]["status"]) == "paused":
                 self.repository.resume(generation_id)
+                self._log_task_event(
+                    "task_resumed",
+                    comic_id=comic_id,
+                    chapter_id=chapter_id,
+                    generation_id=generation_id,
+                    reason="retranslate",
+                )
                 self._ensure_worker(comic_id, chapter_id)
             return self.repository.task_state(comic_id, chapter_id, generation_id)
 
@@ -305,6 +396,13 @@ class TranslationManager:
         )
         if active is not None:
             self.repository.request_stop(str(active["generation_id"]))
+        self._log_task_event(
+            "task_queued",
+            comic_id=comic_id,
+            chapter_id=chapter_id,
+            generation_id=generation_id,
+            kind="retranslate",
+        )
         self._ensure_worker(comic_id, chapter_id)
         return self.repository.task_state(comic_id, chapter_id, generation_id)
 
@@ -416,6 +514,13 @@ class TranslationManager:
 
             generation_id = str(generation["generation_id"])
             retried_count, paths = self.repository.prepare_failed_retries(generation_id)
+            self._log_task_event(
+                "retry_failed_requested",
+                comic_id=comic_id,
+                chapter_id=chapter_id,
+                generation_id=generation_id,
+                retried_count=retried_count,
+            )
             if retried_count:
                 try:
                     self.cache.delete_entries(paths)
@@ -427,6 +532,13 @@ class TranslationManager:
                     )
                 if status not in {"preparing", "queued", "running"}:
                     self.repository.resume(generation_id)
+                    self._log_task_event(
+                        "task_resumed",
+                        comic_id=comic_id,
+                        chapter_id=chapter_id,
+                        generation_id=generation_id,
+                        reason="retry_failed",
+                    )
                 self._wake_generation(generation_id)
                 self._ensure_worker(comic_id, chapter_id)
             return (
@@ -594,89 +706,120 @@ class TranslationManager:
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
             while generation := self.repository.next_queued_generation(comic_id, chapter_id):
-                generation_id = str(generation["generation_id"])
-                self.cache.set_chapter_active(comic_id, chapter_id, True)
-                try:
-                    semantic = self.repository.decode_semantic_settings(generation)
-                    if semantic.get("pipelineVersion") == PROGRESSIVE_PIPELINE_VERSION:
-                        if not self.repository.begin_preparing(generation_id):
-                            current = self.repository.generation(generation_id)
-                            if current is not None and bool(current["stop_requested"]):
-                                self.repository.set_generation_status(
-                                    generation_id,
-                                    "paused",
-                                    stop_requested=False,
-                                )
-                            continue
-                        await self._run_streaming_generation(generation_id)
-                        continue
-                    if not bool(generation["planning_complete"]):
-                        if not self.repository.begin_preparing(generation_id):
-                            continue
-                        prepared = await self._prepare_generation(generation_id)
-                        if not prepared:
+                await self._run_queued_generation(generation, comic_id, chapter_id)
+
+    async def _run_queued_generation(
+        self,
+        generation: Any,
+        comic_id: str,
+        chapter_id: str,
+    ) -> None:
+        generation_id = str(generation["generation_id"])
+        with task_log_context(
+            generation_id=generation_id,
+            comic=comic_id,
+            chapter=chapter_id,
+        ):
+            semantic = self.repository.decode_semantic_settings(generation)
+            log_event(
+                "task",
+                "task_started",
+                status=str(generation["status"]),
+                kind=str(generation["kind"]),
+                pipeline=str(semantic.get("pipelineVersion") or "legacy"),
+            )
+            self.cache.set_chapter_active(comic_id, chapter_id, True)
+            try:
+                if semantic.get("pipelineVersion") == PROGRESSIVE_PIPELINE_VERSION:
+                    if not self.repository.begin_preparing(generation_id):
+                        current = self.repository.generation(generation_id)
+                        if current is not None and bool(current["stop_requested"]):
                             self.repository.set_generation_status(
                                 generation_id,
                                 "paused",
                                 stop_requested=False,
                             )
-                            continue
-                        prepared_generation = self.repository.generation(generation_id)
-                        if prepared_generation is None:
-                            continue
-                        if bool(prepared_generation["stop_requested"]):
-                            self.repository.set_generation_status(
-                                generation_id,
-                                "paused",
-                                stop_requested=False,
-                            )
-                            continue
-                    if not self.repository.begin_running(generation_id):
-                        continue
-                    await self._run_generation(generation_id)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    code, message = self._classify_error("chapter", exc)
-                    logger.warning(
-                        "Translation generation failed",
-                        extra={
-                            "generation_id": generation_id,
-                            "error_code": code,
-                        },
-                    )
-                    self.repository.set_generation_status(
-                        generation_id, "failed", stop_requested=False
-                    )
-                    self.repository.database.execute(
-                        """
-                        UPDATE translation_pages SET error_stage = 'chapter',
-                            error_code = ?, error_summary = ?, updated_at = ?
-                        WHERE generation_id = ? AND status = 'pending'
-                        """,
-                        (
-                            code,
-                            message,
-                            self.repository._timestamp(),
+                        return
+                    await self._run_streaming_generation(generation_id)
+                    return
+                if not bool(generation["planning_complete"]):
+                    if not self.repository.begin_preparing(generation_id):
+                        return
+                    prepared = await self._prepare_generation(generation_id)
+                    if not prepared:
+                        self.repository.set_generation_status(
                             generation_id,
-                        ),
-                    )
-                    self.repository.database.execute(
-                        """
-                        UPDATE translation_segments SET error_stage = 'chapter',
-                            error_code = ?, error_summary = ?, updated_at = ?
-                        WHERE generation_id = ? AND status = 'pending'
-                        """,
-                        (
-                            code,
-                            message,
-                            self.repository._timestamp(),
+                            "paused",
+                            stop_requested=False,
+                        )
+                        return
+                    prepared_generation = self.repository.generation(generation_id)
+                    if prepared_generation is None:
+                        return
+                    if bool(prepared_generation["stop_requested"]):
+                        self.repository.set_generation_status(
                             generation_id,
-                        ),
-                    )
-                finally:
-                    self.cache.set_chapter_active(comic_id, chapter_id, False)
-                    self.cache.enforce_limit()
+                            "paused",
+                            stop_requested=False,
+                        )
+                        return
+                if not self.repository.begin_running(generation_id):
+                    return
+                await self._run_generation(generation_id)
+            except asyncio.CancelledError:
+                log_event(
+                    "task",
+                    "task_cancelled",
+                    level=logging.WARNING,
+                    reason="worker_cancelled",
+                )
+                raise
+            except Exception as exc:
+                code, message = self._classify_error("chapter", exc)
+                logger.warning(
+                    "Translation generation failed",
+                    extra={
+                        "generation_id": generation_id,
+                        "error_code": code,
+                    },
+                )
+                log_event(
+                    "task",
+                    "task_failed",
+                    level=logging.ERROR,
+                    error=code,
+                )
+                self.repository.set_generation_status(generation_id, "failed", stop_requested=False)
+                self.repository.database.execute(
+                    """
+                    UPDATE translation_pages SET error_stage = 'chapter',
+                        error_code = ?, error_summary = ?, updated_at = ?
+                    WHERE generation_id = ? AND status = 'pending'
+                    """,
+                    (
+                        code,
+                        message,
+                        self.repository._timestamp(),
+                        generation_id,
+                    ),
+                )
+                self.repository.database.execute(
+                    """
+                    UPDATE translation_segments SET error_stage = 'chapter',
+                        error_code = ?, error_summary = ?, updated_at = ?
+                    WHERE generation_id = ? AND status = 'pending'
+                    """,
+                    (
+                        code,
+                        message,
+                        self.repository._timestamp(),
+                        generation_id,
+                    ),
+                )
+            finally:
+                self.cache.set_chapter_active(comic_id, chapter_id, False)
+                self.cache.enforce_limit()
+                self._log_terminal_generation(generation_id)
 
     async def _run_streaming_generation(self, generation_id: str) -> None:
         generation = self.repository.generation(generation_id)
@@ -689,9 +832,7 @@ class TranslationManager:
         runtime = self._runtime_settings(
             require_services=True,
             translation_service=(
-                str(semantic["translationService"])
-                if semantic.get("translationService")
-                else None
+                str(semantic["translationService"]) if semantic.get("translationService") else None
             ),
         )
         pipeline = self._pipeline_factory(semantic, runtime)
@@ -754,11 +895,7 @@ class TranslationManager:
         finished = self.repository.generation(generation_id)
         if finished is None:
             return
-        status = (
-            "completed_with_errors"
-            if int(finished["failed_segments"]) > 0
-            else "completed"
-        )
+        status = "completed_with_errors" if int(finished["failed_segments"]) > 0 else "completed"
         self.repository.set_generation_status(
             generation_id,
             status,
@@ -1033,8 +1170,7 @@ class TranslationManager:
             source_pages,
             semantic,
             should_stop=lambda: bool(
-                (current := self.repository.generation(generation_id))
-                and current["stop_requested"]
+                (current := self.repository.generation(generation_id)) and current["stop_requested"]
             ),
         )
 
@@ -1291,6 +1427,28 @@ class TranslationManager:
         page_index: int,
         pipeline: ImageTranslationPipeline,
     ) -> None:
+        with task_log_context(
+            generation_id=generation_id,
+            comic=comic_id,
+            chapter=chapter_id,
+            page_index=page_index,
+        ):
+            await self._process_page_in_context(
+                generation_id,
+                comic_id,
+                chapter_id,
+                page_index,
+                pipeline,
+            )
+
+    async def _process_page_in_context(
+        self,
+        generation_id: str,
+        comic_id: str,
+        chapter_id: str,
+        page_index: int,
+        pipeline: ImageTranslationPipeline,
+    ) -> None:
         bundle_key = chapter_bundle_key(comic_id, chapter_id)
         source_url = self.registry.pages.get((comic_id, chapter_id, page_index))
         if source_url is None:
@@ -1307,22 +1465,33 @@ class TranslationManager:
             "downloading",
             increment_attempts=True,
         )
-        original = self.cache.read_bytes(
-            original_relative,
-            media_type="image/png",
-            protect=True,
-            verify_image=True,
-        )
-        if original is None:
-            original = await self.cache.get_or_create(
-                bundle_key=bundle_key,
-                bundle_kind="chapter",
-                comic_id=comic_id,
-                chapter_id=chapter_id,
-                relative_path=original_relative,
-                entry_kind="original",
-                loader=lambda: self.source.fetch_media(source_url),
+        with logged_stage("download") as download_summary:
+            original = self.cache.read_bytes(
+                original_relative,
+                media_type="image/png",
                 protect=True,
+                verify_image=True,
+            )
+            original_cached = original is not None
+            log_event(
+                "task",
+                "cache_hit" if original_cached else "cache_miss",
+                artifact="original_image",
+            )
+            if original is None:
+                original = await self.cache.get_or_create(
+                    bundle_key=bundle_key,
+                    bundle_kind="chapter",
+                    comic_id=comic_id,
+                    chapter_id=chapter_id,
+                    relative_path=original_relative,
+                    entry_kind="original",
+                    loader=lambda: self.source.fetch_media(source_url),
+                    protect=True,
+                )
+            download_summary.update(
+                cached=original_cached,
+                output_bytes=len(original.content),
             )
         self.repository.set_page_stage(
             generation_id,
@@ -1343,31 +1512,49 @@ class TranslationManager:
                 comic_id, chapter_id, generation_id, "blocks", page_index, "json"
             )
         )
-        ocr_media = self.cache.read_bytes(ocr_path, verify_image=False)
-        blocks_media = self.cache.read_bytes(blocks_path, verify_image=False)
-        if ocr_media is not None and blocks_media is not None:
-            block_values = json.loads(blocks_media.content)
-            blocks = [TextBlock.from_dict(item) for item in block_values]
-            image, _sanitized = await asyncio.to_thread(sanitize_image, original.content)
-        else:
-            ocr_output = await pipeline.run_ocr(original.content)
-            image = ocr_output.image
-            blocks = ocr_output.blocks
-            self._put_json(
-                bundle_key,
-                comic_id,
-                chapter_id,
-                ocr_path,
-                "ocr",
-                ocr_output.payload,
+        with logged_stage("ocr", input_bytes=len(original.content)) as ocr_summary:
+            ocr_media = self.cache.read_bytes(ocr_path, verify_image=False)
+            blocks_media = self.cache.read_bytes(blocks_path, verify_image=False)
+            log_event(
+                "task",
+                "cache_hit" if ocr_media is not None else "cache_miss",
+                artifact="ocr",
             )
-            self._put_json(
-                bundle_key,
-                comic_id,
-                chapter_id,
-                blocks_path,
-                "blocks",
-                [block.as_dict() for block in blocks],
+            log_event(
+                "task",
+                "cache_hit" if blocks_media is not None else "cache_miss",
+                artifact="blocks",
+            )
+            ocr_cached = ocr_media is not None and blocks_media is not None
+            if ocr_cached:
+                block_values = json.loads(blocks_media.content)
+                blocks = [TextBlock.from_dict(item) for item in block_values]
+                image, _sanitized = await asyncio.to_thread(sanitize_image, original.content)
+                ocr_bytes = len(ocr_media.content) + len(blocks_media.content)
+            else:
+                ocr_output = await pipeline.run_ocr(original.content)
+                image = ocr_output.image
+                blocks = ocr_output.blocks
+                ocr_bytes = self._put_json(
+                    bundle_key,
+                    comic_id,
+                    chapter_id,
+                    ocr_path,
+                    "ocr",
+                    ocr_output.payload,
+                )
+                ocr_bytes += self._put_json(
+                    bundle_key,
+                    comic_id,
+                    chapter_id,
+                    blocks_path,
+                    "blocks",
+                    [block.as_dict() for block in blocks],
+                )
+            ocr_summary.update(
+                cached=ocr_cached,
+                blocks=len(blocks),
+                output_bytes=ocr_bytes,
             )
         self.repository.set_page_stage(
             generation_id,
@@ -1389,20 +1576,32 @@ class TranslationManager:
                 "json",
             )
         )
-        translations_media = self.cache.read_bytes(translations_path, verify_image=False)
-        if translations_media is not None:
-            translation_values = json.loads(translations_media.content)
-            translated_blocks = [TextBlock.from_dict(item) for item in translation_values]
-        else:
-            translation_output = await pipeline.translate_blocks(blocks)
-            translated_blocks = translation_output.blocks
-            self._put_json(
-                bundle_key,
-                comic_id,
-                chapter_id,
-                translations_path,
-                "translations",
-                [block.as_dict() for block in translated_blocks],
+        with logged_stage("translation", blocks=len(blocks)) as translation_summary:
+            translations_media = self.cache.read_bytes(translations_path, verify_image=False)
+            log_event(
+                "task",
+                "cache_hit" if translations_media is not None else "cache_miss",
+                artifact="translations",
+            )
+            if translations_media is not None:
+                translation_values = json.loads(translations_media.content)
+                translated_blocks = [TextBlock.from_dict(item) for item in translation_values]
+                translations_bytes = len(translations_media.content)
+            else:
+                translation_output = await pipeline.translate_blocks(blocks)
+                translated_blocks = translation_output.blocks
+                translations_bytes = self._put_json(
+                    bundle_key,
+                    comic_id,
+                    chapter_id,
+                    translations_path,
+                    "translations",
+                    [block.as_dict() for block in translated_blocks],
+                )
+            translation_summary.update(
+                cached=translations_media is not None,
+                translated=sum(block.translation is not None for block in translated_blocks),
+                output_bytes=translations_bytes,
             )
         self.repository.set_page_stage(
             generation_id,
@@ -1424,69 +1623,85 @@ class TranslationManager:
             media_type="image/png",
             verify_image=True,
         )
-        display_paths: list[str] = []
-        if translated_media is None:
-            render_output = await pipeline.render(image, translated_blocks)
-            translated_media = self.cache.put_bytes(
-                bundle_key=bundle_key,
-                bundle_kind="chapter",
-                comic_id=comic_id,
-                chapter_id=chapter_id,
-                relative_path=translated_path,
-                entry_kind="translated",
-                content=render_output.translated_bytes,
-                media_type="image/png",
-                verify_image=True,
-            )
-            width, height = render_output.width, render_output.height
-            for part_index, content in enumerate(render_output.display_parts):
-                part_path = generation_page_path(
-                    comic_id,
-                    chapter_id,
-                    generation_id,
-                    f"display-parts/{page_index:05d}",
-                    part_index,
-                    "png",
-                )
-                self.cache.put_bytes(
+        render_cached = translated_media is not None
+        log_event(
+            "task",
+            "cache_hit" if render_cached else "cache_miss",
+            artifact="translated_image",
+        )
+        with logged_stage(
+            "render",
+            blocks=len(translated_blocks),
+            input_bytes=len(original.content),
+        ) as render_summary:
+            display_paths: list[str] = []
+            if translated_media is None:
+                render_output = await pipeline.render(image, translated_blocks)
+                translated_media = self.cache.put_bytes(
                     bundle_key=bundle_key,
                     bundle_kind="chapter",
                     comic_id=comic_id,
                     chapter_id=chapter_id,
-                    relative_path=part_path,
-                    entry_kind="display_part",
-                    content=content,
+                    relative_path=translated_path,
+                    entry_kind="translated",
+                    content=render_output.translated_bytes,
                     media_type="image/png",
                     verify_image=True,
                 )
-                display_paths.append(part_path)
-        else:
-            with Image.open(io.BytesIO(translated_media.content)) as translated_image:
-                width, height = translated_image.size
-            rows = self.repository.database.fetchall(
-                """
-                SELECT relative_path FROM cache_entries
-                WHERE bundle_key = ? AND entry_kind = 'display_part'
-                  AND relative_path LIKE ? ORDER BY relative_path
-                """,
-                (
-                    bundle_key,
-                    f"%/display-parts/{page_index:05d}/%",
-                ),
-            )
-            display_paths = [str(row["relative_path"]) for row in rows]
+                width, height = render_output.width, render_output.height
+                for part_index, content in enumerate(render_output.display_parts):
+                    part_path = generation_page_path(
+                        comic_id,
+                        chapter_id,
+                        generation_id,
+                        f"display-parts/{page_index:05d}",
+                        part_index,
+                        "png",
+                    )
+                    self.cache.put_bytes(
+                        bundle_key=bundle_key,
+                        bundle_kind="chapter",
+                        comic_id=comic_id,
+                        chapter_id=chapter_id,
+                        relative_path=part_path,
+                        entry_kind="display_part",
+                        content=content,
+                        media_type="image/png",
+                        verify_image=True,
+                    )
+                    display_paths.append(part_path)
+            else:
+                with Image.open(io.BytesIO(translated_media.content)) as translated_image:
+                    width, height = translated_image.size
+                rows = self.repository.database.fetchall(
+                    """
+                    SELECT relative_path FROM cache_entries
+                    WHERE bundle_key = ? AND entry_kind = 'display_part'
+                      AND relative_path LIKE ? ORDER BY relative_path
+                    """,
+                    (
+                        bundle_key,
+                        f"%/display-parts/{page_index:05d}/%",
+                    ),
+                )
+                display_paths = [str(row["relative_path"]) for row in rows]
 
-        self.repository.complete_page(
-            generation_id,
-            comic_id,
-            chapter_id,
-            page_index,
-            translated_path=translated_path,
-            translated_version=translated_media.etag,
-            width=width,
-            height=height,
-            display_parts=display_paths,
-        )
+            self.repository.complete_page(
+                generation_id,
+                comic_id,
+                chapter_id,
+                page_index,
+                translated_path=translated_path,
+                translated_version=translated_media.etag,
+                width=width,
+                height=height,
+                display_parts=display_paths,
+            )
+            render_summary.update(
+                cached=render_cached,
+                output_bytes=len(translated_media.content),
+                display_parts=len(display_paths),
+            )
 
     async def _ensure_source_pages(self, comic_id: str, chapter_id: str) -> dict[int, str]:
         pages = {
@@ -1666,7 +1881,12 @@ class TranslationManager:
         relative_path: str,
         entry_kind: str,
         value: object,
-    ) -> None:
+    ) -> int:
+        content = json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
         self.cache.put_bytes(
             bundle_key=bundle_key,
             bundle_kind="chapter",
@@ -1674,14 +1894,11 @@ class TranslationManager:
             chapter_id=chapter_id,
             relative_path=relative_path,
             entry_kind=entry_kind,
-            content=json.dumps(
-                value,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ).encode("utf-8"),
+            content=content,
             media_type="application/json",
             verify_image=False,
         )
+        return len(content)
 
     @staticmethod
     def _classify_error(stage: str, error: Exception) -> tuple[str, str]:
