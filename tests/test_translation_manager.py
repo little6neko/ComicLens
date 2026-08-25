@@ -1463,6 +1463,35 @@ async def test_retry_failed_resumes_same_generation_and_is_idempotent(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_retry_failed_continues_when_invalidated_cache_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path, page_count=1)
+    harness.pipeline.fail_ocr_segments.add((0, 0))
+    try:
+        await harness.manager.start("alpha", "chapter-1")
+        await wait_for(
+            lambda: harness.manager.state("alpha", "chapter-1").status
+            == "completed_with_errors"
+        )
+        harness.pipeline.fail_ocr_segments.clear()
+
+        def fail_cache_cleanup(_paths: list[str]) -> None:
+            raise OSError("cache index is temporarily unavailable")
+
+        monkeypatch.setattr(harness.cache, "delete_entries", fail_cache_cleanup)
+        retried, retried_count = await harness.manager.retry_failed("alpha", "chapter-1")
+
+        assert retried_count == 1
+        assert retried.generation_id is not None
+        await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
+    finally:
+        harness.pipeline.fail_ocr_segments.clear()
+        await harness.close()
+
+
+@pytest.mark.asyncio
 async def test_retry_failed_finishes_current_segment_then_prioritizes_earlier_failure(
     tmp_path: Path,
 ) -> None:

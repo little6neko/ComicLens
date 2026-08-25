@@ -417,7 +417,14 @@ class TranslationManager:
             generation_id = str(generation["generation_id"])
             retried_count, paths = self.repository.prepare_failed_retries(generation_id)
             if retried_count:
-                self.cache.delete_entries(paths)
+                try:
+                    self.cache.delete_entries(paths)
+                except Exception:
+                    logger.warning(
+                        "Failed to delete invalidated cache entries after retry",
+                        extra={"generation_id": generation_id},
+                        exc_info=True,
+                    )
                 if status not in {"preparing", "queued", "running"}:
                     self.repository.resume(generation_id)
                 self._wake_generation(generation_id)
