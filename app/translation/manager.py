@@ -26,7 +26,11 @@ from app.domain.translation import (
 )
 from app.errors import AppError
 from app.media.registry import SourceMediaRegistry
-from app.repositories.translation import TranslationRepository
+from app.repositories.translation import (
+    TranslationRepository,
+    page_retry_clear_columns,
+    segment_retry_clear_columns,
+)
 from app.sources.base import ComicSource
 from app.translation.concurrency import DynamicConcurrencyLimiter
 from app.translation.image_renderer import (
@@ -324,36 +328,10 @@ class TranslationManager:
         if str(page["status"]) != "failed":
             raise AppError("PAGE_NOT_FAILED", "只有失败的图片可以重试", 409, False)
         stage = str(page["error_stage"] or "download")
-        clear_by_stage = {
-            "download": [
-                "original_path",
-                "ocr_path",
-                "blocks_path",
-                "translations_path",
-                "translated_path",
-            ],
-            "downloading": [
-                "original_path",
-                "ocr_path",
-                "blocks_path",
-                "translations_path",
-                "translated_path",
-            ],
-            "ocr": [
-                "ocr_path",
-                "blocks_path",
-                "translations_path",
-                "translated_path",
-            ],
-            "translation": ["translations_path", "translated_path"],
-            "translating": ["translations_path", "translated_path"],
-            "render": ["translated_path"],
-            "rendering": ["translated_path"],
-        }
         paths = self.repository.prepare_retry(
             generation_id,
             page_index,
-            clear_columns=clear_by_stage.get(stage, ["translated_path"]),
+            clear_columns=page_retry_clear_columns(stage),
         )
         self.cache.delete_entries(paths)
         if str(generation["status"]) not in {
@@ -398,19 +376,11 @@ class TranslationManager:
         if str(segment["status"]) != "failed":
             raise AppError("SEGMENT_NOT_FAILED", "只有失败的分片可以重试", 409, False)
         stage = str(segment["error_stage"] or "ocr")
-        clear_by_stage = {
-            "ocr": ["ocr_path", "blocks_path", "translations_path", "translated_path"],
-            "translation": ["translations_path", "translated_path"],
-            "translating": ["translations_path", "translated_path"],
-            "render": ["translated_path"],
-            "rendering": ["translated_path"],
-            "cache": ["translated_path"],
-        }
         paths = self.repository.prepare_segment_retry(
             generation_id,
             page_index,
             segment_index,
-            clear_columns=clear_by_stage.get(stage, ["translated_path"]),
+            clear_columns=segment_retry_clear_columns(stage),
             clear_job_id=stage == "ocr",
             increment_attempts=stage != "ocr",
         )
@@ -424,6 +394,38 @@ class TranslationManager:
             self.repository.resume(generation_id)
         self._ensure_worker(comic_id, chapter_id)
         return self.repository.task_state(comic_id, chapter_id, generation_id)
+
+    async def retry_failed(
+        self,
+        comic_id: str,
+        chapter_id: str,
+    ) -> tuple[TranslationTaskState, int]:
+        action_lock = self._force_stop_locks.setdefault((comic_id, chapter_id), asyncio.Lock())
+        async with action_lock:
+            generation = self.repository.latest_generation(comic_id, chapter_id)
+            if generation is None:
+                raise AppError("TRANSLATION_NOT_FOUND", "本话还没有翻译任务", 404, False)
+            status = str(generation["status"])
+            if status in {"stopping_after_page", "stopping_after_segment"}:
+                raise AppError(
+                    "TRANSLATION_STOPPING",
+                    "翻译任务正在停止，请稍后重试",
+                    409,
+                    True,
+                )
+
+            generation_id = str(generation["generation_id"])
+            retried_count, paths = self.repository.prepare_failed_retries(generation_id)
+            if retried_count:
+                self.cache.delete_entries(paths)
+                if status not in {"preparing", "queued", "running"}:
+                    self.repository.resume(generation_id)
+                self._wake_generation(generation_id)
+                self._ensure_worker(comic_id, chapter_id)
+            return (
+                self.repository.task_state(comic_id, chapter_id, generation_id),
+                retried_count,
+            )
 
     def state(self, comic_id: str, chapter_id: str) -> TranslationTaskState:
         return self.repository.task_state(comic_id, chapter_id)

@@ -1147,6 +1147,327 @@ async def test_manual_ocr_retry_submits_a_fresh_cloud_job(tmp_path: Path) -> Non
         await harness.close()
 
 
+def test_prepare_failed_retries_is_stage_aware_and_idempotent(tmp_path: Path) -> None:
+    harness = create_harness(tmp_path, page_count=1)
+    try:
+        generation_id = harness.repository.create_generation(
+            "alpha",
+            "chapter-1",
+            semantic_fingerprint="bulk-retry-checkpoints",
+            semantic_settings={"pipelineVersion": "progressive-segment-v1"},
+            page_indexes=[0],
+            source_pages={0: "https://img.example/0.png"},
+            kind="normal",
+            progressive=True,
+        )
+        harness.repository.save_prepared_page(
+            generation_id,
+            0,
+            source_url="https://img.example/0.png",
+            original_path="original/0.png",
+            original_checksum="checksum",
+            width=120,
+            height=400,
+        )
+        harness.repository.commit_segment_plan(
+            generation_id,
+            [
+                {
+                    "page_index": 0,
+                    "segment_index": index,
+                    "global_index": index,
+                    "source_width": 120,
+                    "source_height": 400,
+                    "display_top": index * 100,
+                    "display_bottom": (index + 1) * 100,
+                    "ocr_top": index * 100,
+                    "ocr_bottom": (index + 1) * 100,
+                    "ocr_input_path": f"input/{index}.png",
+                }
+                for index in range(4)
+            ],
+        )
+        for index, stage, status in [
+            (0, "ocr", "failed"),
+            (1, "translation", "failed"),
+            (2, "rendering", "failed"),
+            (3, None, "completed"),
+        ]:
+            harness.database.execute(
+                """
+                UPDATE translation_segments SET status = ?, ocr_path = ?, blocks_path = ?,
+                    translations_path = ?, translated_path = ?, translated_version = ?,
+                    ocr_job_id = ?, error_stage = ?, error_code = ?, error_summary = ?,
+                    attempts = 1
+                WHERE generation_id = ? AND page_index = 0 AND segment_index = ?
+                """,
+                (
+                    status,
+                    f"ocr/{index}.json",
+                    f"blocks/{index}.json",
+                    f"translations/{index}.json",
+                    f"translated/{index}.png",
+                    f"version-{index}",
+                    f"job-{index}",
+                    stage,
+                    "SIMULATED_FAILURE" if stage else None,
+                    "simulated failure" if stage else None,
+                    generation_id,
+                    index,
+                ),
+            )
+        harness.database.execute(
+            """
+            UPDATE translation_pages SET status = 'failed', error_stage = 'segment',
+                error_code = 'SEGMENTS_FAILED', error_summary = '3 failed'
+            WHERE generation_id = ? AND page_index = 0
+            """,
+            (generation_id,),
+        )
+        harness.database.execute(
+            """
+            UPDATE translation_generations SET status = 'completed_with_errors',
+                completed_segments = 1, failed_segments = 3
+            WHERE generation_id = ?
+            """,
+            (generation_id,),
+        )
+
+        retried_count, cache_paths = harness.repository.prepare_failed_retries(generation_id)
+
+        assert retried_count == 3
+        assert set(cache_paths) == {
+            "ocr/0.json",
+            "blocks/0.json",
+            "translations/0.json",
+            "translated/0.png",
+            "translations/1.json",
+            "translated/1.png",
+            "translated/2.png",
+        }
+        segments = harness.repository.segments(generation_id)
+        assert [str(segment["status"]) for segment in segments] == [
+            "pending",
+            "pending",
+            "pending",
+            "completed",
+        ]
+        assert segments[0]["ocr_path"] is None
+        assert segments[0]["blocks_path"] is None
+        assert segments[0]["translations_path"] is None
+        assert segments[0]["translated_path"] is None
+        assert segments[0]["ocr_job_id"] is None
+        assert segments[0]["attempts"] == 1
+        assert segments[1]["ocr_path"] == "ocr/1.json"
+        assert segments[1]["blocks_path"] == "blocks/1.json"
+        assert segments[1]["translations_path"] is None
+        assert segments[1]["translated_path"] is None
+        assert segments[1]["ocr_job_id"] == "job-1"
+        assert segments[1]["attempts"] == 2
+        assert segments[2]["translations_path"] == "translations/2.json"
+        assert segments[2]["translated_path"] is None
+        assert segments[2]["attempts"] == 2
+        assert segments[3]["translated_path"] == "translated/3.png"
+        assert all(segment["error_stage"] is None for segment in segments[:3])
+        page = harness.repository.page(generation_id, 0)
+        assert page is not None
+        assert page["status"] == "pending"
+        assert page["error_code"] is None
+        generation = harness.repository.generation(generation_id)
+        assert generation is not None
+        assert (generation["completed_segments"], generation["failed_segments"]) == (1, 0)
+
+        repeated_count, repeated_paths = harness.repository.prepare_failed_retries(generation_id)
+
+        assert repeated_count == 0
+        assert repeated_paths == []
+        assert [segment["attempts"] for segment in harness.repository.segments(generation_id)] == [
+            1,
+            2,
+            2,
+            1,
+        ]
+    finally:
+        harness.database.close()
+
+
+def test_prepare_failed_retries_supports_legacy_pages(tmp_path: Path) -> None:
+    harness = create_harness(tmp_path, page_count=2)
+    try:
+        generation_id = harness.repository.create_generation(
+            "alpha",
+            "chapter-1",
+            semantic_fingerprint="legacy-bulk-retry",
+            semantic_settings={"pipelineVersion": "full-page-v1"},
+            page_indexes=[0, 1],
+            source_pages={
+                0: "https://img.example/0.png",
+                1: "https://img.example/1.png",
+            },
+            kind="normal",
+            progressive=False,
+        )
+        harness.database.execute(
+            """
+            UPDATE translation_pages SET status = 'failed', original_path = 'original/0.png',
+                ocr_path = 'ocr/0.json', blocks_path = 'blocks/0.json',
+                translations_path = 'translations/0.json',
+                translated_path = 'translated/0.png', translated_version = 'old-version',
+                error_stage = 'translation', error_code = 'TRANSLATION_TIMEOUT',
+                error_summary = 'simulated failure', attempts = 2
+            WHERE generation_id = ? AND page_index = 0
+            """,
+            (generation_id,),
+        )
+        harness.database.execute(
+            """
+            UPDATE translation_pages SET status = 'completed', translated_path = 'translated/1.png',
+                translated_version = 'completed-version'
+            WHERE generation_id = ? AND page_index = 1
+            """,
+            (generation_id,),
+        )
+        harness.database.execute(
+            """
+            UPDATE translation_generations SET status = 'completed_with_errors',
+                completed_pages = 1, failed_pages = 1
+            WHERE generation_id = ?
+            """,
+            (generation_id,),
+        )
+
+        retried_count, cache_paths = harness.repository.prepare_failed_retries(generation_id)
+
+        assert retried_count == 1
+        assert cache_paths == ["translations/0.json", "translated/0.png"]
+        failed_page = harness.repository.page(generation_id, 0)
+        completed_page = harness.repository.page(generation_id, 1)
+        assert failed_page is not None and completed_page is not None
+        assert failed_page["status"] == "pending"
+        assert failed_page["ocr_path"] == "ocr/0.json"
+        assert failed_page["blocks_path"] == "blocks/0.json"
+        assert failed_page["translations_path"] is None
+        assert failed_page["translated_path"] is None
+        assert failed_page["attempts"] == 2
+        assert completed_page["status"] == "completed"
+        generation = harness.repository.generation(generation_id)
+        assert generation is not None
+        assert (generation["completed_pages"], generation["failed_pages"]) == (1, 0)
+    finally:
+        harness.database.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_failed_resumes_same_generation_and_is_idempotent(tmp_path: Path) -> None:
+    harness = create_harness(tmp_path, page_count=2)
+    harness.pipeline.fail_ocr_segments.update({(0, 0), (1, 0)})
+    try:
+        started = await harness.manager.start("alpha", "chapter-1")
+        await wait_for(
+            lambda: harness.manager.state("alpha", "chapter-1").status
+            == "completed_with_errors"
+        )
+
+        harness.pipeline.fail_ocr_segments.clear()
+        retried, retried_count = await harness.manager.retry_failed("alpha", "chapter-1")
+        repeated, repeated_count = await harness.manager.retry_failed("alpha", "chapter-1")
+
+        assert retried.generation_id == started.generation_id
+        assert retried_count == 2
+        assert repeated.generation_id == started.generation_id
+        assert repeated_count == 0
+        await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
+        completed = harness.manager.state("alpha", "chapter-1")
+        assert (completed.completed_segments, completed.failed_segments) == (2, 0)
+    finally:
+        harness.pipeline.fail_ocr_segments.clear()
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_failed_finishes_current_segment_then_prioritizes_earlier_failure(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(
+        tmp_path,
+        page_count=1,
+        image_size=(300, 2400),
+        translation_settings={
+            "ocr_concurrency": 1,
+            "long_image_threshold": 1000,
+            "ocr_slice_height": 700,
+            "ocr_slice_overlap": 100,
+        },
+    )
+    harness.pipeline.fail_ocr_segments.add((0, 0))
+    harness.pipeline.block_next_render = True
+    try:
+        await harness.manager.start("alpha", "chapter-1")
+        await wait_for(harness.pipeline.render_started.is_set)
+        rendering = harness.manager.state("alpha", "chapter-1")
+        assert rendering.current_segment is not None
+        assert rendering.current_segment.segment_index == 1
+        assert rendering.pages[0].segments[0].status == "failed"
+
+        harness.pipeline.fail_ocr_segments.clear()
+        harness.pipeline.blocked_ocr_segments.add((0, 0))
+        _retried, retried_count = await harness.manager.retry_failed("alpha", "chapter-1")
+
+        still_rendering = harness.manager.state("alpha", "chapter-1")
+        assert retried_count == 1
+        assert still_rendering.current_segment is not None
+        assert still_rendering.current_segment.segment_index == 1
+        assert still_rendering.pages[0].segments[1].status == "rendering"
+
+        harness.pipeline.render_release.set()
+        await wait_for(
+            lambda: (release := harness.pipeline.ocr_segment_releases.get((0, 0))) is not None
+            and not release.is_set()
+        )
+        prioritized = harness.manager.state("alpha", "chapter-1")
+        assert prioritized.current_segment is not None
+        assert prioritized.current_segment.segment_index == 0
+        assert prioritized.pages[0].segments[1].status == "completed"
+
+        harness.pipeline.ocr_segment_releases[(0, 0)].set()
+        await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
+    finally:
+        harness.pipeline.fail_ocr_segments.clear()
+        harness.pipeline.blocked_ocr_segments.clear()
+        harness.pipeline.render_release.set()
+        for release in harness.pipeline.ocr_segment_releases.values():
+            release.set()
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_failed_rejects_a_generation_that_is_stopping(tmp_path: Path) -> None:
+    harness = create_harness(tmp_path, page_count=1)
+    harness.pipeline.fail_ocr_segments.add((0, 0))
+    try:
+        await harness.manager.start("alpha", "chapter-1")
+        await wait_for(
+            lambda: harness.manager.state("alpha", "chapter-1").status
+            == "completed_with_errors"
+        )
+        generation_id = str(harness.manager.state("alpha", "chapter-1").generation_id)
+        harness.repository.set_generation_status(
+            generation_id,
+            "stopping_after_segment",
+            stop_requested=True,
+        )
+
+        with pytest.raises(AppError) as captured:
+            await harness.manager.retry_failed("alpha", "chapter-1")
+
+        assert captured.value.code == "TRANSLATION_STOPPING"
+        assert captured.value.status_code == 409
+        assert harness.manager.state("alpha", "chapter-1").failed_segments == 1
+    finally:
+        harness.pipeline.fail_ocr_segments.clear()
+        await harness.close()
+
+
 @pytest.mark.asyncio
 async def test_lower_ocr_concurrency_waits_for_existing_permits_to_finish(
     tmp_path: Path,

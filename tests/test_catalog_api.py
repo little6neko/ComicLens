@@ -426,6 +426,103 @@ def test_translation_api_polls_manifest_and_serves_immutable_version(
     assert unconfirmed.status_code == 422
 
 
+def test_retry_failed_translation_api_is_camel_case_idempotent_and_safe(
+    tmp_path: Path,
+) -> None:
+    api_client, _source = catalog_client(tmp_path)
+
+    with api_client:
+        missing = api_client.post(
+            "/api/comics/alpha-comic/chapters/chapter-12/translation/retry-failed"
+        )
+        manager = api_client.app.state.translation_manager
+        repository = api_client.app.state.translation_repository
+        manager._ensure_worker = lambda _comic_id, _chapter_id: None
+        generation_id = repository.create_generation(
+            "alpha-comic",
+            "chapter-12",
+            semantic_fingerprint="retry-failed-api",
+            semantic_settings={"pipelineVersion": "progressive-segment-v1"},
+            page_indexes=[0],
+            source_pages={0: "https://img.example/0.png"},
+            kind="normal",
+            progressive=True,
+        )
+        repository.save_prepared_page(
+            generation_id,
+            0,
+            source_url="https://img.example/0.png",
+            original_path="original/0.png",
+            original_checksum="checksum",
+            width=120,
+            height=180,
+        )
+        repository.commit_segment_plan(
+            generation_id,
+            [
+                {
+                    "page_index": 0,
+                    "segment_index": 0,
+                    "global_index": 0,
+                    "source_width": 120,
+                    "source_height": 180,
+                    "display_top": 0,
+                    "display_bottom": 180,
+                    "ocr_top": 0,
+                    "ocr_bottom": 180,
+                    "ocr_input_path": "input/0.png",
+                }
+            ],
+        )
+        repository.fail_segment(
+            generation_id,
+            0,
+            0,
+            stage="ocr",
+            code="OCR_TIMEOUT",
+            summary="simulated failure",
+        )
+        repository.finalize_page_from_segments(generation_id, 0)
+        repository.set_generation_status(generation_id, "completed_with_errors")
+
+        retried = api_client.post(
+            "/api/comics/alpha-comic/chapters/chapter-12/translation/retry-failed"
+        )
+        repeated = api_client.post(
+            "/api/comics/alpha-comic/chapters/chapter-12/translation/retry-failed"
+        )
+
+        repository.fail_segment(
+            generation_id,
+            0,
+            0,
+            stage="ocr",
+            code="OCR_TIMEOUT",
+            summary="simulated failure",
+        )
+        repository.set_generation_status(
+            generation_id,
+            "stopping_after_segment",
+            stop_requested=True,
+        )
+        stopping = api_client.post(
+            "/api/comics/alpha-comic/chapters/chapter-12/translation/retry-failed"
+        )
+
+    assert missing.status_code == 404
+    assert missing.json()["code"] == "TRANSLATION_NOT_FOUND"
+    assert retried.status_code == 200
+    assert retried.json()["retriedCount"] == 1
+    assert retried.json()["task"]["generationId"] == generation_id
+    assert set(retried.json()) == {"task", "retriedCount"}
+    assert "ocrJobId" not in retried.text
+    assert "cachePaths" not in retried.text
+    assert repeated.status_code == 200
+    assert repeated.json()["retriedCount"] == 0
+    assert stopping.status_code == 409
+    assert stopping.json()["code"] == "TRANSLATION_STOPPING"
+
+
 def test_background_translation_api_lists_all_chapters_and_force_stops_idempotently(
     tmp_path: Path,
 ) -> None:

@@ -125,6 +125,11 @@ class TranslationActionResult(ComicModel):
     task: TranslationTaskState
 
 
+class RetryFailedTranslationResult(ComicModel):
+    task: TranslationTaskState
+    retried_count: int = Field(ge=0)
+
+
 class BackgroundTranslationTask(ComicModel):
     comic_id: str
     chapter_id: str

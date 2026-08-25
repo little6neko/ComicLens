@@ -26,6 +26,45 @@ ACTIVE_TASK_STATUSES = (
 )
 TERMINAL_TASK_STATUSES = ("completed", "completed_with_errors", "failed")
 
+PAGE_RETRY_CLEAR_BY_STAGE: dict[str, tuple[str, ...]] = {
+    "download": (
+        "original_path",
+        "ocr_path",
+        "blocks_path",
+        "translations_path",
+        "translated_path",
+    ),
+    "downloading": (
+        "original_path",
+        "ocr_path",
+        "blocks_path",
+        "translations_path",
+        "translated_path",
+    ),
+    "ocr": ("ocr_path", "blocks_path", "translations_path", "translated_path"),
+    "translation": ("translations_path", "translated_path"),
+    "translating": ("translations_path", "translated_path"),
+    "render": ("translated_path",),
+    "rendering": ("translated_path",),
+    "cache": ("translated_path",),
+}
+SEGMENT_RETRY_CLEAR_BY_STAGE: dict[str, tuple[str, ...]] = {
+    "ocr": ("ocr_path", "blocks_path", "translations_path", "translated_path"),
+    "translation": ("translations_path", "translated_path"),
+    "translating": ("translations_path", "translated_path"),
+    "render": ("translated_path",),
+    "rendering": ("translated_path",),
+    "cache": ("translated_path",),
+}
+
+
+def page_retry_clear_columns(stage: str) -> list[str]:
+    return list(PAGE_RETRY_CLEAR_BY_STAGE.get(stage, ("translated_path",)))
+
+
+def segment_retry_clear_columns(stage: str) -> list[str]:
+    return list(SEGMENT_RETRY_CLEAR_BY_STAGE.get(stage, ("translated_path",)))
+
 
 class TranslationRepository:
     def __init__(self, database: Database) -> None:
@@ -1298,6 +1337,151 @@ class TranslationRepository:
             )
             self._refresh_segment_counts(connection, generation_id, self._timestamp())
         return paths
+
+    def prepare_failed_retries(self, generation_id: str) -> tuple[int, list[str]]:
+        timestamp = self._timestamp()
+        cache_paths: list[str] = []
+        with self.database.transaction() as connection:
+            segment_total = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM translation_segments WHERE generation_id = ?",
+                    (generation_id,),
+                ).fetchone()[0]
+            )
+            if segment_total:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM translation_segments
+                    WHERE generation_id = ? AND status = 'failed'
+                    ORDER BY global_index
+                    """,
+                    (generation_id,),
+                ).fetchall()
+                affected_pages: set[int] = set()
+                retried_count = 0
+                allowed = {"ocr_path", "blocks_path", "translations_path", "translated_path"}
+                for row in rows:
+                    stage = str(row["error_stage"] or "ocr")
+                    columns = [
+                        column for column in segment_retry_clear_columns(stage) if column in allowed
+                    ]
+                    paths = [str(row[column]) for column in columns if row[column]]
+                    assignments = [f"{column} = NULL" for column in columns]
+                    assignments.extend(
+                        [
+                            "status = 'pending'",
+                            "translated_version = NULL",
+                            "error_stage = NULL",
+                            "error_code = NULL",
+                            "error_summary = NULL",
+                            "updated_at = ?",
+                        ]
+                    )
+                    if stage == "ocr":
+                        assignments.append("ocr_job_id = NULL")
+                    else:
+                        assignments.append("attempts = attempts + 1")
+                    cursor = connection.execute(
+                        f"""
+                        UPDATE translation_segments SET {", ".join(assignments)}
+                        WHERE generation_id = ? AND page_index = ? AND segment_index = ?
+                          AND status = 'failed'
+                        """,
+                        (
+                            timestamp,
+                            generation_id,
+                            int(row["page_index"]),
+                            int(row["segment_index"]),
+                        ),
+                    )
+                    if not cursor.rowcount:
+                        continue
+                    retried_count += 1
+                    cache_paths.extend(paths)
+                    affected_pages.add(int(row["page_index"]))
+                for page_index in affected_pages:
+                    connection.execute(
+                        """
+                        UPDATE translation_pages SET status = 'pending',
+                            error_stage = NULL, error_code = NULL,
+                            error_summary = NULL, updated_at = ?
+                        WHERE generation_id = ? AND page_index = ?
+                        """,
+                        (timestamp, generation_id, page_index),
+                    )
+                if retried_count:
+                    self._refresh_segment_counts(connection, generation_id, timestamp)
+                return retried_count, cache_paths
+
+            rows = connection.execute(
+                """
+                SELECT * FROM translation_pages
+                WHERE generation_id = ? AND status = 'failed'
+                ORDER BY page_index
+                """,
+                (generation_id,),
+            ).fetchall()
+            retried_count = 0
+            allowed = {
+                "original_path",
+                "ocr_path",
+                "blocks_path",
+                "translations_path",
+                "translated_path",
+            }
+            for row in rows:
+                stage = str(row["error_stage"] or "download")
+                columns = [
+                    column for column in page_retry_clear_columns(stage) if column in allowed
+                ]
+                paths = [str(row[column]) for column in columns if row[column]]
+                assignments = [f"{column} = NULL" for column in columns]
+                assignments.extend(
+                    [
+                        "status = 'pending'",
+                        "translated_version = NULL",
+                        "display_parts_json = '[]'",
+                        "error_stage = NULL",
+                        "error_code = NULL",
+                        "error_summary = NULL",
+                        "updated_at = ?",
+                    ]
+                )
+                cursor = connection.execute(
+                    f"""
+                    UPDATE translation_pages SET {", ".join(assignments)}
+                    WHERE generation_id = ? AND page_index = ? AND status = 'failed'
+                    """,
+                    (timestamp, generation_id, int(row["page_index"])),
+                )
+                if not cursor.rowcount:
+                    continue
+                retried_count += 1
+                cache_paths.extend(paths)
+            if retried_count:
+                counts = connection.execute(
+                    """
+                    SELECT
+                        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) completed,
+                        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) failed
+                    FROM translation_pages WHERE generation_id = ?
+                    """,
+                    (generation_id,),
+                ).fetchone()
+                connection.execute(
+                    """
+                    UPDATE translation_generations
+                    SET completed_pages = ?, failed_pages = ?, updated_at = ?
+                    WHERE generation_id = ?
+                    """,
+                    (
+                        int(counts["completed"] or 0) if counts else 0,
+                        int(counts["failed"] or 0) if counts else 0,
+                        timestamp,
+                        generation_id,
+                    ),
+                )
+            return retried_count, cache_paths
 
     @staticmethod
     def _refresh_segment_counts(

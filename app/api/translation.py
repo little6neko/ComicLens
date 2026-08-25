@@ -9,6 +9,7 @@ from app.domain.translation import (
     BackgroundTranslationTask,
     ForceStopTranslationResult,
     RetranslateRequest,
+    RetryFailedTranslationResult,
     TranslationActionResult,
     TranslationTaskState,
 )
@@ -98,6 +99,19 @@ async def retranslate_chapter(
             False,
         )
     return TranslationActionResult(task=await manager.retranslate(comic_id, chapter_id))
+
+
+@router.post(
+    "/api/comics/{comic_id}/chapters/{chapter_id}/translation/retry-failed",
+    response_model=RetryFailedTranslationResult,
+)
+async def retry_failed_translation(
+    comic_id: ComicId,
+    chapter_id: ChapterId,
+    manager: ManagerDependency,
+) -> RetryFailedTranslationResult:
+    task, retried_count = await manager.retry_failed(comic_id, chapter_id)
+    return RetryFailedTranslationResult(task=task, retried_count=retried_count)
 
 
 @router.post(
