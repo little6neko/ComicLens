@@ -8,7 +8,7 @@ RUN npm run build
 
 FROM python:3.12-slim-bookworm AS runtime
 
-ARG VERSION=0.1.3
+ARG VERSION=0.1.4
 
 LABEL org.opencontainers.image.version="${VERSION}"
 
