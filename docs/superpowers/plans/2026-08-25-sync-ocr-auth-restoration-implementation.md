@@ -1,6 +1,6 @@
 # OCR 同步/异步适配与鉴权恢复实施计划
 
-日期：2026-08-25  
+日期：2026-08-25
 依据：`docs/superpowers/specs/2026-08-25-sync-ocr-auth-restoration-design.md`
 
 ## 实施原则
