@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import logging
 import re
+import time
 from collections.abc import Callable
 from urllib.parse import urljoin, urlparse
 
@@ -24,6 +26,13 @@ from app.domain.comic import (
     SourcePage,
 )
 from app.errors import AppError
+from app.observability import (
+    EVENT_LOGGER,
+    log_event,
+    new_request_ref,
+    safe_endpoint,
+    safe_error_excerpt,
+)
 from app.sources.base import ComicCreatorKind, ComicOrder
 
 SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -145,7 +154,7 @@ class Manga18fxSource:
             await self.client.aclose()
 
     async def home(self) -> HomeFeed:
-        soup = await self._get_html("/")
+        soup = await self._get_html("/", operation="home")
         featured = self._parse_featured(soup)
         latest = self._parse_list_page(soup, requested_page=1)
         if not featured and not latest.items:
@@ -154,7 +163,7 @@ class Manga18fxSource:
 
     async def latest(self, page: int) -> ComicListPage:
         self._validate_page(page)
-        soup = await self._get_html(f"/page/{page}")
+        soup = await self._get_html(f"/page/{page}", operation="latest")
         return self._parse_list_page(soup, requested_page=page)
 
     async def search(self, query: str, page: int) -> ComicListPage:
@@ -164,12 +173,14 @@ class Manga18fxSource:
         self._validate_page(page)
         query_string = str(httpx.QueryParams({"q": normalized_query, "page": page}))
         path = f"/search?{query_string}"
-        soup = await self._get_html(path)
+        soup = await self._get_html(path, operation="search")
         return self._parse_list_page(soup, requested_page=page, allow_empty=True)
 
     async def categories(self) -> list[ComicCategory]:
-        home_task = asyncio.create_task(self._get_html("/"))
-        sitemap_task = asyncio.create_task(self._get_bytes("/sitemap-manga.xml.gz"))
+        home_task = asyncio.create_task(self._get_html("/", operation="categories"))
+        sitemap_task = asyncio.create_task(
+            self._get_bytes("/sitemap-manga.xml.gz", operation="categories")
+        )
         home_result, sitemap_result = await asyncio.gather(
             home_task, sitemap_task, return_exceptions=True
         )
@@ -233,7 +244,10 @@ class Manga18fxSource:
             base_path = (
                 f"/manga-genre/{category_id}" if page == 1 else f"/manga-genre/{category_id}/{page}"
             )
-        soup = await self._get_html(f"{base_path}?orderby={order}")
+        soup = await self._get_html(
+            f"{base_path}?orderby={order}",
+            operation="category",
+        )
         return self._parse_list_page(soup, requested_page=page)
 
     async def creator(
@@ -249,7 +263,7 @@ class Manga18fxSource:
         prefix = "manga-author" if kind == "author" else "manga-artist"
         path = f"/{prefix}/{creator_id}" if page == 1 else f"/{prefix}/{creator_id}/{page}"
         try:
-            soup = await self._get_html(path)
+            soup = await self._get_html(path, operation="creator")
         except AppError as exc:
             if self._upstream_status(exc) == 404:
                 raise AppError(
@@ -274,12 +288,12 @@ class Manga18fxSource:
 
     async def ranking(self, page: int) -> ComicListPage:
         self._validate_page(page)
-        soup = await self._get_html(f"/hot-manga?page={page}")
+        soup = await self._get_html(f"/hot-manga?page={page}", operation="ranking")
         return self._parse_list_page(soup, requested_page=page)
 
     async def detail(self, comic_id: str) -> ComicDetail:
         self._validate_slug(comic_id, "Comic")
-        soup = await self._get_html(f"/manga/{comic_id}")
+        soup = await self._get_html(f"/manga/{comic_id}", operation="detail")
         title_node = soup.select_one(".post-title h1")
         cover_node = soup.select_one(".summary_image img")
         if title_node is None or cover_node is None:
@@ -324,7 +338,10 @@ class Manga18fxSource:
     async def chapter(self, comic_id: str, chapter_id: str) -> SourceChapterManifest:
         self._validate_slug(comic_id, "Comic")
         self._validate_slug(chapter_id, "章节")
-        soup = await self._get_html(f"/manga/{comic_id}/{chapter_id}")
+        soup = await self._get_html(
+            f"/manga/{comic_id}/{chapter_id}",
+            operation="chapter_manifest",
+        )
         pages: list[SourcePage] = []
         seen_urls: set[str] = set()
         for image in soup.select(".page-break img"):
@@ -356,7 +373,11 @@ class Manga18fxSource:
 
     async def fetch_media(self, source_url: str) -> tuple[bytes, str]:
         self._validate_media_url(source_url)
-        response = await self._request(source_url, allow_media_host=True)
+        response = await self._request(
+            source_url,
+            allow_media_host=True,
+            operation="fetch_media",
+        )
         content_type = response.headers.get("content-type", "application/octet-stream")
         if not content_type.lower().startswith("image/"):
             raise AppError(
@@ -367,33 +388,67 @@ class Manga18fxSource:
             )
         return response.content, content_type.split(";", 1)[0]
 
-    async def _get_html(self, path: str) -> BeautifulSoup:
-        response = await self._request(self._url(path), allow_media_host=False)
+    async def _get_html(self, path: str, *, operation: str) -> BeautifulSoup:
+        response = await self._request(
+            self._url(path),
+            allow_media_host=False,
+            operation=operation,
+        )
         content_type = response.headers.get("content-type", "").lower()
         if "html" not in content_type and not response.text.lstrip().startswith("<"):
             raise self._parse_error("来源未返回 HTML")
         return BeautifulSoup(response.text, "lxml")
 
-    async def _get_bytes(self, path: str) -> bytes:
-        response = await self._request(self._url(path), allow_media_host=False)
+    async def _get_bytes(self, path: str, *, operation: str) -> bytes:
+        response = await self._request(
+            self._url(path),
+            allow_media_host=False,
+            operation=operation,
+        )
         return response.content
 
-    async def _request(self, url: str, *, allow_media_host: bool) -> httpx.Response:
+    async def _request(
+        self,
+        url: str,
+        *,
+        allow_media_host: bool,
+        operation: str,
+    ) -> httpx.Response:
+        request_ref = new_request_ref()
+        route = "environment_or_direct"
         try:
             proxy_url = self._proxy_url()
             if proxy_url:
+                route = "configured_proxy"
                 async with self._proxy_client(proxy_url) as proxy_client:
                     return await self._request_with_retries(
                         proxy_client,
                         url,
                         allow_media_host=allow_media_host,
+                        operation=operation,
+                        request_ref=request_ref,
+                        route=route,
                     )
             return await self._request_with_retries(
                 self.client,
                 url,
                 allow_media_host=allow_media_host,
+                operation=operation,
+                request_ref=request_ref,
+                route=route,
             )
         except (httpx.HTTPError, ValueError) as exc:
+            log_event(
+                "manga",
+                "failed",
+                level=logging.ERROR,
+                operation=operation,
+                request_ref=request_ref,
+                endpoint=safe_endpoint(url),
+                route=route,
+                status=self._upstream_status(exc),
+                error=type(exc).__name__,
+            )
             raise AppError(
                 "UPSTREAM_FETCH_ERROR",
                 "无法读取 Manga18fx，请稍后重试",
@@ -407,6 +462,9 @@ class Manga18fxSource:
         url: str,
         *,
         allow_media_host: bool,
+        operation: str,
+        request_ref: str,
+        route: str,
     ) -> httpx.Response:
         for attempt in range(3):
             try:
@@ -414,18 +472,46 @@ class Manga18fxSource:
                     client,
                     url,
                     allow_media_host=allow_media_host,
+                    operation=operation,
+                    request_ref=request_ref,
+                    route=route,
+                    attempt=attempt + 1,
                 )
                 if (response.status_code == 429 or response.status_code >= 500) and attempt < 2:
                     retry_after = response.headers.get("retry-after", "")
                     delay = float(retry_after) if retry_after.isdigit() else 0.2 * (2**attempt)
-                    await asyncio.sleep(min(delay, 2.0))
+                    delay = min(delay, 2.0)
+                    log_event(
+                        "manga",
+                        "retry",
+                        level=logging.WARNING,
+                        operation=operation,
+                        request_ref=request_ref,
+                        status=response.status_code,
+                        attempt=attempt + 1,
+                        next_attempt=attempt + 2,
+                        delay_ms=round(delay * 1000),
+                    )
+                    await asyncio.sleep(delay)
                     continue
                 response.raise_for_status()
                 return response
             except (httpx.HTTPError, ValueError) as exc:
                 last_error = exc
                 if attempt < 2 and isinstance(exc, httpx.TimeoutException | httpx.NetworkError):
-                    await asyncio.sleep(0.2 * (2**attempt))
+                    delay = 0.2 * (2**attempt)
+                    log_event(
+                        "manga",
+                        "retry",
+                        level=logging.WARNING,
+                        operation=operation,
+                        request_ref=request_ref,
+                        attempt=attempt + 1,
+                        next_attempt=attempt + 2,
+                        delay_ms=round(delay * 1000),
+                        error=type(exc).__name__,
+                    )
+                    await asyncio.sleep(delay)
                     continue
                 raise
         assert last_error is not None
@@ -437,19 +523,120 @@ class Manga18fxSource:
         url: str,
         *,
         allow_media_host: bool,
+        operation: str,
+        request_ref: str,
+        route: str,
+        attempt: int,
     ) -> httpx.Response:
         current_url = url
-        for _redirect in range(4):
+        for redirect_index in range(4):
             self._validate_final_url(current_url, media=allow_media_host)
+            endpoint = safe_endpoint(current_url)
+            log_event(
+                "manga",
+                "request",
+                operation=operation,
+                request_ref=request_ref,
+                method="GET",
+                endpoint=endpoint,
+                route=route,
+                attempt=attempt,
+                redirect_index=redirect_index,
+            )
+            started = time.monotonic()
             response = await client.get(current_url, follow_redirects=False)
+            duration_ms = round((time.monotonic() - started) * 1000)
             if not response.is_redirect:
+                self._log_response(
+                    response,
+                    operation=operation,
+                    request_ref=request_ref,
+                    endpoint=endpoint,
+                    attempt=attempt,
+                    redirect_index=redirect_index,
+                    duration_ms=duration_ms,
+                )
                 return response
             location = response.headers.get("location")
             if not location:
+                self._log_response(
+                    response,
+                    operation=operation,
+                    request_ref=request_ref,
+                    endpoint=endpoint,
+                    attempt=attempt,
+                    redirect_index=redirect_index,
+                    duration_ms=duration_ms,
+                )
                 raise ValueError("source returned a redirect without a location")
-            current_url = urljoin(current_url, location)
-            self._validate_final_url(current_url, media=allow_media_host)
+            next_url = urljoin(current_url, location)
+            self._validate_final_url(next_url, media=allow_media_host)
+            self._log_response(
+                response,
+                operation=operation,
+                request_ref=request_ref,
+                endpoint=endpoint,
+                attempt=attempt,
+                redirect_index=redirect_index,
+                duration_ms=duration_ms,
+                redirect_to=safe_endpoint(next_url),
+            )
+            current_url = next_url
         raise ValueError("source returned too many redirects")
+
+    @staticmethod
+    def _log_response(
+        response: httpx.Response,
+        *,
+        operation: str,
+        request_ref: str,
+        endpoint: str,
+        attempt: int,
+        redirect_index: int,
+        duration_ms: int,
+        redirect_to: str | None = None,
+    ) -> None:
+        content_type = response.headers.get("content-type", "").split(";", 1)[0]
+        log_event(
+            "manga",
+            "response",
+            operation=operation,
+            request_ref=request_ref,
+            status=response.status_code,
+            duration_ms=duration_ms,
+            response_bytes=len(response.content),
+            content_type=content_type or None,
+            endpoint=endpoint,
+            attempt=attempt,
+            redirect_index=redirect_index,
+            redirect_to=redirect_to,
+        )
+        if response.status_code < 400 or not EVENT_LOGGER.isEnabledFor(logging.DEBUG):
+            return
+        try:
+            sensitive_values = tuple(
+                value
+                for key, value in response.request.url.params.multi_items()
+                if key.lower() in {"q", "query", "search", "keyword"}
+            )
+            excerpt, truncated = safe_error_excerpt(
+                response.content,
+                response.headers.get("content-type", ""),
+                sensitive_texts=sensitive_values,
+            )
+        except Exception:
+            return
+        if excerpt is not None:
+            log_event(
+                "manga",
+                "error_detail",
+                level=logging.DEBUG,
+                operation=operation,
+                request_ref=request_ref,
+                status=response.status_code,
+                excerpt=excerpt,
+                truncated=truncated,
+            )
 
     def _proxy_url(self) -> str:
         if self._proxy_provider is None:
@@ -476,7 +663,10 @@ class Manga18fxSource:
 
     async def _category_exists(self, slug: str) -> bool:
         try:
-            soup = await self._get_html(f"/manga-genre/{slug}?orderby=latest")
+            soup = await self._get_html(
+                f"/manga-genre/{slug}?orderby=latest",
+                operation="category_validation",
+            )
             self._parse_list_page(soup, requested_page=1)
         except AppError:
             return False

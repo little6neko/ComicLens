@@ -3,12 +3,15 @@ from __future__ import annotations
 import base64
 import io
 import json
+import logging
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 from PIL import Image, ImageChops, ImageDraw
 
+from app.observability import short_ref
 from app.translation.image_renderer import render_translated_image, sanitize_image
 from app.translation.image_segments import (
     dedupe_text_blocks,
@@ -241,6 +244,56 @@ async def test_direct_ocr_posts_base64_json_without_auth_or_job_callbacks() -> N
 
 
 @pytest.mark.asyncio
+async def test_direct_ocr_logs_safe_request_response_and_completion_summaries(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    token = "private-ocr-token-canary"
+    content = image_bytes(20, 20)
+    encoded_image = base64.b64encode(content).decode("ascii")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"result": {"layoutParsingResults": [{"type": "text"}]}},
+            request=request,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        ocr = OCRClient(
+            client,
+            "https://ocr.example/layout-parsing?api_key=private-query-canary",
+            token=token,
+            auth_mode="bearer",
+            mode="direct",
+        )
+        with caplog.at_level(logging.INFO, logger="comiclens.events"):
+            await ocr.analyze_image(content)
+
+    messages = [
+        record.getMessage() for record in caplog.records if record.getMessage().startswith("ocr ")
+    ]
+    request = next(message for message in messages if "event=request" in message)
+    response = next(message for message in messages if "event=response" in message)
+    completed = next(message for message in messages if "event=completed" in message)
+    assert request.startswith("ocr event=request operation=analyze")
+    assert "protocol=direct" in request
+    assert "auth=bearer" in request
+    assert f"image_bytes={len(content)}" in request
+    assert "payload_bytes=" in request
+    assert "endpoint=https://ocr.example/layout-parsing" in request
+    assert "attempt=1" in request
+    assert response.startswith("ocr event=response operation=analyze")
+    assert "status=200" in response
+    assert "duration_ms=" in response
+    assert "response_bytes=" in response
+    assert "content_type=application/json" in response
+    assert "layout_results=1" in completed
+    assert all(token not in message for message in messages)
+    assert all("private-query-canary" not in message for message in messages)
+    assert all(encoded_image not in message for message in messages)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("body", "message"),
     [
@@ -389,6 +442,137 @@ async def test_async_ocr_submits_polls_merges_jsonl_and_isolates_token() -> None
     assert requests[1].headers["authorization"] == "Bearer secret"
     assert requests[2].headers["authorization"] == "Bearer secret"
     assert "authorization" not in requests[3].headers
+
+
+@pytest.mark.asyncio
+async def test_async_ocr_logs_each_poll_at_debug_and_only_state_changes_at_info(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    job_id = "private-job-id-canary"
+    token = "private-job-token-canary"
+    poll_states = iter(("running", "running", "done"))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/ocr/jobs":
+            return httpx.Response(200, json={"data": {"jobId": job_id}}, request=request)
+        if request.url.path.endswith(job_id):
+            state = next(poll_states)
+            payload: dict[str, object] = {"state": state}
+            if state == "done":
+                payload["resultUrl"] = {
+                    "jsonUrl": (
+                        "https://result-user:result-password@files.example/"
+                        f"private/{job_id}/result.jsonl?signature=private-signature"
+                    )
+                }
+            return httpx.Response(200, json={"data": payload}, request=request)
+        return httpx.Response(
+            200,
+            text='{"result":{"layoutParsingResults":[]}}\n',
+            request=request,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        ocr = OCRClient(
+            client,
+            "https://ocr.example/ocr/jobs",
+            token=token,
+            mode="job",
+            job_poll_interval=0.2,
+        )
+        with caplog.at_level(logging.DEBUG, logger="comiclens.events"):
+            await ocr.analyze_image(image_bytes(20, 20))
+
+    records = [record for record in caplog.records if record.getMessage().startswith("ocr ")]
+    poll_requests = [
+        record
+        for record in records
+        if "event=request" in record.getMessage() and "operation=poll" in record.getMessage()
+    ]
+    poll_responses = [
+        record
+        for record in records
+        if "event=response" in record.getMessage() and "operation=poll" in record.getMessage()
+    ]
+    states = [record for record in records if "event=state" in record.getMessage()]
+    assert len(poll_requests) == 3
+    assert len(poll_responses) == 3
+    assert all(record.levelno == logging.DEBUG for record in poll_requests)
+    assert all(record.levelno == logging.DEBUG for record in poll_responses)
+    assert [
+        "state=running" in states[0].getMessage(),
+        "state=done" in states[1].getMessage(),
+    ] == [True, True]
+    assert len(states) == 2
+    assert all(record.levelno == logging.INFO for record in states)
+    messages = [record.getMessage() for record in records]
+    assert any(f"job_ref={short_ref(job_id)}" in message for message in messages)
+    download_request = next(
+        message
+        for message in messages
+        if "event=request" in message and "operation=download_result" in message
+    )
+    assert "endpoint=https://files.example" in download_request
+    assert "/private/" not in download_request
+    assert all(job_id not in message for message in messages)
+    assert all(token not in message for message in messages)
+    assert all("result-user" not in message for message in messages)
+    assert all("result-password" not in message for message in messages)
+    assert all("private-signature" not in message for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_ocr_retries_and_logs_redacted_json_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    token = "private-retry-token-canary"
+    source_text = "private-ocr-source-canary"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            503,
+            json={
+                "code": "OVERLOADED",
+                "apiKey": token,
+                "file": base64.b64encode(source_text.encode()).decode(),
+                "message": (
+                    "retry https://url-user:url-password@ocr.example/failure"
+                    "?token=private-query-token"
+                ),
+            },
+            request=request,
+        )
+
+    monkeypatch.setattr("app.translation.ocr.asyncio.sleep", AsyncMock())
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        ocr = OCRClient(
+            client,
+            "https://ocr.example/layout-parsing",
+            token=token,
+            mode="direct",
+        )
+        with (
+            caplog.at_level(logging.DEBUG, logger="comiclens.events"),
+            pytest.raises(httpx.HTTPStatusError),
+        ):
+            await ocr.analyze_image(source_text.encode())
+
+    records = [record for record in caplog.records if record.getMessage().startswith("ocr ")]
+    messages = [record.getMessage() for record in records]
+    assert sum("event=request" in message for message in messages) == 3
+    assert sum("event=response" in message for message in messages) == 3
+    assert sum("event=retry" in message for message in messages) == 2
+    assert sum("event=failed" in message for message in messages) == 1
+    excerpts = [message for message in messages if "event=error_detail" in message]
+    assert len(excerpts) == 3
+    assert all("OVERLOADED" in message for message in excerpts)
+    assert all("<redacted>" in message for message in excerpts)
+    assert all(token not in message for message in messages)
+    assert all(source_text not in message for message in messages)
+    assert all("url-user" not in message for message in messages)
+    assert all("url-password" not in message for message in messages)
+    assert all("private-query-token" not in message for message in messages)
 
 
 @pytest.mark.asyncio
@@ -598,6 +782,54 @@ async def test_deepl_selects_free_or_pro_and_maps_languages() -> None:
 
 
 @pytest.mark.asyncio
+async def test_deepl_logs_batch_summaries_without_key_source_or_translation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    api_key = "private-deepl-key-canary"
+    source_texts = ["private source alpha", "private source beta"]
+    translations = ["private target alpha", "private target beta"]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"translations": [{"text": text} for text in translations]},
+            request=request,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        translator = DeepLClient(client, api_key)
+        with caplog.at_level(logging.INFO, logger="comiclens.events"):
+            result = await translator.translate_many(source_texts, "EN")
+
+    assert result == translations
+    messages = [
+        record.getMessage() for record in caplog.records if record.getMessage().startswith("deepl ")
+    ]
+    request = next(message for message in messages if "event=request" in message)
+    response = next(message for message in messages if "event=response" in message)
+    completed = next(message for message in messages if "event=completed" in message)
+    assert request.startswith("deepl event=request operation=translate_batch")
+    assert "method=POST" in request
+    assert "endpoint=https://api.deepl.com/v2/translate" in request
+    assert "auth=api_key" in request
+    assert "text_count=2" in request
+    assert f"total_chars={sum(map(len, source_texts))}" in request
+    assert "payload_bytes=" in request
+    assert "source_lang=EN" in request
+    assert "target_lang=ZH-HANS" in request
+    assert response.startswith("deepl event=response operation=translate_batch")
+    assert "status=200" in response
+    assert "duration_ms=" in response
+    assert "response_bytes=" in response
+    assert "content_type=application/json" in response
+    assert "success_count=2" in completed
+    assert all(api_key not in message for message in messages)
+    assert all(
+        text not in message for message in messages for text in [*source_texts, *translations]
+    )
+
+
+@pytest.mark.asyncio
 async def test_deepl_batches_by_count_and_preserves_result_order() -> None:
     requests: list[httpx.Request] = []
 
@@ -698,3 +930,129 @@ async def test_deeplx_translates_each_text_and_maps_auto_language() -> None:
         '{"text":"Hello","source_lang":"auto","target_lang":"ZH"}'
     )
     assert requests[0].extensions["timeout"]["read"] == 11
+
+
+@pytest.mark.asyncio
+async def test_deeplx_logs_each_nonempty_text_without_url_secrets_or_content(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    source_texts = ["private deeplx source", "", "second private source"]
+    target_text = "private deeplx target"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": target_text}, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        translator = DeepLXClient(
+            client,
+            "https://url-user:url-password@service.example/translate?token=private-query-token",
+        )
+        with caplog.at_level(logging.INFO, logger="comiclens.events"):
+            result = await translator.translate_many(source_texts, "AUTO")
+
+    assert result == [target_text, "", target_text]
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("deeplx ")
+    ]
+    requests = [message for message in messages if "event=request" in message]
+    responses = [message for message in messages if "event=response" in message]
+    completed = [message for message in messages if "event=completed" in message]
+    assert len(requests) == 2
+    assert len(responses) == 2
+    assert len(completed) == 2
+    assert all(
+        message.startswith("deeplx event=request operation=translate_text") for message in requests
+    )
+    assert all("endpoint=https://service.example/translate" in message for message in requests)
+    assert sorted(
+        int(message.split("source_chars=", 1)[1].split(" ", 1)[0]) for message in requests
+    ) == sorted(len(text) for text in source_texts if text)
+    assert all("payload_bytes=" in message for message in requests)
+    assert all("source_lang=auto" in message for message in requests)
+    assert all("target_lang=ZH" in message for message in requests)
+    assert all("success_count=1" in message for message in completed)
+    assert all(
+        secret not in message
+        for message in messages
+        for secret in [
+            *source_texts,
+            target_text,
+            "url-user",
+            "url-password",
+            "private-query-token",
+        ]
+        if secret
+    )
+
+
+@pytest.mark.asyncio
+async def test_translation_failure_logs_retry_and_redacted_json_details(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    api_key = "private-translation-key-canary"
+    source_text = "private translation source canary"
+
+    def deepl_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            503,
+            json={
+                "code": "TEMPORARY_UNAVAILABLE",
+                "authorizationKey": api_key,
+                "text": source_text,
+            },
+            request=request,
+        )
+
+    def deeplx_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "code": "INVALID_REQUEST",
+                "text": source_text,
+                "message": (
+                    "see https://url-user:url-password@service.example/error"
+                    "?token=private-query-token"
+                ),
+            },
+            request=request,
+        )
+
+    monkeypatch.setattr("app.translation.translator.asyncio.sleep", AsyncMock())
+    with caplog.at_level(logging.DEBUG, logger="comiclens.events"):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(deepl_handler)) as deepl_client:
+            with pytest.raises(httpx.HTTPStatusError):
+                await DeepLClient(deepl_client, api_key).translate_many([source_text])
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(deeplx_handler)
+        ) as deeplx_client:
+            with pytest.raises(httpx.HTTPStatusError):
+                await DeepLXClient(
+                    deeplx_client,
+                    "https://service.example/translate",
+                ).translate_many([source_text])
+
+    records = [
+        record for record in caplog.records if record.getMessage().startswith(("deepl ", "deeplx "))
+    ]
+    messages = [record.getMessage() for record in records]
+    deepl_messages = [message for message in messages if message.startswith("deepl ")]
+    deeplx_messages = [message for message in messages if message.startswith("deeplx ")]
+    assert sum("event=request" in message for message in deepl_messages) == 3
+    assert sum("event=response" in message for message in deepl_messages) == 3
+    assert sum("event=retry" in message for message in deepl_messages) == 2
+    assert sum("event=failed" in message for message in deepl_messages) == 1
+    assert sum("event=error_detail" in message for message in deepl_messages) == 3
+    assert sum("event=request" in message for message in deeplx_messages) == 1
+    assert sum("event=response" in message for message in deeplx_messages) == 1
+    assert sum("event=failed" in message for message in deeplx_messages) == 1
+    assert sum("event=error_detail" in message for message in deeplx_messages) == 1
+    assert any("TEMPORARY_UNAVAILABLE" in message for message in deepl_messages)
+    assert any("INVALID_REQUEST" in message for message in deeplx_messages)
+    assert all(api_key not in message for message in messages)
+    assert all(source_text not in message for message in messages)
+    assert all("url-user" not in message for message in messages)
+    assert all("url-password" not in message for message in messages)
+    assert all("private-query-token" not in message for message in messages)

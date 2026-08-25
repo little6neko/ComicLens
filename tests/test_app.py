@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.config import AppConfig
 from app.main import create_app
+from app.observability import LOG_FORMAT
 
 
 def test_health_endpoint(client: TestClient) -> None:
@@ -23,6 +24,10 @@ def test_health_endpoint(client: TestClient) -> None:
 def test_http_client_request_urls_are_not_logged_at_info() -> None:
     assert logging.getLogger("httpx").getEffectiveLevel() >= logging.WARNING
     assert logging.getLogger("httpcore").getEffectiveLevel() >= logging.WARNING
+
+
+def test_application_log_format_omits_timestamp_and_logger_name() -> None:
+    assert LOG_FORMAT == "%(levelname)s %(message)s"
 
 
 def test_lifespan_creates_data_directories(client: TestClient, app_config: AppConfig) -> None:

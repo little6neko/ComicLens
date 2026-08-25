@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import math
 import re
 import time
@@ -12,6 +13,14 @@ from urllib.parse import urlparse
 
 import httpx
 
+from app.observability import (
+    EVENT_LOGGER,
+    log_event,
+    new_request_ref,
+    safe_endpoint,
+    safe_error_excerpt,
+    short_ref,
+)
 from app.translation.concurrency import DynamicConcurrencyLimiter
 from app.translation.models import TextBlock
 
@@ -130,8 +139,9 @@ class OCRClient:
     async def _analyze_image_direct(self, image_bytes: bytes) -> dict[str, Any]:
         headers, auth = self._build_request_auth()
         headers["Content-Type"] = "application/json"
+        encoded_image = base64.b64encode(image_bytes).decode("ascii")
         payload = {
-            "file": base64.b64encode(image_bytes).decode("ascii"),
+            "file": encoded_image,
             "fileType": 1,
             "useDocOrientationClassify": False,
             "useDocUnwarping": False,
@@ -144,10 +154,27 @@ class OCRClient:
             headers=headers,
             auth=auth,
             json=payload,
+            operation="analyze",
+            request_fields={
+                "image_bytes": len(image_bytes),
+                "payload_bytes": self._json_bytes(payload),
+            },
         )
-        response_payload = self._response_object(response, "OCR 同步响应")
+        response_payload = self._response_object_logged(
+            response,
+            "OCR 同步响应",
+            operation="analyze",
+        )
         if "result" not in response_payload:
+            self._log_protocol_failure(response, operation="analyze")
             raise OCRProtocolError("OCR 同步响应缺少 result")
+        log_event(
+            "ocr",
+            "completed",
+            operation="analyze",
+            protocol=self.protocol,
+            layout_results=self._layout_result_count(response_payload),
+        )
         return response_payload
 
     async def _analyze_image_by_job(
@@ -164,9 +191,10 @@ class OCRClient:
         }
         headers, auth = self._build_request_auth()
         if not job_id:
+            optional_payload_json = json.dumps(optional_payload, ensure_ascii=False)
             data = {
                 "model": self.job_model,
-                "optionalPayload": json.dumps(optional_payload, ensure_ascii=False),
+                "optionalPayload": optional_payload_json,
             }
             files = {"file": ("image.png", image_bytes, "image/png")}
             submit_response = await self._request(
@@ -176,55 +204,181 @@ class OCRClient:
                 auth=auth,
                 data=data,
                 files=files,
+                operation="submit",
+                request_fields={
+                    "model": self.job_model,
+                    "image_bytes": len(image_bytes),
+                    "payload_bytes": (
+                        len(self.job_model.encode("utf-8"))
+                        + len(optional_payload_json.encode("utf-8"))
+                        + len(image_bytes)
+                    ),
+                },
             )
-            submit_payload = self._response_object(submit_response, "OCR 异步任务提交响应")
+            submit_payload = self._response_object_logged(
+                submit_response,
+                "OCR 异步任务提交响应",
+                operation="submit",
+            )
             submit_data = submit_payload.get("data")
             candidate = submit_data.get("jobId") if isinstance(submit_data, dict) else None
             job_id = str(candidate) if candidate else None
             if not job_id:
+                self._log_protocol_failure(submit_response, operation="submit")
                 raise OCRProtocolError("OCR 异步任务提交响应缺少 jobId")
+            log_event(
+                "ocr",
+                "job_submitted",
+                operation="submit",
+                protocol=self.protocol,
+                model=self.job_model,
+                job_ref=short_ref(job_id),
+            )
             if on_job_submitted is not None:
                 on_job_submitted(job_id)
 
         deadline = time.monotonic() + self.job_timeout
         result_url: str | None = None
         job_url = f"{self.api_url}/{job_id}"
+        job_ref = short_ref(job_id)
+        last_logged_state: str | None = None
+        poll_count = 0
+        last_job_response: httpx.Response | None = None
         while time.monotonic() < deadline:
+            poll_count += 1
             try:
                 job_response = await self._request(
                     "GET",
                     job_url,
                     headers=headers,
                     auth=auth,
+                    operation="poll",
+                    log_level=logging.DEBUG,
+                    endpoint_secrets=(job_id,),
+                    request_fields={
+                        "job_ref": job_ref,
+                        "poll_count": poll_count,
+                    },
                 )
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code in {404, 410}:
                     raise OCRJobNotFoundError("OCR 异步任务已失效") from exc
                 raise
-            response_payload = self._response_object(job_response, "OCR 异步任务状态响应")
+            last_job_response = job_response
+            response_payload = self._response_object_logged(
+                job_response,
+                "OCR 异步任务状态响应",
+                operation="poll",
+                job_ref=job_ref,
+            )
             payload = response_payload.get("data")
             if not isinstance(payload, dict):
+                self._log_protocol_failure(
+                    job_response,
+                    operation="poll",
+                    job_ref=job_ref,
+                )
                 raise OCRProtocolError("OCR 异步任务状态响应缺少 data")
             state = str(payload.get("state") or "").lower()
+            logged_state = state if state in {"pending", "running", "done", "failed"} else "invalid"
+            if logged_state != last_logged_state:
+                log_event(
+                    "ocr",
+                    "state",
+                    operation="poll",
+                    protocol=self.protocol,
+                    job_ref=job_ref,
+                    state=logged_state,
+                    poll_count=poll_count,
+                )
+                last_logged_state = logged_state
             if state == "done":
                 result_urls = payload.get("resultUrl", {})
                 if isinstance(result_urls, dict):
                     candidate = result_urls.get("jsonUrl")
                     result_url = str(candidate) if candidate else None
                 if not result_url:
+                    self._log_protocol_failure(
+                        job_response,
+                        operation="poll",
+                        job_ref=job_ref,
+                    )
                     raise OCRProtocolError("OCR 异步任务结果缺少 jsonUrl")
                 break
             if state == "failed":
+                log_event(
+                    "ocr",
+                    "failed",
+                    level=logging.ERROR,
+                    operation="poll",
+                    protocol=self.protocol,
+                    job_ref=job_ref,
+                    error="OCRJobFailedError",
+                    poll_count=poll_count,
+                )
                 raise OCRJobFailedError(str(payload.get("errorMsg") or "OCR 异步任务失败"))
             if state not in {"pending", "running"}:
+                self._log_protocol_failure(
+                    job_response,
+                    operation="poll",
+                    job_ref=job_ref,
+                )
                 raise OCRProtocolError(f"OCR 异步任务状态无效: {state or 'missing'}")
             await asyncio.sleep(self.job_poll_interval)
 
         if not result_url:
+            log_event(
+                "ocr",
+                "failed",
+                level=logging.ERROR,
+                operation="poll",
+                protocol=self.protocol,
+                job_ref=job_ref,
+                error="TimeoutError",
+                poll_count=poll_count,
+            )
             raise TimeoutError("OCR 异步任务超时")
-        self._validate_result_url(result_url)
+        try:
+            self._validate_result_url(result_url)
+        except OCRProtocolError:
+            if last_job_response is not None:
+                self._log_protocol_failure(
+                    last_job_response,
+                    operation="poll",
+                    job_ref=job_ref,
+                )
+            raise
         result_auth = auth if self._should_send_basic_auth(result_url) else None
-        result_response = await self._request("GET", result_url, auth=result_auth)
+        result_response = await self._request(
+            "GET",
+            result_url,
+            auth=result_auth,
+            operation="download_result",
+            endpoint_origin_only=True,
+            auth_label="basic" if result_auth is not None else "none",
+            request_fields={"job_ref": job_ref},
+        )
+        try:
+            result = self._parse_job_result(result_response)
+        except OCRProtocolError:
+            self._log_protocol_failure(
+                result_response,
+                operation="download_result",
+                job_ref=job_ref,
+            )
+            raise
+        log_event(
+            "ocr",
+            "completed",
+            operation="download_result",
+            protocol=self.protocol,
+            job_ref=job_ref,
+            layout_results=self._layout_result_count(result),
+        )
+        return result
+
+    @staticmethod
+    def _parse_job_result(result_response: httpx.Response) -> dict[str, Any]:
         entries: list[dict[str, Any]] = []
         for line_number, line in enumerate(result_response.text.splitlines(), start=1):
             if not line.strip():
@@ -293,6 +447,73 @@ class OCRClient:
             raise OCRProtocolError(f"{context}不是对象")
         return payload
 
+    def _response_object_logged(
+        self,
+        response: httpx.Response,
+        context: str,
+        *,
+        operation: str,
+        job_ref: str | None = None,
+        sensitive_texts: Iterable[str] = (),
+    ) -> dict[str, Any]:
+        try:
+            return self._response_object(response, context)
+        except OCRProtocolError:
+            self._log_protocol_failure(
+                response,
+                operation=operation,
+                job_ref=job_ref,
+                sensitive_texts=sensitive_texts,
+            )
+            raise
+
+    def _log_protocol_failure(
+        self,
+        response: httpx.Response,
+        *,
+        operation: str,
+        job_ref: str | None = None,
+        sensitive_texts: Iterable[str] = (),
+    ) -> None:
+        log_event(
+            "ocr",
+            "failed",
+            level=logging.ERROR,
+            operation=operation,
+            request_ref=response.extensions.get("comiclens_request_ref"),
+            protocol=self.protocol,
+            job_ref=job_ref,
+            status=response.status_code,
+            attempt=response.extensions.get("comiclens_attempt"),
+            error="OCRProtocolError",
+        )
+        self._log_error_detail(
+            response,
+            operation=operation,
+            request_ref=response.extensions.get("comiclens_request_ref"),
+            secrets=self._redaction_secrets(),
+            sensitive_texts=sensitive_texts,
+            job_ref=job_ref,
+        )
+
+    @staticmethod
+    def _json_bytes(payload: object) -> int:
+        return len(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+
+    @staticmethod
+    def _layout_result_count(payload: dict[str, Any]) -> int:
+        root = payload.get("result")
+        if not isinstance(root, dict):
+            return 0
+        results = root.get("layoutParsingResults")
+        return len(results) if isinstance(results, list) else 0
+
     @staticmethod
     def _validate_result_url(target_url: str) -> None:
         parsed = urlparse(target_url)
@@ -303,10 +524,43 @@ class OCRClient:
         self,
         method: str,
         url: str,
+        *,
+        operation: str,
+        log_level: int = logging.INFO,
+        endpoint_origin_only: bool = False,
+        endpoint_secrets: Iterable[str] = (),
+        auth_label: str | None = None,
+        request_fields: dict[str, object] | None = None,
+        sensitive_texts: Iterable[str] = (),
         **kwargs: Any,
     ) -> httpx.Response:
+        request_ref = new_request_ref()
+        secrets = self._redaction_secrets(endpoint_secrets)
+        endpoint = safe_endpoint(
+            url,
+            secrets=secrets,
+            origin_only=endpoint_origin_only,
+        )
+        fields = {
+            "operation": operation,
+            "request_ref": request_ref,
+            "protocol": self.protocol,
+            "auth": auth_label or self.auth_mode,
+            **(request_fields or {}),
+        }
         last_error: Exception | None = None
+        total_started = time.monotonic()
         for attempt in range(3):
+            log_event(
+                "ocr",
+                "request",
+                level=log_level,
+                **fields,
+                method=method.upper(),
+                endpoint=endpoint,
+                attempt=attempt + 1,
+            )
+            attempt_started = time.monotonic()
             try:
                 response = await self.client.request(
                     method,
@@ -314,21 +568,164 @@ class OCRClient:
                     timeout=self.request_timeout,
                     **kwargs,
                 )
+                response.extensions["comiclens_request_ref"] = request_ref
+                response.extensions["comiclens_attempt"] = attempt + 1
+                duration_ms = round((time.monotonic() - attempt_started) * 1000)
+                content_type = response.headers.get("content-type", "").split(";", 1)[0]
+                log_event(
+                    "ocr",
+                    "response",
+                    level=log_level,
+                    **fields,
+                    status=response.status_code,
+                    duration_ms=duration_ms,
+                    response_bytes=len(response.content),
+                    content_type=content_type or None,
+                    endpoint=endpoint,
+                    attempt=attempt + 1,
+                )
+                if response.status_code >= 400:
+                    self._log_error_detail(
+                        response,
+                        operation=operation,
+                        request_ref=request_ref,
+                        secrets=secrets,
+                        sensitive_texts=sensitive_texts,
+                        job_ref=(request_fields or {}).get("job_ref"),
+                    )
                 if (response.status_code == 429 or response.status_code >= 500) and attempt < 2:
-                    await asyncio.sleep(0.2 * (2**attempt))
+                    delay = 0.2 * (2**attempt)
+                    log_event(
+                        "ocr",
+                        "retry",
+                        level=logging.WARNING,
+                        operation=operation,
+                        request_ref=request_ref,
+                        protocol=self.protocol,
+                        status=response.status_code,
+                        attempt=attempt + 1,
+                        next_attempt=attempt + 2,
+                        delay_ms=round(delay * 1000),
+                        job_ref=(request_fields or {}).get("job_ref"),
+                    )
+                    await asyncio.sleep(delay)
                     continue
                 response.raise_for_status()
                 return response
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
                 last_error = exc
                 if attempt < 2:
-                    await asyncio.sleep(0.2 * (2**attempt))
+                    delay = 0.2 * (2**attempt)
+                    log_event(
+                        "ocr",
+                        "retry",
+                        level=logging.WARNING,
+                        operation=operation,
+                        request_ref=request_ref,
+                        protocol=self.protocol,
+                        attempt=attempt + 1,
+                        next_attempt=attempt + 2,
+                        delay_ms=round(delay * 1000),
+                        error=type(exc).__name__,
+                        job_ref=(request_fields or {}).get("job_ref"),
+                    )
+                    await asyncio.sleep(delay)
                     continue
                 break
-            except httpx.HTTPError:
+            except httpx.HTTPError as exc:
+                self._log_request_failure(
+                    operation=operation,
+                    request_ref=request_ref,
+                    endpoint=endpoint,
+                    error=exc,
+                    attempts=attempt + 1,
+                    total_started=total_started,
+                    job_ref=(request_fields or {}).get("job_ref"),
+                )
                 raise
         assert last_error is not None
+        self._log_request_failure(
+            operation=operation,
+            request_ref=request_ref,
+            endpoint=endpoint,
+            error=last_error,
+            attempts=3,
+            total_started=total_started,
+            job_ref=(request_fields or {}).get("job_ref"),
+        )
         raise last_error
+
+    def _redaction_secrets(self, additional: Iterable[str] = ()) -> tuple[str, ...]:
+        return tuple(
+            value
+            for value in (
+                self.token,
+                self.basic_username,
+                self.basic_password,
+                *additional,
+            )
+            if value
+        )
+
+    def _log_error_detail(
+        self,
+        response: httpx.Response,
+        *,
+        operation: str,
+        request_ref: object,
+        secrets: Iterable[str],
+        sensitive_texts: Iterable[str] = (),
+        job_ref: object = None,
+    ) -> None:
+        if not EVENT_LOGGER.isEnabledFor(logging.DEBUG):
+            return
+        excerpt, truncated = safe_error_excerpt(
+            response.content,
+            response.headers.get("content-type", ""),
+            secrets=tuple(secrets),
+            sensitive_texts=tuple(sensitive_texts),
+        )
+        if excerpt is None:
+            return
+        log_event(
+            "ocr",
+            "error_detail",
+            level=logging.DEBUG,
+            operation=operation,
+            request_ref=request_ref,
+            protocol=self.protocol,
+            job_ref=job_ref,
+            status=response.status_code,
+            excerpt=excerpt,
+            truncated=truncated,
+        )
+
+    def _log_request_failure(
+        self,
+        *,
+        operation: str,
+        request_ref: str,
+        endpoint: str,
+        error: httpx.HTTPError,
+        attempts: int,
+        total_started: float,
+        job_ref: object = None,
+    ) -> None:
+        status = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
+        log_event(
+            "ocr",
+            "failed",
+            level=logging.ERROR,
+            operation=operation,
+            request_ref=request_ref,
+            protocol=self.protocol,
+            job_ref=job_ref,
+            endpoint=endpoint,
+            status=status,
+            attempts=attempts,
+            duration_ms=round((time.monotonic() - total_started) * 1000),
+            error=type(error).__name__,
+        )
 
 
 def extract_text_blocks(

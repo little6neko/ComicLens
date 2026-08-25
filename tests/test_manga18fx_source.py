@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -106,6 +107,76 @@ async def test_search_uses_query_pagination_and_parses_list() -> None:
     assert result.items[0].is_adult is True
     assert result.items[1].rating is None
     assert result.items[0].latest_chapters[1].updated_label is None
+
+
+@pytest.mark.asyncio
+async def test_manga_request_logs_safe_request_and_response_summaries(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    query = "private search canary"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return html_response(request, "list.html")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = Manga18fxSource(base_url="https://manga18fx.com", client=client)
+        with caplog.at_level(logging.INFO, logger="comiclens.events"):
+            await source.search(query, 2)
+
+    messages = [record.getMessage() for record in caplog.records]
+    request = next(message for message in messages if "event=request" in message)
+    response = next(message for message in messages if "event=response" in message)
+    assert request.startswith("manga event=request operation=search")
+    assert "method=GET" in request
+    assert "endpoint=https://manga18fx.com/search" in request
+    assert "route=environment_or_direct" in request
+    assert "attempt=1" in request
+    assert query not in request
+    assert "?" not in request
+    assert response.startswith("manga event=response operation=search")
+    assert "status=200" in response
+    assert "duration_ms=" in response
+    assert "response_bytes=" in response
+    assert "content_type=text/html" in response
+    assert query not in response
+
+
+@pytest.mark.asyncio
+async def test_manga_debug_json_failure_excerpt_redacts_query_and_url_credentials(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    query = "private manga query canary"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "code": "INVALID_SEARCH",
+                "message": (
+                    f"bad query {query} at "
+                    "https://url-user:url-password@manga18fx.com/search?token=private-token"
+                ),
+            },
+            request=request,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = Manga18fxSource(base_url="https://manga18fx.com", client=client)
+        with (
+            caplog.at_level(logging.DEBUG, logger="comiclens.events"),
+            pytest.raises(AppError),
+        ):
+            await source.search(query, 1)
+
+    messages = [record.getMessage() for record in caplog.records]
+    detail = next(message for message in messages if "event=error_detail" in message)
+    assert detail.startswith("manga event=error_detail operation=search")
+    assert "INVALID_SEARCH" in detail
+    assert "<redacted>" in detail
+    assert query not in detail
+    assert "url-user" not in detail
+    assert "url-password" not in detail
+    assert "private-token" not in detail
 
 
 @pytest.mark.asyncio
@@ -374,6 +445,7 @@ async def test_unknown_category_and_external_media_are_rejected_without_request(
 @pytest.mark.asyncio
 async def test_configured_proxy_is_the_only_route_for_html_and_media(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     direct_requests = 0
     proxy_requests: list[str] = []
@@ -407,10 +479,11 @@ async def test_configured_proxy_is_the_only_route_for_html_and_media(
             return httpx.AsyncClient(transport=httpx.MockTransport(proxy_handler))
 
         monkeypatch.setattr(source, "_proxy_client", proxy_factory)
-        home = await source.home()
-        media, content_type = await source.fetch_media(
-            "https://img01.manga18fx.com/online/1/12/1.jpg"
-        )
+        with caplog.at_level(logging.INFO, logger="comiclens.events"):
+            home = await source.home()
+            media, content_type = await source.fetch_media(
+                "https://img01.manga18fx.com/online/1/12/1.jpg"
+            )
 
     assert home.latest.items
     assert media == b"proxy-image"
@@ -424,11 +497,26 @@ async def test_configured_proxy_is_the_only_route_for_html_and_media(
         "http://user:secret@proxy.example:8080",
         "http://user:secret@proxy.example:8080",
     ]
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        message.startswith("manga event=request operation=home")
+        and "route=configured_proxy" in message
+        for message in messages
+    )
+    assert any(
+        message.startswith("manga event=request operation=fetch_media")
+        and "route=configured_proxy" in message
+        for message in messages
+    )
+    assert all("user" not in message for message in messages)
+    assert all("secret" not in message for message in messages)
+    assert all("proxy.example" not in message for message in messages)
 
 
 @pytest.mark.asyncio
 async def test_configured_proxy_failure_retries_only_the_proxy_route(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     direct_requests = 0
     proxy_requests = 0
@@ -456,7 +544,10 @@ async def test_configured_proxy_failure_retries_only_the_proxy_route(
             lambda _proxy_url: httpx.AsyncClient(transport=httpx.MockTransport(proxy_handler)),
         )
 
-        with pytest.raises(AppError) as captured:
+        with (
+            caplog.at_level(logging.INFO, logger="comiclens.events"),
+            pytest.raises(AppError) as captured,
+        ):
             await source.home()
 
     assert direct_requests == 0
@@ -465,6 +556,26 @@ async def test_configured_proxy_failure_retries_only_the_proxy_route(
     assert "user" not in captured.value.message
     assert "secret" not in captured.value.message
     assert "proxy.example" not in captured.value.message
+    messages = [record.getMessage() for record in caplog.records]
+    requests = [message for message in messages if "event=request" in message]
+    retries = [message for message in messages if "event=retry" in message]
+    failures = [message for message in messages if "event=failed" in message]
+    assert len(requests) == 3
+    assert len(retries) == 2
+    assert len(failures) == 1
+    assert "attempt=1" in retries[0]
+    assert "next_attempt=2" in retries[0]
+    assert "delay_ms=200" in retries[0]
+    assert "error=ConnectTimeout" in retries[0]
+    assert "attempt=2" in retries[1]
+    assert "next_attempt=3" in retries[1]
+    assert "delay_ms=400" in retries[1]
+    assert "error=ConnectTimeout" in retries[1]
+    assert failures[0].startswith("manga event=failed operation=home")
+    assert "error=ConnectTimeout" in failures[0]
+    assert all("user" not in message for message in messages)
+    assert all("secret" not in message for message in messages)
+    assert all("proxy.example" not in message for message in messages)
 
 
 @pytest.mark.asyncio

@@ -13,6 +13,7 @@ from app.cache.storage import MediaCache
 from app.config import AppConfig
 from app.errors import install_error_handlers
 from app.media.registry import SourceMediaRegistry
+from app.observability import LOG_FORMAT
 from app.repositories.database import Database
 from app.repositories.library import LibraryRepository
 from app.repositories.translation import TranslationRepository
@@ -143,7 +144,7 @@ def create_app(
     return app
 
 
-logging.basicConfig(level=AppConfig.from_env().log_level)
+logging.basicConfig(level=AppConfig.from_env().log_level, format=LOG_FORMAT)
 # HTTPX's INFO message includes the complete request URL. OCR, translation and
 # proxy endpoints may contain credentials, so never emit those URLs at INFO.
 logging.getLogger("httpx").setLevel(logging.WARNING)
