@@ -797,7 +797,7 @@ def test_pause_wins_race_with_preparation_and_running_transitions(tmp_path: Path
 async def test_pause_finishes_current_segment_then_resumes_next(
     tmp_path: Path,
 ) -> None:
-    harness = create_harness(tmp_path)
+    harness = create_harness(tmp_path, translation_settings={"ocr_concurrency": 1})
     harness.pipeline.block_first_ocr = True
     try:
         started = await harness.manager.start("alpha", "chapter-1")
@@ -909,6 +909,7 @@ async def test_streaming_segment_denominator_grows_from_five_to_ten(
         page_count=2,
         image_size=(120, 8000),
         translation_settings={
+            "ocr_concurrency": 1,
             "long_image_threshold": 1000,
             "ocr_slice_height": 1800,
             "ocr_slice_overlap": 200,
@@ -963,7 +964,11 @@ async def test_streaming_segment_denominator_grows_from_five_to_ten(
 async def test_force_stop_cancels_current_segment_immediately_and_can_resume(
     tmp_path: Path,
 ) -> None:
-    harness = create_harness(tmp_path, page_count=2)
+    harness = create_harness(
+        tmp_path,
+        page_count=2,
+        translation_settings={"ocr_concurrency": 1},
+    )
     harness.pipeline.block_first_ocr = True
     try:
         started = await harness.manager.start("alpha", "chapter-1")
