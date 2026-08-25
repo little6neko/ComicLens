@@ -21,6 +21,7 @@ import { api } from "@/lib/api-client";
 import { formatReaderChapterTitle } from "@/lib/chapter-title";
 import { queryKeys, queryTimes } from "@/lib/query-keys";
 import { useReadingMode } from "@/lib/reading-mode-preference";
+import { getRealtimeTranslationDefault } from "@/lib/realtime-translation-preference";
 import { positivePage } from "@/lib/route-search";
 import { cn } from "@/lib/utils";
 
@@ -191,17 +192,10 @@ function ReaderPageView() {
     setCurrentPageIndex(requestedPage - 1);
     setDirectionOverride(null);
     setActionError(null);
-    const enabled = settings.data?.realtimeTranslationDefault ?? false;
+    const enabled = getRealtimeTranslationDefault();
     setTranslationEnabled(enabled);
     if (enabled) startTranslation.mutate();
-  }, [
-    chapterKey,
-    manifest.isSuccess,
-    requestedPage,
-    settings.data?.realtimeTranslationDefault,
-    settings.isError,
-    settings.isSuccess,
-  ]);
+  }, [chapterKey, manifest.isSuccess, requestedPage, settings.isError, settings.isSuccess]);
 
   useEffect(() => {
     if (!totalPages || currentPageIndex === clampedCurrent) return;

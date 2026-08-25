@@ -135,7 +135,6 @@ export interface SensitiveSettingState {
 
 export interface ServerSettings {
   pageDirection: "ltr" | "rtl";
-  realtimeTranslationDefault: boolean;
   sourceLanguage: "AUTO" | "EN" | "KO";
   targetLanguage: "ZH-HANS";
   ocrMode: "auto" | "direct" | "job";

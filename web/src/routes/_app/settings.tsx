@@ -37,6 +37,7 @@ import { BackgroundTranslationTasks } from "@/features/settings/background-trans
 import { api } from "@/lib/api-client";
 import { queryKeys } from "@/lib/query-keys";
 import { useReadingMode } from "@/lib/reading-mode-preference";
+import { useRealtimeTranslationDefault } from "@/lib/realtime-translation-preference";
 import { cn } from "@/lib/utils";
 import { APP_VERSION } from "@/lib/version";
 
@@ -81,6 +82,8 @@ function SettingsPage() {
   const queryClient = useQueryClient();
   const { theme, setTheme } = useTheme();
   const [readingMode, setReadingMode] = useReadingMode();
+  const [realtimeTranslationDefault, setRealtimeTranslationDefault] =
+    useRealtimeTranslationDefault();
   const settings = useQuery({ queryKey: queryKeys.settings, queryFn: api.settings });
   const cache = useQuery({ queryKey: queryKeys.cache, queryFn: api.cacheStats });
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -151,7 +154,7 @@ function SettingsPage() {
         </div>
         <h1 className="text-4xl font-bold tracking-tight">设置</h1>
         <p className="mt-2 text-muted-foreground">
-          主题和阅读模式保存在浏览器，其余设置保存在服务器。
+          主题、阅读模式和默认实时翻译保存在浏览器，其余设置保存在服务器。
         </p>
       </header>
 
@@ -223,9 +226,9 @@ function SettingsPage() {
           )}
           <ToggleField
             label="进入章节时默认实时翻译"
-            description="阅读器内的开关只覆盖当次会话。"
-            checked={draft.realtimeTranslationDefault}
-            onCheckedChange={(value) => patch("realtimeTranslationDefault", value)}
+            description="保存在当前浏览器并立即生效，只影响之后进入的章节；阅读器内的开关只控制当前章节。"
+            checked={realtimeTranslationDefault}
+            onCheckedChange={setRealtimeTranslationDefault}
           />
         </SettingsSection>
 
