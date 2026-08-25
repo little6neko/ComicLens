@@ -13,7 +13,8 @@ ComicTranslator 的长图切片、OCR、翻译与译文覆写管线集成到阅�
 - 关闭实时翻译后立即显示原图，后端完成当前分片后暂停。
 - 支持重新翻译本话，以及 OCR/翻译/渲染失败后的单分片重试。
 - 原图、OCR 结果和译图无时间 TTL，在默认 5 GB 上限内长期保留并按 LRU 淘汰。
-- PaddleOCR、DeepL/DeepLX、代理、长图参数和阅读默认值均可在 Web 设置页维护。
+- PaddleOCR 同步/异步协议与鉴权、DeepL/DeepLX、代理、长图参数和阅读默认值均可在 Web
+  设置页维护。
 - 可选环境变量密码；不填写时不启用登录界面。
 
 ## Docker 镜像（推荐）
@@ -158,26 +159,38 @@ docker start comiclens
 进入“设置 → OCR 与翻译”配置：
 
 1. 源语言：自动识别（默认）、英语或韩语；目标固定为简体中文；
-2. PaddleOCR 异步任务 URL、Bearer Token、模型、轮询与超时；
-3. 翻译服务：默认使用 DeepL 官方 API，也可切换为 DeepLX；
-4. DeepL API Key 或 DeepLX URL，以及共用的翻译超时与并发；
-5. 可选回退代理和长图切片参数。
+2. OCR 模式：自动识别（默认）、同步接口或异步任务接口；
+3. OCR API URL，以及无鉴权（默认）、Bearer Token 或 Basic Auth；
+4. OCR 模型、轮询间隔、总超时和全服务并发；
+5. 翻译服务：默认使用 DeepL 官方 API，也可切换为 DeepLX；
+6. DeepL API Key 或 DeepLX URL，以及共用的翻译超时与并发；
+7. 可选回退代理和长图切片参数。
 
-PaddleOCR 只使用异步任务接口，默认 URL 为
-`https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`，默认模型为
-`PaddleOCR-VL-1.6`。DeepL Key 以 `:fx` 结尾时自动使用 Free API，否则使用 Pro API；
-DeepL 与 DeepLX 之间不会在失败时自动回退。
+PaddleOCR 同时支持 PaddleX 服务化部署的同步 JSON 接口和云端异步任务接口。新安装的 OCR
+URL 是示例值 `http://example.com/layout-parsing`，必须替换为自己的服务地址。自动模式将
+包含 `/api/v2/ocr/jobs` 或路径以 `/ocr/jobs` 结尾的地址识别为异步任务，其余所有地址均按
+同步接口正常尝试；不会针对 `/v1` 增加专用协议。默认模型为 `PaddleOCR-VL-1.6`，模型和
+轮询设置只由异步任务协议使用。
+
+同步请求、异步任务提交和轮询使用当前选择的鉴权。异步结果地址仅在与 OCR API 的协议、
+主机和有效端口均相同时携带 Basic Auth；跨源结果不携带 Basic，Bearer Token 不发送给
+任何结果下载地址。切换鉴权模式不会清除已保存的另一套凭据。
+
+DeepL Key 以 `:fx` 结尾时自动使用 Free API，否则使用 Pro API；DeepL 与 DeepLX 之间不会
+在失败时自动回退。
 
 新翻译任务默认按 `1600px` 高度切片并保留 `200px` 重叠上下文，OCR 请求不发送
 `useOcrForImageBlock`，避免图片区域被误渲染为大文本框。任务获取第一张源图并切片后会立即
 开始 OCR、翻译和显示，同时继续准备后续源图；顶部进度分母会随新分片动态增加。分片调度
 会按设置并发预取 OCR，默认值为 `1`，该上限由所有章节共享并在保存设置后立即生效；翻译、
 渲染和发布仍按分片顺序串行。翻译并发只用于当前分片内部的文本批次，不会让后续分片乱序
-显示。PaddleOCR `jobId` 会持久化，超时、重试或服务重启后优先继续轮询远端任务。
+显示。异步模式下 PaddleOCR `jobId` 会持久化，超时或服务重启后优先继续轮询远端任务；
+OCR 失败后的手动重试会创建新任务。同步模式不保存 `jobId`，重试时重新发送完整请求。
 
 敏感字段只返回掩码，编辑时明确选择“保留 / 替换 / 清除”。`.env.example` 中的
 `COMICLENS_OCR_*`、`COMICLENS_DEEPL_API_KEY`、`COMICLENS_DEEPLX_URL` 和
 `COMICLENS_PROXY_URL` 只用于首次初始化尚不存在的服务器设置，之后以数据库中的值为准。
+Basic 用户名和密码环境变量不会自动切换鉴权模式，仍需在 Web 设置页选择 Basic Auth。
 
 ## 本地开发
 
