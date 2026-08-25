@@ -537,10 +537,33 @@ class TranslationRepository:
             LEFT JOIN reading_history history
               ON history.comic_id = generations.comic_id
             WHERE generations.status IN (
-                'preparing', 'queued', 'running', 'stopping_after_page',
-                'stopping_after_segment'
-            )
-            ORDER BY generations.created_at ASC, generations.rowid ASC
+                    'preparing', 'queued', 'running', 'stopping_after_page',
+                    'stopping_after_segment'
+                )
+               OR (
+                    generations.status IN ('completed_with_errors', 'failed')
+                    AND generations.rowid = (
+                        SELECT latest.rowid FROM translation_generations latest
+                        WHERE latest.comic_id = generations.comic_id
+                          AND latest.chapter_id = generations.chapter_id
+                        ORDER BY latest.created_at DESC, latest.rowid DESC LIMIT 1
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1 FROM translation_generations active
+                        WHERE active.comic_id = generations.comic_id
+                          AND active.chapter_id = generations.chapter_id
+                          AND active.status IN (
+                              'preparing', 'queued', 'running',
+                              'stopping_after_page', 'stopping_after_segment'
+                          )
+                    )
+                )
+            ORDER BY
+                CASE WHEN generations.status IN (
+                    'preparing', 'queued', 'running', 'stopping_after_page',
+                    'stopping_after_segment'
+                ) THEN 0 ELSE 1 END,
+                generations.created_at ASC, generations.rowid ASC
             """
         )
         tasks: list[BackgroundTranslationTask] = []
@@ -644,6 +667,8 @@ class TranslationRepository:
     @staticmethod
     def _background_stage(row: sqlite3.Row) -> str:
         status = str(row["status"])
+        if status in {"completed_with_errors", "failed"}:
+            return "needs_retry"
         if status in {"stopping_after_page", "stopping_after_segment"}:
             return "stopping"
         if status == "preparing":

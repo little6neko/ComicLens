@@ -46,6 +46,7 @@ BackgroundTranslationStage = Literal[
     "rendering",
     "stopping",
     "processing",
+    "needs_retry",
 ]
 
 

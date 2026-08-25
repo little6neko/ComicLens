@@ -677,6 +677,80 @@ def test_background_tasks_and_force_pause_preserve_segment_checkpoints(tmp_path:
         harness.database.close()
 
 
+def test_background_tasks_keep_only_latest_unresolved_terminal_generation(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path, page_count=1)
+    try:
+        unresolved_id = harness.repository.create_generation(
+            "alpha",
+            "chapter-1",
+            semantic_fingerprint="unresolved",
+            semantic_settings={"pipelineVersion": "full-page-v1"},
+            page_indexes=[0],
+            source_pages={0: "https://img.example/0.png"},
+            kind="normal",
+            progressive=False,
+        )
+        harness.repository.fail_page(
+            unresolved_id,
+            0,
+            stage="ocr",
+            code="OCR_TIMEOUT",
+            summary="simulated failure",
+        )
+        harness.repository.set_generation_status(unresolved_id, "completed_with_errors")
+
+        unresolved = harness.repository.background_tasks()
+
+        assert len(unresolved) == 1
+        assert unresolved[0].generation_id == unresolved_id
+        assert unresolved[0].status == "completed_with_errors"
+        assert unresolved[0].stage == "needs_retry"
+        assert unresolved[0].failed_pages == 1
+
+        active_id = harness.repository.create_generation(
+            "alpha",
+            "chapter-1",
+            semantic_fingerprint="new-active",
+            semantic_settings={"pipelineVersion": "progressive-segment-v1"},
+            page_indexes=[0],
+            source_pages={0: "https://img.example/0.png"},
+            kind="retranslate",
+            progressive=True,
+        )
+        active = harness.repository.background_tasks()
+
+        assert len(active) == 1
+        assert active[0].generation_id == active_id
+        assert active[0].status == "preparing"
+
+        harness.repository.set_generation_status(active_id, "completed")
+
+        assert harness.repository.background_tasks() == []
+
+        failed_id = harness.repository.create_generation(
+            "beta",
+            "chapter-2",
+            semantic_fingerprint="chapter-failed",
+            semantic_settings={"pipelineVersion": "progressive-segment-v1"},
+            page_indexes=[0],
+            source_pages={0: "https://img.example/1.png"},
+            kind="normal",
+            progressive=True,
+        )
+        harness.repository.set_generation_status(failed_id, "failed")
+
+        failed = harness.repository.background_tasks()
+
+        assert len(failed) == 1
+        assert failed[0].generation_id == failed_id
+        assert failed[0].status == "failed"
+        assert failed[0].stage == "needs_retry"
+    finally:
+        harness.database.close()
+
+
 def test_pause_wins_race_with_preparation_and_running_transitions(tmp_path: Path) -> None:
     harness = create_harness(tmp_path, page_count=1)
     try:
@@ -1367,6 +1441,9 @@ async def test_retry_failed_resumes_same_generation_and_is_idempotent(tmp_path: 
             lambda: harness.manager.state("alpha", "chapter-1").status
             == "completed_with_errors"
         )
+        waiting_retry = harness.manager.background_tasks()
+        assert len(waiting_retry) == 1
+        assert waiting_retry[0].stage == "needs_retry"
 
         harness.pipeline.fail_ocr_segments.clear()
         retried, retried_count = await harness.manager.retry_failed("alpha", "chapter-1")
@@ -1379,6 +1456,7 @@ async def test_retry_failed_resumes_same_generation_and_is_idempotent(tmp_path: 
         await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
         completed = harness.manager.state("alpha", "chapter-1")
         assert (completed.completed_segments, completed.failed_segments) == (2, 0)
+        assert harness.manager.background_tasks() == []
     finally:
         harness.pipeline.fail_ocr_segments.clear()
         await harness.close()
