@@ -15,6 +15,7 @@ from app.application.settings import SettingsService
 from app.cache.storage import MediaCache
 from app.config import AppConfig
 from app.domain.comic import SourceChapterManifest, SourcePage
+from app.domain.settings import SensitiveSettingPatch, ServerSettingsPatch
 from app.errors import AppError
 from app.media.registry import SourceMediaRegistry
 from app.repositories.database import Database
@@ -1857,6 +1858,63 @@ async def test_manager_selects_only_configured_semantic_translation_service(
         assert deepl_semantic["ocrProtocol"] == "direct"
         assert "ocrMode" not in deepl_semantic
         assert deepl_fingerprint != deeplx_fingerprint
+    finally:
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_manager_http_client_trusts_env_and_ignores_comic_proxy_setting(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path, page_count=1)
+    try:
+        shared_client = harness.manager._http_client
+        assert shared_client._trust_env is True
+
+        harness.manager.settings.patch(
+            ServerSettingsPatch(
+                proxy_url=SensitiveSettingPatch(
+                    action="replace",
+                    value="http://comic-only-proxy.example:8080",
+                )
+            )
+        )
+        configured_runtime = harness.manager._runtime_settings(require_services=True)
+        configured_semantic, _fingerprint = harness.manager._semantic_settings(
+            {0: "https://img.example/0.png"},
+            configured_runtime,
+        )
+        deeplx_pipeline = harness.manager._build_pipeline(
+            configured_semantic,
+            configured_runtime,
+        )
+
+        assert configured_runtime["proxy_url"] == "http://comic-only-proxy.example:8080"
+        assert "proxyUrl" not in configured_semantic
+        assert deeplx_pipeline.ocr.client is shared_client
+        assert deeplx_pipeline.translator.client is shared_client
+
+        harness.manager.settings.patch(
+            ServerSettingsPatch(proxy_url=SensitiveSettingPatch(action="clear"))
+        )
+        cleared_runtime = harness.manager._runtime_settings(require_services=True)
+        cleared_runtime.update(
+            {
+                "translation_service": "deepl",
+                "deepl_api_key": "test-key:fx",
+                "deeplx_url": "",
+            }
+        )
+        cleared_semantic, _fingerprint = harness.manager._semantic_settings(
+            {0: "https://img.example/0.png"},
+            cleared_runtime,
+        )
+        deepl_pipeline = harness.manager._build_pipeline(cleared_semantic, cleared_runtime)
+
+        assert cleared_runtime["proxy_url"] == ""
+        assert harness.manager._http_client is shared_client
+        assert deepl_pipeline.ocr.client is shared_client
+        assert deepl_pipeline.translator.client is shared_client
     finally:
         await harness.close()
 
