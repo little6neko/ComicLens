@@ -138,8 +138,12 @@ export interface ServerSettings {
   realtimeTranslationDefault: boolean;
   sourceLanguage: "AUTO" | "EN" | "KO";
   targetLanguage: "ZH-HANS";
+  ocrMode: "auto" | "direct" | "job";
+  ocrAuthMode: "none" | "bearer" | "basic";
   ocrApiUrl: SensitiveSettingState;
   ocrToken: SensitiveSettingState;
+  ocrBasicUsername: string;
+  ocrBasicPassword: SensitiveSettingState;
   ocrModel: string;
   ocrPollIntervalSeconds: number;
   ocrTimeoutSeconds: number;
@@ -331,6 +335,7 @@ export type SettingsPatch = Partial<
     | "publicListenerWarning"
     | "ocrApiUrl"
     | "ocrToken"
+    | "ocrBasicPassword"
     | "deeplApiKey"
     | "deeplxUrl"
     | "fallbackProxyUrl"
@@ -338,6 +343,7 @@ export type SettingsPatch = Partial<
 > & {
   ocrApiUrl?: SensitiveAction;
   ocrToken?: SensitiveAction;
+  ocrBasicPassword?: SensitiveAction;
   deeplApiKey?: SensitiveAction;
   deeplxUrl?: SensitiveAction;
   fallbackProxyUrl?: SensitiveAction;

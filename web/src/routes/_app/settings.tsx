@@ -45,12 +45,19 @@ type Draft = Omit<
   | "publicListenerWarning"
   | "ocrApiUrl"
   | "ocrToken"
+  | "ocrBasicPassword"
   | "deeplApiKey"
   | "deeplxUrl"
   | "fallbackProxyUrl"
 >;
 
-type SecretKey = "ocrApiUrl" | "ocrToken" | "deeplApiKey" | "deeplxUrl" | "fallbackProxyUrl";
+type SecretKey =
+  | "ocrApiUrl"
+  | "ocrToken"
+  | "ocrBasicPassword"
+  | "deeplApiKey"
+  | "deeplxUrl"
+  | "fallbackProxyUrl";
 
 interface SecretDraft {
   action: "keep" | "replace" | "clear";
@@ -60,6 +67,7 @@ interface SecretDraft {
 const secretKeys: SecretKey[] = [
   "ocrApiUrl",
   "ocrToken",
+  "ocrBasicPassword",
   "deeplApiKey",
   "deeplxUrl",
   "fallbackProxyUrl",
@@ -232,20 +240,69 @@ function SettingsPage() {
               ]}
             />
           </Field>
+          <Field
+            label="OCR 模式"
+            hint="自动模式仅将已知 /api/v2/ocr/jobs 或以 /ocr/jobs 结尾的地址识别为异步任务，其余地址按同步接口调用。"
+          >
+            <Select
+              value={draft.ocrMode}
+              onValueChange={(value) => patch("ocrMode", value as Draft["ocrMode"])}
+              ariaLabel="OCR 模式"
+              options={[
+                ["auto", "自动识别同步/异步（默认）"],
+                ["direct", "同步接口"],
+                ["job", "异步任务接口"],
+              ]}
+            />
+          </Field>
+          <Field label="OCR 鉴权">
+            <Select
+              value={draft.ocrAuthMode}
+              onValueChange={(value) => patch("ocrAuthMode", value as Draft["ocrAuthMode"])}
+              ariaLabel="OCR 鉴权"
+              options={[
+                ["none", "无鉴权（默认）"],
+                ["bearer", "Bearer Token"],
+                ["basic", "Basic Auth"],
+              ]}
+            />
+          </Field>
           <SecretField
-            label="OCR 异步任务 URL"
+            label="OCR API URL"
             state={settings.data.ocrApiUrl}
             draft={secrets.ocrApiUrl}
             onChange={(value) => setSecret(setSecrets, "ocrApiUrl", value)}
-            placeholder="https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
+            placeholder="http://example.com/layout-parsing"
           />
-          <SecretField
-            label="OCR Token"
-            state={settings.data.ocrToken}
-            draft={secrets.ocrToken}
-            onChange={(value) => setSecret(setSecrets, "ocrToken", value)}
-            type="password"
-          />
+          {draft.ocrAuthMode === "bearer" && (
+            <SecretField
+              label="OCR Token"
+              state={settings.data.ocrToken}
+              draft={secrets.ocrToken}
+              onChange={(value) => setSecret(setSecrets, "ocrToken", value)}
+              type="password"
+            />
+          )}
+          {draft.ocrAuthMode === "basic" && (
+            <>
+              <Field label="Basic 用户名">
+                <Input
+                  value={draft.ocrBasicUsername}
+                  onChange={(event) => patch("ocrBasicUsername", event.target.value)}
+                  maxLength={200}
+                  required
+                  autoComplete="username"
+                />
+              </Field>
+              <SecretField
+                label="Basic 密码"
+                state={settings.data.ocrBasicPassword}
+                draft={secrets.ocrBasicPassword}
+                onChange={(value) => setSecret(setSecrets, "ocrBasicPassword", value)}
+                type="password"
+              />
+            </>
+          )}
           <Field label="OCR 模型">
             <Input
               value={draft.ocrModel}
@@ -272,7 +329,7 @@ function SettingsPage() {
           />
           <NumberField
             label="OCR 并发"
-            hint="全服务最多同时运行的 OCR 云端任务数，保存后立即生效。"
+            hint="全服务最多同时运行的 OCR 请求生命周期数，保存后立即生效。"
             value={draft.ocrConcurrency}
             min={1}
             max={16}
@@ -613,6 +670,7 @@ function toDraft(settings: ServerSettings): Draft {
     publicListenerWarning: _publicListenerWarning,
     ocrApiUrl: _ocrApiUrl,
     ocrToken: _ocrToken,
+    ocrBasicPassword: _ocrBasicPassword,
     deeplApiKey: _deeplApiKey,
     deeplxUrl: _deeplxUrl,
     fallbackProxyUrl: _fallbackProxyUrl,
