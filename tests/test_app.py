@@ -70,6 +70,15 @@ def test_config_seeds_deepl_key_and_basic_auth_env(
     assert config.initial_settings["ocr_basic_password"] == "seed-password"
 
 
+def test_config_seeds_comic_proxy_from_existing_env_name(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("COMICLENS_PROXY_URL", "http://comic-proxy.example:8080")
+
+    config = AppConfig.from_env(data_dir=tmp_path / "data", static_dir=tmp_path / "web")
+
+    assert config.initial_settings["proxy_url"] == "http://comic-proxy.example:8080"
+    assert "fallback_proxy_url" not in config.initial_settings
+
+
 def test_built_web_uses_spa_fallback_without_swallowing_api_errors(
     app_config: AppConfig,
 ) -> None:

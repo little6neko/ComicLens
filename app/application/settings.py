@@ -19,7 +19,7 @@ from app.security.secrets import SecretCipher
 DEFAULT_OCR_API_URL = "http://example.com/layout-parsing"
 DEFAULT_OCR_MODEL = "PaddleOCR-VL-1.6"
 SETTINGS_SCHEMA_KEY = "settings_schema_version"
-SETTINGS_SCHEMA_VERSION = 4
+SETTINGS_SCHEMA_VERSION = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,7 +47,7 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
     "deeplx_url": SettingDefinition("", True),
     "translation_timeout_seconds": SettingDefinition(30.0),
     "translation_concurrency": SettingDefinition(2),
-    "fallback_proxy_url": SettingDefinition("", True),
+    "proxy_url": SettingDefinition("", True),
     "long_image_threshold": SettingDefinition(8000),
     "ocr_slice_height": SettingDefinition(1600),
     "ocr_slice_overlap": SettingDefinition(200),

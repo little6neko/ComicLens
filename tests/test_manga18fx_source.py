@@ -329,40 +329,170 @@ async def test_unknown_category_and_external_media_are_rejected_without_request(
 
 
 @pytest.mark.asyncio
-async def test_retryable_direct_failure_uses_configured_fallback_proxy(
+async def test_configured_proxy_is_the_only_route_for_html_and_media(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     direct_requests = 0
-    proxy_requests = 0
+    proxy_requests: list[str] = []
     proxy_urls: list[str] = []
 
     def direct_handler(request: httpx.Request) -> httpx.Response:
         nonlocal direct_requests
         direct_requests += 1
-        raise httpx.ConnectTimeout("direct timeout", request=request)
+        raise AssertionError(f"persistent client must not be used: {request.url}")
 
     def proxy_handler(request: httpx.Request) -> httpx.Response:
-        nonlocal proxy_requests
-        proxy_requests += 1
-        return html_response(request, "home.html")
+        proxy_requests.append(str(request.url))
+        if request.url.host == "manga18fx.com":
+            return html_response(request, "home.html")
+        return httpx.Response(
+            200,
+            headers={"content-type": "image/jpeg"},
+            content=b"proxy-image",
+            request=request,
+        )
 
-    monkeypatch.setattr("app.sources.manga18fx.asyncio.sleep", AsyncMock())
     async with httpx.AsyncClient(transport=httpx.MockTransport(direct_handler)) as direct_client:
-        proxy_client = httpx.AsyncClient(transport=httpx.MockTransport(proxy_handler))
         source = Manga18fxSource(
             base_url="https://manga18fx.com",
             client=direct_client,
-            fallback_proxy_provider=lambda: "http://user:secret@proxy.example:8080",
+            proxy_provider=lambda: "http://user:secret@proxy.example:8080",
         )
 
         def proxy_factory(proxy_url: str) -> httpx.AsyncClient:
             proxy_urls.append(proxy_url)
-            return proxy_client
+            return httpx.AsyncClient(transport=httpx.MockTransport(proxy_handler))
 
+        monkeypatch.setattr(source, "_proxy_client", proxy_factory)
+        home = await source.home()
+        media, content_type = await source.fetch_media(
+            "https://img01.manga18fx.com/online/1/12/1.jpg"
+        )
+
+    assert home.latest.items
+    assert media == b"proxy-image"
+    assert content_type == "image/jpeg"
+    assert direct_requests == 0
+    assert proxy_requests == [
+        "https://manga18fx.com/",
+        "https://img01.manga18fx.com/online/1/12/1.jpg",
+    ]
+    assert proxy_urls == [
+        "http://user:secret@proxy.example:8080",
+        "http://user:secret@proxy.example:8080",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_configured_proxy_failure_retries_only_the_proxy_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    direct_requests = 0
+    proxy_requests = 0
+
+    def direct_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal direct_requests
+        direct_requests += 1
+        raise AssertionError(f"persistent client must not be used: {request.url}")
+
+    def proxy_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal proxy_requests
+        proxy_requests += 1
+        raise httpx.ConnectTimeout("proxy timeout", request=request)
+
+    monkeypatch.setattr("app.sources.manga18fx.asyncio.sleep", AsyncMock())
+    async with httpx.AsyncClient(transport=httpx.MockTransport(direct_handler)) as direct_client:
+        source = Manga18fxSource(
+            base_url="https://manga18fx.com",
+            client=direct_client,
+            proxy_provider=lambda: "http://user:secret@proxy.example:8080",
+        )
+        monkeypatch.setattr(
+            source,
+            "_proxy_client",
+            lambda _proxy_url: httpx.AsyncClient(transport=httpx.MockTransport(proxy_handler)),
+        )
+
+        with pytest.raises(AppError) as captured:
+            await source.home()
+
+    assert direct_requests == 0
+    assert proxy_requests == 3
+    assert captured.value.code == "UPSTREAM_FETCH_ERROR"
+    assert "user" not in captured.value.message
+    assert "secret" not in captured.value.message
+    assert "proxy.example" not in captured.value.message
+
+
+@pytest.mark.asyncio
+async def test_configured_proxy_keeps_safe_redirects_on_the_proxy_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    direct_requests = 0
+    proxy_paths: list[str] = []
+    proxy_clients = 0
+
+    def direct_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal direct_requests
+        direct_requests += 1
+        raise AssertionError(f"persistent client must not be used: {request.url}")
+
+    def proxy_handler(request: httpx.Request) -> httpx.Response:
+        proxy_paths.append(request.url.path)
+        if len(proxy_paths) == 1:
+            return httpx.Response(302, headers={"location": "/page/2"}, request=request)
+        return html_response(request, "list.html")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(direct_handler)) as direct_client:
+        source = Manga18fxSource(
+            base_url="https://manga18fx.com",
+            client=direct_client,
+            proxy_provider=lambda: "http://proxy.example:8080",
+        )
+
+        def proxy_factory(_proxy_url: str) -> httpx.AsyncClient:
+            nonlocal proxy_clients
+            proxy_clients += 1
+            return httpx.AsyncClient(transport=httpx.MockTransport(proxy_handler))
+
+        monkeypatch.setattr(source, "_proxy_client", proxy_factory)
+        result = await source.latest(2)
+
+    assert result.items
+    assert direct_requests == 0
+    assert proxy_clients == 1
+    assert proxy_paths == ["/page/2", "/page/2"]
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_proxy_uses_persistent_client_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        return html_response(request, "home.html")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = Manga18fxSource(
+            base_url="https://manga18fx.com",
+            client=client,
+            proxy_provider=lambda: "  ",
+        )
+        proxy_factory = AsyncMock()
         monkeypatch.setattr(source, "_proxy_client", proxy_factory)
         result = await source.home()
 
     assert result.latest.items
-    assert direct_requests == 3
-    assert proxy_requests == 1
-    assert proxy_urls == ["http://user:secret@proxy.example:8080"]
+    assert requests == ["https://manga18fx.com/"]
+    proxy_factory.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_default_persistent_client_trusts_proxy_environment() -> None:
+    source = Manga18fxSource(base_url="https://manga18fx.com")
+    try:
+        assert source.client._trust_env is True
+    finally:
+        await source.aclose()

@@ -80,7 +80,7 @@ class AppConfig:
                 "ocr_model": os.getenv("COMICLENS_OCR_MODEL"),
                 "deepl_api_key": os.getenv("COMICLENS_DEEPL_API_KEY"),
                 "deeplx_url": os.getenv("COMICLENS_DEEPLX_URL"),
-                "fallback_proxy_url": os.getenv("COMICLENS_PROXY_URL"),
+                "proxy_url": os.getenv("COMICLENS_PROXY_URL"),
             }.items()
             if value not in {None, ""}
         }

@@ -102,7 +102,7 @@ class Manga18fxSource:
         timeout: float = 30.0,
         user_agent: str | None = None,
         client: httpx.AsyncClient | None = None,
-        fallback_proxy_provider: Callable[[], str] | None = None,
+        proxy_provider: Callable[[], str] | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.base_host = (urlparse(self.base_url).hostname or "").lower()
@@ -120,12 +120,12 @@ class Manga18fxSource:
             ),
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
-        self._fallback_proxy_provider = fallback_proxy_provider
+        self._proxy_provider = proxy_provider
         self.client = client or httpx.AsyncClient(
             timeout=self._timeout,
             follow_redirects=False,
             headers=self._headers,
-            trust_env=False,
+            trust_env=True,
         )
 
     async def aclose(self) -> None:
@@ -367,34 +367,27 @@ class Manga18fxSource:
         return response.content
 
     async def _request(self, url: str, *, allow_media_host: bool) -> httpx.Response:
-        last_error: Exception | None = None
+        proxy_url = self._proxy_url()
         try:
-            return await self._request_with_retries(
-                self.client,
-                url,
-                allow_media_host=allow_media_host,
-            )
-        except (httpx.HTTPError, ValueError) as exc:
-            last_error = exc
-
-        proxy_url = self._fallback_proxy_url() if self._is_retryable(last_error) else ""
-        if proxy_url:
-            try:
+            if proxy_url:
                 async with self._proxy_client(proxy_url) as proxy_client:
                     return await self._request_with_retries(
                         proxy_client,
                         url,
                         allow_media_host=allow_media_host,
                     )
-            except (httpx.HTTPError, ValueError) as exc:
-                last_error = exc
-
-        raise AppError(
-            "UPSTREAM_FETCH_ERROR",
-            "无法读取 Manga18fx，请稍后重试",
-            502,
-            True,
-        ) from last_error
+            return await self._request_with_retries(
+                self.client,
+                url,
+                allow_media_host=allow_media_host,
+            )
+        except (httpx.HTTPError, ValueError) as exc:
+            raise AppError(
+                "UPSTREAM_FETCH_ERROR",
+                "无法读取 Manga18fx，请稍后重试",
+                502,
+                True,
+            ) from exc
 
     async def _request_with_retries(
         self,
@@ -446,10 +439,10 @@ class Manga18fxSource:
             self._validate_final_url(current_url, media=allow_media_host)
         raise ValueError("source returned too many redirects")
 
-    def _fallback_proxy_url(self) -> str:
-        if self._fallback_proxy_provider is None:
+    def _proxy_url(self) -> str:
+        if self._proxy_provider is None:
             return ""
-        return str(self._fallback_proxy_provider() or "").strip()
+        return str(self._proxy_provider() or "").strip()
 
     def _proxy_client(self, proxy_url: str) -> httpx.AsyncClient:
         return httpx.AsyncClient(
@@ -459,14 +452,6 @@ class Manga18fxSource:
             proxy=proxy_url,
             trust_env=False,
         )
-
-    @staticmethod
-    def _is_retryable(error: Exception | None) -> bool:
-        if isinstance(error, httpx.TimeoutException | httpx.NetworkError):
-            return True
-        if isinstance(error, httpx.HTTPStatusError):
-            return error.response.status_code == 429 or error.response.status_code >= 500
-        return False
 
     @staticmethod
     def _upstream_status(error: BaseException | None) -> int | None:

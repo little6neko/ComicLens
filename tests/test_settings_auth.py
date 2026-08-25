@@ -94,6 +94,8 @@ def test_new_settings_use_auto_ocr_without_auth_and_sync_example_url(tmp_path: P
     assert payload["translationService"] == "deepl"
     assert payload["deeplApiKey"] == {"configured": False, "masked": None}
     assert payload["translationTimeoutSeconds"] == 30.0
+    assert payload["proxyUrl"] == {"configured": False, "masked": None}
+    assert "fallbackProxyUrl" not in payload
     assert "deeplxTimeoutSeconds" not in payload
 
     database = Database(config.database_path)
@@ -118,6 +120,31 @@ def test_saved_ocr_concurrency_updates_running_manager_immediately(tmp_path: Pat
         assert rejected.status_code == 422
         assert manager.ocr_concurrency == 3
         assert client.get("/api/settings").json()["ocrConcurrency"] == 3
+
+
+def test_saved_comic_proxy_updates_running_source_provider_immediately(tmp_path: Path) -> None:
+    with TestClient(create_app(config_for(tmp_path))) as client:
+        source = client.app.state.comic_source
+        assert source._proxy_url() == ""
+
+        updated = client.patch(
+            "/api/settings",
+            json={
+                "proxyUrl": {
+                    "action": "replace",
+                    "value": "http://comic-proxy.example:8080",
+                }
+            },
+        )
+        assert updated.status_code == 200
+        assert source._proxy_url() == "http://comic-proxy.example:8080"
+
+        cleared = client.patch(
+            "/api/settings",
+            json={"proxyUrl": {"action": "clear"}},
+        )
+        assert cleared.status_code == 200
+        assert source._proxy_url() == ""
 
 
 def test_browser_preferences_are_removed_from_upgraded_database(tmp_path: Path) -> None:
@@ -320,6 +347,52 @@ def test_v3_settings_restore_auto_mode_and_infer_auth_from_token(
     assert migrated["ocr_basic_password"] == ""
 
 
+@pytest.mark.parametrize(
+    ("initial_proxy_url", "expected_proxy_url"),
+    [(None, ""), ("http://seed-proxy.example:8080", "http://seed-proxy.example:8080")],
+)
+def test_v4_settings_drop_fallback_proxy_without_copying_its_value(
+    tmp_path: Path,
+    initial_proxy_url: str | None,
+    expected_proxy_url: str,
+) -> None:
+    initial_settings = {"proxy_url": initial_proxy_url} if initial_proxy_url else {}
+    config = config_for(tmp_path, initial_settings=initial_settings)
+    database = Database(config.database_path)
+    cipher = SecretCipher(config.secrets_path, database)
+    _insert_legacy_settings(
+        database,
+        cipher,
+        {
+            "page_direction": ("rtl", False),
+            "fallback_proxy_url": ("http://old-user:old-password@old-proxy.example:8080", True),
+        },
+    )
+    database.execute(
+        """
+        INSERT INTO app_metadata(key, value, updated_at)
+        VALUES (?, '4', 1)
+        """,
+        ("settings_schema_version",),
+    )
+
+    migrated = SettingsService(database, cipher, config).values(include_secrets=True)
+    stored_keys = {
+        str(row["key"]) for row in database.fetchall("SELECT key FROM app_settings ORDER BY key")
+    }
+    schema_version = database.scalar(
+        "SELECT value FROM app_metadata WHERE key = ?",
+        ("settings_schema_version",),
+    )
+    database.close()
+
+    assert migrated["page_direction"] == "rtl"
+    assert migrated["proxy_url"] == expected_proxy_url
+    assert "fallback_proxy_url" not in stored_keys
+    assert "proxy_url" in stored_keys
+    assert schema_version == "5"
+
+
 def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> None:
     config = config_for(
         tmp_path,
@@ -343,6 +416,10 @@ def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> N
                     "action": "replace",
                     "value": "https://translator.example/api?key=private",
                 },
+                "proxyUrl": {
+                    "action": "replace",
+                    "value": "http://proxy-user:proxy-password@proxy.example:8080",
+                },
             },
         )
         kept = client.patch(
@@ -350,6 +427,7 @@ def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> N
             json={
                 "ocrToken": {"action": "keep"},
                 "ocrBasicPassword": {"action": "keep"},
+                "proxyUrl": {"action": "keep"},
             },
         )
 
@@ -374,12 +452,19 @@ def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> N
         "configured": True,
         "masked": "••••y:fx",
     }
+    assert updated.json()["proxyUrl"] == {
+        "configured": True,
+        "masked": "••••8080",
+    }
     assert kept.json()["ocrToken"]["configured"] is True
     assert kept.json()["ocrBasicPassword"]["configured"] is True
+    assert kept.json()["proxyUrl"]["configured"] is True
     assert b"new-secret-token" not in database_bytes
     assert b"basic-secret-password" not in database_bytes
     assert b"test-deepl-key:fx" not in database_bytes
     assert b"translator.example" not in database_bytes
+    assert b"proxy-password" not in database_bytes
+    assert b"proxy.example" not in database_bytes
 
     # A later environment seed does not overwrite persisted settings.
     restarted_config = config_for(
@@ -393,6 +478,7 @@ def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> N
             json={
                 "ocrToken": {"action": "clear"},
                 "ocrBasicPassword": {"action": "clear"},
+                "proxyUrl": {"action": "clear"},
             },
         )
 
@@ -400,6 +486,7 @@ def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> N
     assert persisted.json()["ocrToken"]["masked"] == "••••oken"
     assert cleared.json()["ocrToken"] == {"configured": False, "masked": None}
     assert cleared.json()["ocrBasicPassword"] == {"configured": False, "masked": None}
+    assert cleared.json()["proxyUrl"] == {"configured": False, "masked": None}
 
 
 def test_settings_reject_invalid_secret_protocol_and_slice_geometry(

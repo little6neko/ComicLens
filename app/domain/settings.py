@@ -45,7 +45,7 @@ class ServerSettings(ComicModel):
     deeplx_url: SensitiveSettingState
     translation_timeout_seconds: float
     translation_concurrency: int
-    fallback_proxy_url: SensitiveSettingState
+    proxy_url: SensitiveSettingState
     long_image_threshold: int
     ocr_slice_height: int
     ocr_slice_overlap: int
@@ -76,7 +76,7 @@ class ServerSettingsPatch(ComicModel):
     deeplx_url: SensitiveSettingPatch | None = None
     translation_timeout_seconds: float | None = Field(default=None, ge=1, le=600)
     translation_concurrency: int | None = Field(default=None, ge=1, le=16)
-    fallback_proxy_url: SensitiveSettingPatch | None = None
+    proxy_url: SensitiveSettingPatch | None = None
     long_image_threshold: int | None = Field(default=None, ge=1000, le=100000)
     ocr_slice_height: int | None = Field(default=None, ge=500, le=50000)
     ocr_slice_overlap: int | None = Field(default=None, ge=0, le=5000)

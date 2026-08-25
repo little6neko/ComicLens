@@ -54,8 +54,8 @@ def create_app(
         source = comic_source or Manga18fxSource(
             base_url=resolved_config.upstream_base_url,
             timeout=resolved_config.request_timeout,
-            fallback_proxy_provider=lambda: str(
-                settings_service.values(include_secrets=True).get("fallback_proxy_url") or ""
+            proxy_provider=lambda: str(
+                settings_service.values(include_secrets=True).get("proxy_url") or ""
             ),
         )
         app.state.comic_source = source
