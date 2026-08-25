@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import math
 import re
 import time
 from collections.abc import Iterable
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from urllib.parse import urlparse
 
 import httpx
@@ -58,12 +59,34 @@ class OCRJobObserver(Protocol):
     def __call__(self, job_id: str) -> None: ...
 
 
+OCRProtocol = Literal["direct", "job"]
+
+
+def resolve_ocr_protocol(mode: str, api_url: str) -> OCRProtocol:
+    normalized_mode = (mode or "auto").strip().lower()
+    if normalized_mode == "direct":
+        return "direct"
+    if normalized_mode == "job":
+        return "job"
+    if normalized_mode != "auto":
+        raise ValueError("OCR 模式无效")
+
+    path = urlparse(api_url).path.rstrip("/")
+    if "/api/v2/ocr/jobs" in path or path.endswith("/ocr/jobs"):
+        return "job"
+    return "direct"
+
+
 class OCRClient:
     def __init__(
         self,
         client: httpx.AsyncClient,
         api_url: str,
         token: str = "",
+        auth_mode: str = "bearer",
+        basic_username: str = "",
+        basic_password: str = "",
+        mode: str = "auto",
         job_model: str = "PaddleOCR-VL-1.6",
         job_poll_interval: float = 2.0,
         job_timeout: float = 180.0,
@@ -74,6 +97,10 @@ class OCRClient:
         self.client = client
         self.api_url = api_url.rstrip("/")
         self.token = token.strip()
+        self.auth_mode = (auth_mode or "none").strip().lower()
+        self.basic_username = basic_username
+        self.basic_password = basic_password
+        self.protocol = resolve_ocr_protocol(mode, self.api_url)
         self.job_model = job_model.strip() or "PaddleOCR-VL-1.6"
         self.job_poll_interval = max(0.2, job_poll_interval)
         self.job_timeout = max(self.job_poll_interval, job_timeout)
@@ -92,11 +119,36 @@ class OCRClient:
         on_job_submitted: OCRJobObserver | None = None,
     ) -> dict[str, Any]:
         async with self.limiter.slot():
+            if self.protocol == "direct":
+                return await self._analyze_image_direct(image_bytes)
             return await self._analyze_image_by_job(
                 image_bytes,
                 job_id=job_id,
                 on_job_submitted=on_job_submitted,
             )
+
+    async def _analyze_image_direct(self, image_bytes: bytes) -> dict[str, Any]:
+        headers, auth = self._build_request_auth()
+        headers["Content-Type"] = "application/json"
+        payload = {
+            "file": base64.b64encode(image_bytes).decode("ascii"),
+            "fileType": 1,
+            "useDocOrientationClassify": False,
+            "useDocUnwarping": False,
+            "useChartRecognition": False,
+            "visualize": False,
+        }
+        response = await self._request(
+            "POST",
+            self.api_url,
+            headers=headers,
+            auth=auth,
+            json=payload,
+        )
+        response_payload = self._response_object(response, "OCR 同步响应")
+        if "result" not in response_payload:
+            raise OCRProtocolError("OCR 同步响应缺少 result")
+        return response_payload
 
     async def _analyze_image_by_job(
         self,
@@ -110,7 +162,7 @@ class OCRClient:
             "useDocUnwarping": False,
             "useChartRecognition": False,
         }
-        headers = self._request_headers()
+        headers, auth = self._build_request_auth()
         if not job_id:
             data = {
                 "model": self.job_model,
@@ -121,6 +173,7 @@ class OCRClient:
                 "POST",
                 self.api_url,
                 headers=headers,
+                auth=auth,
                 data=data,
                 files=files,
             )
@@ -138,7 +191,12 @@ class OCRClient:
         job_url = f"{self.api_url}/{job_id}"
         while time.monotonic() < deadline:
             try:
-                job_response = await self._request("GET", job_url, headers=headers)
+                job_response = await self._request(
+                    "GET",
+                    job_url,
+                    headers=headers,
+                    auth=auth,
+                )
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code in {404, 410}:
                     raise OCRJobNotFoundError("OCR 异步任务已失效") from exc
@@ -165,7 +223,8 @@ class OCRClient:
         if not result_url:
             raise TimeoutError("OCR 异步任务超时")
         self._validate_result_url(result_url)
-        result_response = await self._request("GET", result_url)
+        result_auth = auth if self._should_send_basic_auth(result_url) else None
+        result_response = await self._request("GET", result_url, auth=result_auth)
         entries: list[dict[str, Any]] = []
         for line_number, line in enumerate(result_response.text.splitlines(), start=1):
             if not line.strip():
@@ -191,10 +250,38 @@ class OCRClient:
             layout_results.extend(item_results)
         return {"result": {"layoutParsingResults": layout_results}}
 
-    def _request_headers(self) -> dict[str, str]:
-        if not self.token:
-            raise ValueError("OCR Token 不能为空")
-        return {"Authorization": f"Bearer {self.token}"}
+    def _build_request_auth(self) -> tuple[dict[str, str], httpx.Auth | None]:
+        if self.auth_mode == "none":
+            return {}, None
+        if self.auth_mode == "bearer":
+            if not self.token:
+                raise ValueError("OCR Token 不能为空")
+            return {"Authorization": f"Bearer {self.token}"}, None
+        if self.auth_mode == "basic":
+            if not self.basic_username.strip() or not self.basic_password.strip():
+                raise ValueError("OCR Basic Auth 缺少用户名或密码")
+            return {}, httpx.BasicAuth(self.basic_username, self.basic_password)
+        raise ValueError("OCR 认证模式无效")
+
+    def _should_send_basic_auth(self, target_url: str) -> bool:
+        if self.auth_mode != "basic":
+            return False
+        api_origin = self._origin(self.api_url)
+        return api_origin is not None and api_origin == self._origin(target_url)
+
+    @staticmethod
+    def _origin(target_url: str) -> tuple[str, str, int] | None:
+        parsed = urlparse(target_url)
+        scheme = parsed.scheme.lower()
+        if scheme not in {"http", "https"} or not parsed.hostname:
+            return None
+        try:
+            port = parsed.port
+        except ValueError:
+            return None
+        if port is None:
+            port = 443 if scheme == "https" else 80
+        return scheme, parsed.hostname.lower(), port
 
     @staticmethod
     def _response_object(response: httpx.Response, context: str) -> dict[str, Any]:

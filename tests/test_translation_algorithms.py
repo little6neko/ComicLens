@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import io
 import json
 from typing import Any
@@ -20,6 +21,7 @@ from app.translation.ocr import (
     OCRJobNotFoundError,
     OCRProtocolError,
     extract_text_blocks,
+    resolve_ocr_protocol,
 )
 from app.translation.pipeline import ImageTranslationPipeline, PipelineSettings
 from app.translation.translator import (
@@ -123,6 +125,27 @@ def test_ocr_parser_normalizes_common_coordinate_shapes_and_filters_noise() -> N
     ]
 
 
+@pytest.mark.parametrize(
+    ("mode", "url", "expected"),
+    [
+        ("auto", "https://ocr.example/api/v2/ocr/jobs", "job"),
+        ("auto", "https://ocr.example/api/v2/ocr/jobs/", "job"),
+        ("auto", "https://ocr.example/custom/ocr/jobs?region=test", "job"),
+        ("auto", "https://ocr.example/layout-parsing", "direct"),
+        ("auto", "https://ocr.example/v1", "direct"),
+        ("direct", "https://ocr.example/api/v2/ocr/jobs", "direct"),
+        ("job", "https://ocr.example/layout-parsing", "job"),
+    ],
+)
+def test_ocr_protocol_resolution(mode: str, url: str, expected: str) -> None:
+    assert resolve_ocr_protocol(mode, url) == expected
+
+
+def test_ocr_protocol_resolution_rejects_unknown_explicit_mode() -> None:
+    with pytest.raises(ValueError, match="OCR 模式无效"):
+        resolve_ocr_protocol("probe", "https://ocr.example/layout-parsing")
+
+
 @pytest.mark.asyncio
 async def test_pipeline_processes_long_image_as_one_source_page() -> None:
     ocr = FakeOCR(concurrency=2)
@@ -167,6 +190,144 @@ def test_renderer_sanitizes_and_changes_only_translated_canvas() -> None:
 
 
 @pytest.mark.asyncio
+async def test_direct_ocr_posts_base64_json_without_auth_or_job_callbacks() -> None:
+    requests: list[httpx.Request] = []
+    submitted: list[str] = []
+    content = image_bytes(20, 20)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={"result": {"layoutParsingResults": []}},
+            request=request,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        ocr = OCRClient(
+            client,
+            "https://ocr.example/layout-parsing",
+            token="unused-token",
+            auth_mode="none",
+            mode="auto",
+            request_timeout=11,
+        )
+        result = await ocr.analyze_image(
+            content,
+            job_id="stale-job",
+            on_job_submitted=submitted.append,
+        )
+
+    assert result == {"result": {"layoutParsingResults": []}}
+    assert len(requests) == 1
+    request = requests[0]
+    payload = json.loads(request.read())
+    assert request.method == "POST"
+    assert request.url.path == "/layout-parsing"
+    assert request.headers["content-type"] == "application/json"
+    assert "authorization" not in request.headers
+    assert base64.b64decode(payload.pop("file")) == content
+    assert payload == {
+        "fileType": 1,
+        "useDocOrientationClassify": False,
+        "useDocUnwarping": False,
+        "useChartRecognition": False,
+        "visualize": False,
+    }
+    assert request.extensions["timeout"]["read"] == 11
+    assert submitted == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        (b"not-json", "不是有效 JSON"),
+        (b"[]", "不是对象"),
+        (b"{}", "缺少 result"),
+    ],
+)
+async def test_direct_ocr_rejects_malformed_response(body: bytes, message: str) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        ocr = OCRClient(
+            client,
+            "https://ocr.example/layout-parsing",
+            auth_mode="none",
+            mode="direct",
+        )
+        with pytest.raises(OCRProtocolError, match=message):
+            await ocr.analyze_image(image_bytes(20, 20))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("auth_mode", "kwargs", "expected_authorization"),
+    [
+        ("none", {"token": "ignored"}, None),
+        ("bearer", {"token": "test-token"}, "Bearer test-token"),
+        (
+            "basic",
+            {"basic_username": "test-user", "basic_password": "test-password"},
+            "Basic dGVzdC11c2VyOnRlc3QtcGFzc3dvcmQ=",
+        ),
+    ],
+)
+async def test_direct_ocr_supports_configured_auth_modes(
+    auth_mode: str,
+    kwargs: dict[str, str],
+    expected_authorization: str | None,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={"result": {"layoutParsingResults": []}},
+            request=request,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        ocr = OCRClient(
+            client,
+            "https://ocr.example/layout-parsing",
+            auth_mode=auth_mode,
+            mode="direct",
+            **kwargs,
+        )
+        await ocr.analyze_image(image_bytes(20, 20))
+
+    assert requests[0].headers.get("authorization") == expected_authorization
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"auth_mode": "bearer"}, "Token"),
+        ({"auth_mode": "basic", "basic_username": "user"}, "用户名或密码"),
+        ({"auth_mode": "invalid"}, "认证模式无效"),
+    ],
+)
+async def test_ocr_rejects_missing_or_invalid_auth_configuration(
+    kwargs: dict[str, str],
+    message: str,
+) -> None:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: None)) as client:
+        ocr = OCRClient(
+            client,
+            "https://ocr.example/layout-parsing",
+            mode="direct",
+            **kwargs,
+        )
+        with pytest.raises(ValueError, match=message):
+            await ocr.analyze_image(image_bytes(20, 20))
+
+
+@pytest.mark.asyncio
 async def test_async_ocr_submits_polls_merges_jsonl_and_isolates_token() -> None:
     requests: list[httpx.Request] = []
     poll_count = 0
@@ -204,6 +365,7 @@ async def test_async_ocr_submits_polls_merges_jsonl_and_isolates_token() -> None
             client,
             "https://ocr.example/jobs",
             token="secret",
+            mode="job",
             job_model="PaddleOCR-VL-1.6",
             job_poll_interval=0.2,
             request_timeout=7,
@@ -225,6 +387,58 @@ async def test_async_ocr_submits_polls_merges_jsonl_and_isolates_token() -> None
     assert requests[1].headers["authorization"] == "Bearer secret"
     assert requests[2].headers["authorization"] == "Bearer secret"
     assert "authorization" not in requests[3].headers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result_url", "expected_result_auth"),
+    [
+        ("https://ocr.example:443/results/result.jsonl", True),
+        ("https://files.example/results/result.jsonl", False),
+    ],
+)
+async def test_async_ocr_sends_basic_to_api_and_only_same_origin_result(
+    result_url: str,
+    expected_result_auth: bool,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/ocr/jobs":
+            return httpx.Response(200, json={"data": {"jobId": "job-1"}}, request=request)
+        if request.url.path == "/ocr/jobs/job-1":
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "state": "done",
+                        "resultUrl": {"jsonUrl": result_url},
+                    }
+                },
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            text='{"result":{"layoutParsingResults":[]}}\n',
+            request=request,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        ocr = OCRClient(
+            client,
+            "https://ocr.example/ocr/jobs",
+            auth_mode="basic",
+            basic_username="test-user",
+            basic_password="test-password",
+            mode="auto",
+        )
+        await ocr.analyze_image(image_bytes(20, 20))
+
+    expected_header = "Basic dGVzdC11c2VyOnRlc3QtcGFzc3dvcmQ="
+    assert requests[0].headers["authorization"] == expected_header
+    assert requests[1].headers["authorization"] == expected_header
+    assert (requests[2].headers.get("authorization") == expected_header) is expected_result_auth
 
 
 @pytest.mark.asyncio
@@ -252,7 +466,7 @@ async def test_async_ocr_resumes_persisted_job_without_resubmitting() -> None:
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        ocr = OCRClient(client, "https://ocr.example/jobs", token="secret")
+        ocr = OCRClient(client, "https://ocr.example/jobs", token="secret", mode="job")
         result = await ocr.analyze_image(
             image_bytes(20, 20),
             job_id="persisted-job",
@@ -270,7 +484,7 @@ async def test_async_ocr_reports_expired_persisted_job() -> None:
         return httpx.Response(404, text="gone", request=request)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        ocr = OCRClient(client, "https://ocr.example/jobs", token="secret")
+        ocr = OCRClient(client, "https://ocr.example/jobs", token="secret", mode="job")
         with pytest.raises(OCRJobNotFoundError, match="已失效"):
             await ocr.analyze_image(image_bytes(20, 20), job_id="expired-job")
 
@@ -299,7 +513,7 @@ async def test_async_ocr_rejects_failed_or_invalid_job_states(
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        ocr = OCRClient(client, "https://ocr.example/jobs", token="secret")
+        ocr = OCRClient(client, "https://ocr.example/jobs", token="secret", mode="job")
         with pytest.raises(ValueError, match=message):
             await ocr.analyze_image(image_bytes(20, 20))
 
@@ -316,6 +530,7 @@ async def test_async_ocr_times_out_while_job_remains_pending() -> None:
             client,
             "https://ocr.example/jobs",
             token="secret",
+            mode="job",
             job_poll_interval=0.2,
             job_timeout=0.2,
         )
@@ -342,7 +557,7 @@ async def test_async_ocr_rejects_invalid_jsonl() -> None:
         return httpx.Response(200, text="not-json", request=request)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        ocr = OCRClient(client, "https://ocr.example/jobs", token="secret")
+        ocr = OCRClient(client, "https://ocr.example/jobs", token="secret", mode="job")
         with pytest.raises(OCRProtocolError, match="JSONL"):
             await ocr.analyze_image(image_bytes(20, 20))
 
