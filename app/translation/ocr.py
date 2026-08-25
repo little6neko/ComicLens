@@ -72,7 +72,7 @@ def resolve_ocr_protocol(mode: str, api_url: str) -> OCRProtocol:
         raise ValueError("OCR 模式无效")
 
     path = urlparse(api_url).path.rstrip("/")
-    if "/api/v2/ocr/jobs" in path or path.endswith("/ocr/jobs"):
+    if path.endswith("/ocr/jobs"):
         return "job"
     return "direct"
 

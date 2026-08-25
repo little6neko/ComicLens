@@ -44,9 +44,9 @@ OCR job 持久化代码无需分叉。
 - `direct`：强制同步接口；
 - `job`：强制异步任务接口。
 
-`auto` 使用规范化后的 OCR URL 判断。URL 包含已知的 `/api/v2/ocr/jobs` 路径，或其路径
-以 `/ocr/jobs` 结尾时，解析为 `job`；其余所有 URL 均解析为 `direct`。尾部斜杠不影响
-判断。
+`auto` 使用规范化后的 OCR URL 判断。路径以 `/ocr/jobs` 结尾时解析为 `job`；其余所有
+URL 均解析为 `direct`。query 和尾部斜杠不影响判断。PaddleX 同步接口通常以
+`/layout-parsing` 结尾，但客户端不会自动追加该后缀。
 
 自动模式不识别或特殊处理 `/v1`，也不会因 URL 看起来不像 `/layout-parsing` 而提示、
 拒绝或改写请求。未命中异步规则的地址一律按同步接口正常尝试，服务端返回的 HTTP 或
@@ -199,7 +199,8 @@ CDN 或其他外部结果主机泄露用户名、密码或 Token。结果 URL �
 
 后端测试覆盖：
 
-- `auto/direct/job` 的协议解析，包括异步 URL、普通 URL、尾部斜杠和 `/v1` 按同步尝试；
+- `auto/direct/job` 的协议解析，包括 `/ocr/jobs` 后缀、普通 URL、尾部斜杠、query、
+  `/ocr/jobs/123`、`/ocr/jobs-old` 和 `/v1` 按同步尝试；
 - 同步 Base64 JSON 请求的完整字段、Content-Type、正常响应和异常响应；
 - 同步分支忽略旧 `job_id`，且不调用 job 提交回调；
 - `none/bearer/basic` 请求行为及各模式的配置校验；

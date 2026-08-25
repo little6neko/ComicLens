@@ -168,9 +168,9 @@ docker start comiclens
 
 PaddleOCR 同时支持 PaddleX 服务化部署的同步 JSON 接口和云端异步任务接口。新安装的 OCR
 URL 是示例值 `http://example.com/layout-parsing`，必须替换为自己的服务地址。自动模式将
-包含 `/api/v2/ocr/jobs` 或路径以 `/ocr/jobs` 结尾的地址识别为异步任务，其余所有地址均按
-同步接口正常尝试；不会针对 `/v1` 增加专用协议。默认模型为 `PaddleOCR-VL-1.6`，模型和
-轮询设置只由异步任务协议使用。
+路径以 `/ocr/jobs` 结尾的地址识别为异步任务，其余所有地址均按同步接口正常尝试；PaddleX
+同步接口通常以 `/layout-parsing` 结尾。ComicLens 不会自动补全路径，也不会针对 `/v1`
+增加专用协议。默认模型为 `PaddleOCR-VL-1.6`，模型和轮询设置只由异步任务协议使用。
 
 同步请求、异步任务提交和轮询使用当前选择的鉴权。异步结果地址仅在与 OCR API 的协议、
 主机和有效端口均相同时携带 Basic Auth；跨源结果不携带 Basic，Bearer Token 不发送给

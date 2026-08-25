@@ -133,6 +133,8 @@ def test_ocr_parser_normalizes_common_coordinate_shapes_and_filters_noise() -> N
         ("auto", "https://ocr.example/custom/ocr/jobs?region=test", "job"),
         ("auto", "https://ocr.example/layout-parsing", "direct"),
         ("auto", "https://ocr.example/v1", "direct"),
+        ("auto", "https://ocr.example/api/v2/ocr/jobs/123", "direct"),
+        ("auto", "https://ocr.example/api/v2/ocr/jobs-old", "direct"),
         ("direct", "https://ocr.example/api/v2/ocr/jobs", "direct"),
         ("job", "https://ocr.example/layout-parsing", "job"),
     ],

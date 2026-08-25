@@ -242,14 +242,14 @@ function SettingsPage() {
           </Field>
           <Field
             label="OCR 模式"
-            hint="自动模式仅将已知 /api/v2/ocr/jobs 或以 /ocr/jobs 结尾的地址识别为异步任务，其余地址按同步接口调用。"
+            hint="自动模式仅将以 /ocr/jobs 结尾的地址识别为异步任务，其余地址按同步接口调用；PaddleX 同步接口通常以 /layout-parsing 结尾。"
           >
             <Select
               value={draft.ocrMode}
               onValueChange={(value) => patch("ocrMode", value as Draft["ocrMode"])}
               ariaLabel="OCR 模式"
               options={[
-                ["auto", "自动识别同步/异步（默认）"],
+                ["auto", "自动识别（默认）"],
                 ["direct", "同步接口"],
                 ["job", "异步任务接口"],
               ]}
