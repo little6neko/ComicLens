@@ -13,7 +13,7 @@ ComicTranslator 的长图切片、OCR、翻译与译文覆写管线集成到阅�
 - 关闭实时翻译后立即显示原图，后端完成当前分片后暂停。
 - 支持重新翻译本话，以及 OCR/翻译/渲染失败后的单分片重试。
 - 原图、OCR 结果和译图无时间 TTL，在默认 5 GB 上限内长期保留并按 LRU 淘汰。
-- PaddleOCR 同步/异步协议与鉴权、DeepL/DeepLX、代理、长图参数和阅读默认值均可在 Web
+- PaddleOCR 同步/异步协议与鉴权、DeepL/DeepLX、漫画代理、长图参数和阅读默认值均可在 Web
   设置页维护。
 - 可选环境变量密码；不填写时不启用登录界面。
 
@@ -64,8 +64,14 @@ docker run -d \
   ghcr.io/little6neko/comiclens:v0.1.3
 ```
 
-部署地区无法直接访问上游时，可以额外添加
-`-e COMICLENS_PROXY_URL='http://代理地址:端口'`；能够直接访问时不要设置代理。
+首次部署时可以额外添加 `-e COMICLENS_PROXY_URL='http://代理地址:端口'`，为 Web 设置中的
+“漫画代理 URL”提供初值。该字段非空时，漫画目录、搜索、详情、章节和源图只走指定代理，
+失败后不会改为直连；部署后可直接在设置页替换或清除。
+
+应用也遵循 httpx 支持的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 和 `NO_PROXY`。漫画代理
+URL 留空时，漫画请求使用这些标准环境变量；OCR、DeepL 和 DeepLX 不使用漫画代理 URL，
+但始终可以受标准环境变量控制。使用 `docker run` 时通过 `-e` 传入所需变量；Compose 部署可
+在 `.env` 中填写，项目会将其原样传入容器。未设置应用代理和标准代理时均为直连。
 
 查看状态和日志：
 
@@ -75,8 +81,9 @@ docker logs -f comiclens
 ```
 
 升级时先把变量改成准备部署的版本标签，再拉取镜像并重建容器；`data` 是宿主机目录，停止
-和删除容器不会删除其中的设置、历史、缓存与翻译结果。重新创建时需要保留此前使用的全部
-`-e` 参数，尤其是访问密码和代理；下面仍以不启用密码和代理为例：
+和删除容器不会删除其中的设置、历史、缓存与翻译结果。重新创建时需要保留仍在运行期使用的
+`-e` 参数，尤其是访问密码和标准代理环境变量；已写入数据库的漫画代理 URL 不依赖容器重建
+时再次传入 `COMICLENS_PROXY_URL`。下面仍以不启用密码和代理为例：
 
 ```bash
 COMICLENS_VERSION=v0.1.3
@@ -154,17 +161,17 @@ docker start comiclens
 恢复时必须同时恢复数据库与 `secrets.key`，不能只恢复其中一个。请妥善保管备份，因为完整
 `data/` 目录可以解密其中的 OCR/翻译服务凭据。
 
-## 翻译设置
+## OCR、翻译与代理设置
 
-进入“设置 → OCR 与翻译”配置：
+进入设置页，相关内容按“OCR → OCR 长图高级设置 → 翻译 → 代理”分区：
 
 1. 源语言：自动识别（默认）、英语或韩语；目标固定为简体中文；
 2. OCR 模式：自动识别（默认）、同步接口或异步任务接口；
 3. OCR API URL，以及无鉴权（默认）、Bearer Token 或 Basic Auth；
 4. OCR 模型、轮询间隔、总超时和全服务并发；
-5. 翻译服务：默认使用 DeepL 官方 API，也可切换为 DeepLX；
-6. DeepL API Key 或 DeepLX URL，以及共用的翻译超时与并发；
-7. 可选回退代理和长图切片参数。
+5. OCR 长图阈值、分片高度、重叠和兼容阅读分片高度；
+6. 翻译服务：默认使用 DeepL 官方 API，也可切换为 DeepLX，并配置凭据、超时与并发；
+7. 可选漫画代理 URL，仅控制漫画目录和源图请求。
 
 PaddleOCR 同时支持 PaddleX 服务化部署的同步 JSON 接口和云端异步任务接口。新安装的 OCR
 URL 是示例值 `http://example.com/layout-parsing`，必须替换为自己的服务地址。自动模式将
@@ -187,10 +194,16 @@ DeepL Key 以 `:fx` 结尾时自动使用 Free API，否则使用 Pro API；Deep
 显示。异步模式下 PaddleOCR `jobId` 会持久化，超时或服务重启后优先继续轮询远端任务；
 OCR 失败后的手动重试会创建新任务。同步模式不保存 `jobId`，重试时重新发送完整请求。
 
-敏感字段只返回掩码，编辑时明确选择“保留 / 替换 / 清除”。`.env.example` 中的
-`COMICLENS_OCR_*`、`COMICLENS_DEEPL_API_KEY`、`COMICLENS_DEEPLX_URL` 和
-`COMICLENS_PROXY_URL` 只用于首次初始化尚不存在的服务器设置，之后以数据库中的值为准。
-Basic 用户名和密码环境变量不会自动切换鉴权模式，仍需在 Web 设置页选择 Basic Auth。
+敏感字段只返回掩码，编辑时明确选择“保留 / 替换 / 清除”。“漫画代理 URL”非空时，所有
+漫画目录和源图请求只使用该代理，同一请求的重试与重定向不会切换线路；留空时由标准代理
+环境变量和 `NO_PROXY` 决定使用代理还是直连。OCR、DeepL 和 DeepLX 不读取该字段，但同样
+遵循标准代理环境变量。
+
+`.env.example` 中的 `COMICLENS_OCR_*`、`COMICLENS_DEEPL_API_KEY`、
+`COMICLENS_DEEPLX_URL` 和 `COMICLENS_PROXY_URL` 只用于首次初始化或设置结构升级重建时提供
+初值，之后以数据库中的值为准。`HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 和 `NO_PROXY`
+则是每次启动时由 httpx 直接读取的运行期变量。Basic 用户名和密码环境变量不会自动切换
+鉴权模式，仍需在 Web 设置页选择 Basic Auth。
 
 ## 本地开发
 

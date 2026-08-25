@@ -41,7 +41,7 @@ EXPOSE 8233
 VOLUME ["/app/data"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD curl --fail --silent http://127.0.0.1:8233/health >/dev/null || exit 1
+  CMD curl --noproxy '*' --fail --silent http://127.0.0.1:8233/health >/dev/null || exit 1
 
 ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["sh", "-c", "exec uvicorn app.main:app --host \"${COMICLENS_HOST:-0.0.0.0}\" --port \"${PORT:-8233}\" --workers 1 --proxy-headers --forwarded-allow-ips=*"]

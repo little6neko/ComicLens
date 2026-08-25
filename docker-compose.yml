@@ -27,10 +27,14 @@ services:
       COMICLENS_DEEPL_API_KEY: ${COMICLENS_DEEPL_API_KEY:-}
       COMICLENS_DEEPLX_URL: ${COMICLENS_DEEPLX_URL:-}
       COMICLENS_PROXY_URL: ${COMICLENS_PROXY_URL:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      ALL_PROXY: ${ALL_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
     volumes:
       - ./data:/app/data
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8233/health"]
+      test: ["CMD", "curl", "--noproxy", "*", "--fail", "--silent", "http://127.0.0.1:8233/health"]
       interval: 30s
       timeout: 5s
       start_period: 15s

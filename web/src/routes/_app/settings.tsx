@@ -432,7 +432,7 @@ function SettingsPage() {
               draft={secrets.proxyUrl}
               onChange={(value) => setSecret(setSecrets, "proxyUrl", value)}
               placeholder="http://user:password@proxy:8080"
-              hint="仅用于漫画目录、搜索、详情、章节和源图；设置后只走该代理，留空时遵循标准代理环境变量。OCR 与翻译不使用此设置，但仍遵循标准代理环境变量。"
+              hint="仅用于漫画目录、搜索、详情、章节和源图；设置后只走该代理，留空时遵循标准代理环境变量。OCR、DeepL 和 DeepLX 不使用此设置，但仍遵循标准代理环境变量。"
             />
           </div>
         </SettingsSection>
