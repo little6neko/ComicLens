@@ -75,6 +75,8 @@ class AppConfig:
             for key, value in {
                 "ocr_api_url": os.getenv("COMICLENS_OCR_API_URL"),
                 "ocr_token": os.getenv("COMICLENS_OCR_TOKEN"),
+                "ocr_basic_username": os.getenv("COMICLENS_OCR_BASIC_USERNAME"),
+                "ocr_basic_password": os.getenv("COMICLENS_OCR_BASIC_PASSWORD"),
                 "ocr_model": os.getenv("COMICLENS_OCR_MODEL"),
                 "deepl_api_key": os.getenv("COMICLENS_DEEPL_API_KEY"),
                 "deeplx_url": os.getenv("COMICLENS_DEEPLX_URL"),

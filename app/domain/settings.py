@@ -30,8 +30,12 @@ class ServerSettings(ComicModel):
     realtime_translation_default: bool
     source_language: Literal["AUTO", "EN", "KO"]
     target_language: Literal["ZH-HANS"] = "ZH-HANS"
+    ocr_mode: Literal["auto", "direct", "job"]
+    ocr_auth_mode: Literal["none", "bearer", "basic"]
     ocr_api_url: SensitiveSettingState
     ocr_token: SensitiveSettingState
+    ocr_basic_username: str
+    ocr_basic_password: SensitiveSettingState
     ocr_model: str
     ocr_poll_interval_seconds: float
     ocr_timeout_seconds: float
@@ -57,8 +61,12 @@ class ServerSettingsPatch(ComicModel):
     page_direction: Literal["ltr", "rtl"] | None = None
     realtime_translation_default: bool | None = None
     source_language: Literal["AUTO", "EN", "KO"] | None = None
+    ocr_mode: Literal["auto", "direct", "job"] | None = None
+    ocr_auth_mode: Literal["none", "bearer", "basic"] | None = None
     ocr_api_url: SensitiveSettingPatch | None = None
     ocr_token: SensitiveSettingPatch | None = None
+    ocr_basic_username: str | None = Field(default=None, max_length=200)
+    ocr_basic_password: SensitiveSettingPatch | None = None
     ocr_model: str | None = Field(default=None, max_length=200)
     ocr_poll_interval_seconds: float | None = Field(default=None, ge=0.2, le=60)
     ocr_timeout_seconds: float | None = Field(default=None, ge=1, le=3600)

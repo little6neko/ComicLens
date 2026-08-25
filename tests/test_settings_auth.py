@@ -69,8 +69,9 @@ def test_database_runs_all_migrations_with_wal_and_foreign_keys(tmp_path: Path) 
     assert foreign_keys == 1
 
 
-def test_new_settings_use_async_ocr_deepl_and_auto_language_defaults(tmp_path: Path) -> None:
-    with TestClient(create_app(config_for(tmp_path))) as client:
+def test_new_settings_use_auto_ocr_without_auth_and_sync_example_url(tmp_path: Path) -> None:
+    config = config_for(tmp_path)
+    with TestClient(create_app(config)) as client:
         settings = client.get("/api/settings")
 
     assert settings.status_code == 200
@@ -79,7 +80,11 @@ def test_new_settings_use_async_ocr_deepl_and_auto_language_defaults(tmp_path: P
     assert "readingMode" not in payload
     assert payload["sourceLanguage"] == "AUTO"
     assert payload["targetLanguage"] == "ZH-HANS"
+    assert payload["ocrMode"] == "auto"
+    assert payload["ocrAuthMode"] == "none"
     assert payload["ocrApiUrl"]["configured"] is True
+    assert payload["ocrBasicUsername"] == ""
+    assert payload["ocrBasicPassword"] == {"configured": False, "masked": None}
     assert payload["ocrModel"] == "PaddleOCR-VL-1.6"
     assert payload["ocrPollIntervalSeconds"] == 2.0
     assert payload["ocrTimeoutSeconds"] == 180.0
@@ -89,10 +94,14 @@ def test_new_settings_use_async_ocr_deepl_and_auto_language_defaults(tmp_path: P
     assert payload["translationService"] == "deepl"
     assert payload["deeplApiKey"] == {"configured": False, "masked": None}
     assert payload["translationTimeoutSeconds"] == 30.0
-    assert "ocrMode" not in payload
-    assert "ocrAuthMode" not in payload
-    assert "ocrBasicPassword" not in payload
     assert "deeplxTimeoutSeconds" not in payload
+
+    database = Database(config.database_path)
+    cipher = SecretCipher(config.secrets_path, database)
+    values = SettingsService(database, cipher, config).values(include_secrets=True)
+    database.close()
+
+    assert values["ocr_api_url"] == "http://example.com/layout-parsing"
 
 
 def test_saved_ocr_concurrency_updates_running_manager_immediately(tmp_path: Path) -> None:
@@ -179,7 +188,9 @@ def test_v2_settings_migrate_only_the_old_default_slice_height(tmp_path: Path) -
     assert preserved["ocr_slice_height"] == 2400
 
 
-def test_legacy_settings_migrate_once_and_preserve_existing_deeplx(tmp_path: Path) -> None:
+def test_legacy_settings_migrate_once_and_preserve_ocr_auth_and_deeplx(
+    tmp_path: Path,
+) -> None:
     config = config_for(tmp_path)
     database = Database(config.database_path)
     cipher = SecretCipher(config.secrets_path, database)
@@ -211,22 +222,27 @@ def test_legacy_settings_migrate_once_and_preserve_existing_deeplx(tmp_path: Pat
     }
 
     assert migrated["source_language"] == "AUTO"
-    assert migrated["ocr_api_url"] == ("https://paddleocr.aistudio-app.com/api/v2/ocr/jobs")
+    assert migrated["ocr_mode"] == "auto"
+    assert migrated["ocr_auth_mode"] == "bearer"
+    assert migrated["ocr_api_url"] == "http://example.com/layout-parsing"
     assert migrated["ocr_token"] == "ocr-secret"
+    assert migrated["ocr_basic_username"] == "legacy-user"
+    assert migrated["ocr_basic_password"] == "legacy-password"
     assert migrated["ocr_model"] == "PaddleOCR-VL-1.6"
     assert migrated["translation_service"] == "deeplx"
     assert migrated["deeplx_url"] == "https://deeplx.example/translate"
     assert migrated["translation_timeout_seconds"] == 47.0
     assert migrated["translation_concurrency"] == 3
-    assert "ocr_mode" not in stored_keys
-    assert "ocr_auth_mode" not in stored_keys
-    assert "ocr_basic_username" not in stored_keys
-    assert "ocr_basic_password" not in stored_keys
+    assert "ocr_mode" in stored_keys
+    assert "ocr_auth_mode" in stored_keys
+    assert "ocr_basic_username" in stored_keys
+    assert "ocr_basic_password" in stored_keys
     assert "deeplx_timeout_seconds" not in stored_keys
 
     settings.patch(
         ServerSettingsPatch(
             source_language="EN",
+            ocr_auth_mode="none",
             ocr_model="custom-ocr-model",
             translation_service="deepl",
         )
@@ -235,6 +251,7 @@ def test_legacy_settings_migrate_once_and_preserve_existing_deeplx(tmp_path: Pat
     database.close()
 
     assert restarted["source_language"] == "EN"
+    assert restarted["ocr_auth_mode"] == "none"
     assert restarted["ocr_model"] == "custom-ocr-model"
     assert restarted["translation_service"] == "deepl"
 
@@ -248,7 +265,11 @@ def test_legacy_custom_ocr_and_korean_without_deeplx_are_preserved(tmp_path: Pat
         cipher,
         {
             "source_language": ("KO", False),
+            "ocr_mode": ("direct", False),
+            "ocr_auth_mode": ("basic", False),
             "ocr_api_url": ("https://ocr.example/custom/jobs", True),
+            "ocr_basic_username": ("comic-user", False),
+            "ocr_basic_password": ("comic-password", True),
             "ocr_model": ("custom-model", False),
             "deeplx_url": ("", True),
         },
@@ -258,9 +279,45 @@ def test_legacy_custom_ocr_and_korean_without_deeplx_are_preserved(tmp_path: Pat
     database.close()
 
     assert migrated["source_language"] == "KO"
+    assert migrated["ocr_mode"] == "direct"
+    assert migrated["ocr_auth_mode"] == "basic"
     assert migrated["ocr_api_url"] == "https://ocr.example/custom/jobs"
+    assert migrated["ocr_basic_username"] == "comic-user"
+    assert migrated["ocr_basic_password"] == "comic-password"
     assert migrated["ocr_model"] == "custom-model"
     assert migrated["translation_service"] == "deepl"
+
+
+@pytest.mark.parametrize(
+    ("token", "expected_auth_mode"),
+    [("legacy-token", "bearer"), ("", "none")],
+)
+def test_v3_settings_restore_auto_mode_and_infer_auth_from_token(
+    tmp_path: Path,
+    token: str,
+    expected_auth_mode: str,
+) -> None:
+    config = config_for(tmp_path, initial_settings={"ocr_token": token} if token else {})
+    database = Database(config.database_path)
+    cipher = SecretCipher(config.secrets_path, database)
+    SettingsService(database, cipher, config)
+    database.execute(
+        "DELETE FROM app_settings WHERE key IN (?, ?, ?, ?)",
+        ("ocr_mode", "ocr_auth_mode", "ocr_basic_username", "ocr_basic_password"),
+    )
+    database.execute(
+        "UPDATE app_metadata SET value = '3' WHERE key = ?",
+        ("settings_schema_version",),
+    )
+
+    migrated = SettingsService(database, cipher, config).values(include_secrets=True)
+    database.close()
+
+    assert migrated["ocr_mode"] == "auto"
+    assert migrated["ocr_auth_mode"] == expected_auth_mode
+    assert migrated["ocr_token"] == token
+    assert migrated["ocr_basic_username"] == ""
+    assert migrated["ocr_basic_password"] == ""
 
 
 def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> None:
@@ -275,6 +332,12 @@ def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> N
             "/api/settings",
             json={
                 "ocrToken": {"action": "replace", "value": "new-secret-token"},
+                "ocrAuthMode": "basic",
+                "ocrBasicUsername": "basic-user",
+                "ocrBasicPassword": {
+                    "action": "replace",
+                    "value": "basic-secret-password",
+                },
                 "deeplApiKey": {"action": "replace", "value": "test-deepl-key:fx"},
                 "deeplxUrl": {
                     "action": "replace",
@@ -282,7 +345,13 @@ def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> N
                 },
             },
         )
-        kept = client.patch("/api/settings", json={"ocrToken": {"action": "keep"}})
+        kept = client.patch(
+            "/api/settings",
+            json={
+                "ocrToken": {"action": "keep"},
+                "ocrBasicPassword": {"action": "keep"},
+            },
+        )
 
     database_bytes = config.database_path.read_bytes()
     assert initial.status_code == 200
@@ -295,12 +364,20 @@ def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> N
         "configured": True,
         "masked": "••••oken",
     }
+    assert updated.json()["ocrAuthMode"] == "basic"
+    assert updated.json()["ocrBasicUsername"] == "basic-user"
+    assert updated.json()["ocrBasicPassword"] == {
+        "configured": True,
+        "masked": "••••word",
+    }
     assert updated.json()["deeplApiKey"] == {
         "configured": True,
         "masked": "••••y:fx",
     }
     assert kept.json()["ocrToken"]["configured"] is True
+    assert kept.json()["ocrBasicPassword"]["configured"] is True
     assert b"new-secret-token" not in database_bytes
+    assert b"basic-secret-password" not in database_bytes
     assert b"test-deepl-key:fx" not in database_bytes
     assert b"translator.example" not in database_bytes
 
@@ -311,11 +388,18 @@ def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> N
     )
     with TestClient(create_app(restarted_config)) as client:
         persisted = client.get("/api/settings")
-        cleared = client.patch("/api/settings", json={"ocrToken": {"action": "clear"}})
+        cleared = client.patch(
+            "/api/settings",
+            json={
+                "ocrToken": {"action": "clear"},
+                "ocrBasicPassword": {"action": "clear"},
+            },
+        )
 
     assert persisted.json()["ocrModel"] == "seed-model"
     assert persisted.json()["ocrToken"]["masked"] == "••••oken"
     assert cleared.json()["ocrToken"] == {"configured": False, "masked": None}
+    assert cleared.json()["ocrBasicPassword"] == {"configured": False, "masked": None}
 
 
 def test_settings_reject_invalid_secret_protocol_and_slice_geometry(

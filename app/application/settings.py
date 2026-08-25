@@ -16,10 +16,10 @@ from app.domain.settings import (
 from app.repositories.database import Database
 from app.security.secrets import SecretCipher
 
-DEFAULT_OCR_API_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
+DEFAULT_OCR_API_URL = "http://example.com/layout-parsing"
 DEFAULT_OCR_MODEL = "PaddleOCR-VL-1.6"
 SETTINGS_SCHEMA_KEY = "settings_schema_version"
-SETTINGS_SCHEMA_VERSION = 3
+SETTINGS_SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,8 +32,12 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
     "page_direction": SettingDefinition("ltr"),
     "realtime_translation_default": SettingDefinition(False),
     "source_language": SettingDefinition("AUTO"),
+    "ocr_mode": SettingDefinition("auto"),
+    "ocr_auth_mode": SettingDefinition("none"),
     "ocr_api_url": SettingDefinition(DEFAULT_OCR_API_URL, True),
     "ocr_token": SettingDefinition("", True),
+    "ocr_basic_username": SettingDefinition(""),
+    "ocr_basic_password": SettingDefinition("", True),
     "ocr_model": SettingDefinition(DEFAULT_OCR_MODEL),
     "ocr_poll_interval_seconds": SettingDefinition(2.0),
     "ocr_timeout_seconds": SettingDefinition(180.0),
@@ -225,6 +229,16 @@ class SettingsService:
 
         if version < 3 and int(values.get("ocr_slice_height") or 0) == 4000:
             values["ocr_slice_height"] = 1600
+        if version < 4:
+            old_mode = str(old_values.get("ocr_mode") or "").strip().lower()
+            values["ocr_mode"] = old_mode if old_mode in {"auto", "direct", "job"} else "auto"
+
+            old_auth_mode = str(old_values.get("ocr_auth_mode") or "").strip().lower()
+            values["ocr_auth_mode"] = (
+                old_auth_mode
+                if old_auth_mode in {"none", "bearer", "basic"}
+                else ("bearer" if str(values.get("ocr_token") or "").strip() else "none")
+            )
         return values
 
     def _replace_settings(self, connection: Any, values: Mapping[str, object], now: int) -> None:
