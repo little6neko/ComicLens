@@ -139,7 +139,7 @@ export interface ServerSettings {
   targetLanguage: "ZH-HANS";
   ocrMode: "auto" | "direct" | "job";
   ocrAuthMode: "none" | "bearer" | "basic";
-  ocrApiUrl: SensitiveSettingState;
+  ocrApiUrl: string;
   ocrToken: SensitiveSettingState;
   ocrBasicUsername: string;
   ocrBasicPassword: SensitiveSettingState;
@@ -152,7 +152,9 @@ export interface ServerSettings {
   deeplxUrl: SensitiveSettingState;
   translationTimeoutSeconds: number;
   translationConcurrency: number;
-  proxyUrl: SensitiveSettingState;
+  proxyUrl: string;
+  proxyUsername: string;
+  proxyPassword: SensitiveSettingState;
   longImageThreshold: number;
   ocrSliceHeight: number;
   ocrSliceOverlap: number;
@@ -338,18 +340,16 @@ export type SettingsPatch = Partial<
     | "targetLanguage"
     | "accessPasswordEnabled"
     | "publicListenerWarning"
-    | "ocrApiUrl"
     | "ocrToken"
     | "ocrBasicPassword"
     | "deeplApiKey"
     | "deeplxUrl"
-    | "proxyUrl"
+    | "proxyPassword"
   >
 > & {
-  ocrApiUrl?: SensitiveAction;
   ocrToken?: SensitiveAction;
   ocrBasicPassword?: SensitiveAction;
   deeplApiKey?: SensitiveAction;
   deeplxUrl?: SensitiveAction;
-  proxyUrl?: SensitiveAction;
+  proxyPassword?: SensitiveAction;
 };

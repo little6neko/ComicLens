@@ -8,7 +8,11 @@ import httpx
 import pytest
 
 from app.errors import AppError
-from app.sources.manga18fx import CATEGORY_BASELINE, Manga18fxSource
+from app.sources.manga18fx import (
+    CATEGORY_BASELINE,
+    Manga18fxSource,
+    proxy_url_with_credentials,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "manga18fx"
 
@@ -24,6 +28,45 @@ def html_response(request: httpx.Request, name: str, status: int = 200) -> httpx
         content=fixture(name),
         request=request,
     )
+
+
+@pytest.mark.parametrize(
+    ("proxy_url", "username", "password", "expected"),
+    [
+        ("", "ignored-user", "ignored-password", ""),
+        (
+            "  http://embedded:old@proxy.example:8080  ",
+            "",
+            "",
+            "http://embedded:old@proxy.example:8080",
+        ),
+        (
+            "http://embedded:old@proxy.example:8080",
+            "new user",
+            "new@password",
+            "http://new%20user:new%40password@proxy.example:8080",
+        ),
+        (
+            "http://embedded:old@proxy.example:8080",
+            "new-user",
+            "",
+            "http://new-user@proxy.example:8080",
+        ),
+        (
+            "http://embedded:old@proxy.example:8080",
+            "",
+            "new-password",
+            "http://:new-password@proxy.example:8080",
+        ),
+    ],
+)
+def test_proxy_url_with_credentials_only_changes_runtime_value(
+    proxy_url: str,
+    username: str,
+    password: str,
+    expected: str,
+) -> None:
+    assert proxy_url_with_credentials(proxy_url, username, password) == expected
 
 
 @pytest.mark.asyncio
@@ -422,6 +465,31 @@ async def test_configured_proxy_failure_retries_only_the_proxy_route(
     assert "user" not in captured.value.message
     assert "secret" not in captured.value.message
     assert "proxy.example" not in captured.value.message
+
+
+@pytest.mark.asyncio
+async def test_invalid_runtime_proxy_credentials_are_reported_without_leaking_values() -> None:
+    def direct_handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"persistent client must not be used: {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(direct_handler)) as client:
+        source = Manga18fxSource(
+            base_url="https://manga18fx.com",
+            client=client,
+            proxy_provider=lambda: proxy_url_with_credentials(
+                "http://[invalid-proxy",
+                "private-user",
+                "private-password",
+            ),
+        )
+        with pytest.raises(AppError) as captured:
+            await source.home()
+
+    assert captured.value.code == "UPSTREAM_FETCH_ERROR"
+    assert captured.value.message == "无法读取 Manga18fx，请稍后重试"
+    assert "private-user" not in captured.value.message
+    assert "private-password" not in captured.value.message
+    assert "invalid-proxy" not in captured.value.message
 
 
 @pytest.mark.asyncio

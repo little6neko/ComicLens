@@ -31,7 +31,7 @@ class ServerSettings(ComicModel):
     target_language: Literal["ZH-HANS"] = "ZH-HANS"
     ocr_mode: Literal["auto", "direct", "job"]
     ocr_auth_mode: Literal["none", "bearer", "basic"]
-    ocr_api_url: SensitiveSettingState
+    ocr_api_url: str
     ocr_token: SensitiveSettingState
     ocr_basic_username: str
     ocr_basic_password: SensitiveSettingState
@@ -44,7 +44,9 @@ class ServerSettings(ComicModel):
     deeplx_url: SensitiveSettingState
     translation_timeout_seconds: float
     translation_concurrency: int
-    proxy_url: SensitiveSettingState
+    proxy_url: str
+    proxy_username: str
+    proxy_password: SensitiveSettingState
     long_image_threshold: int
     ocr_slice_height: int
     ocr_slice_overlap: int
@@ -61,7 +63,7 @@ class ServerSettingsPatch(ComicModel):
     source_language: Literal["AUTO", "EN", "KO"] | None = None
     ocr_mode: Literal["auto", "direct", "job"] | None = None
     ocr_auth_mode: Literal["none", "bearer", "basic"] | None = None
-    ocr_api_url: SensitiveSettingPatch | None = None
+    ocr_api_url: str | None = None
     ocr_token: SensitiveSettingPatch | None = None
     ocr_basic_username: str | None = Field(default=None, max_length=200)
     ocr_basic_password: SensitiveSettingPatch | None = None
@@ -74,7 +76,9 @@ class ServerSettingsPatch(ComicModel):
     deeplx_url: SensitiveSettingPatch | None = None
     translation_timeout_seconds: float | None = Field(default=None, ge=1, le=600)
     translation_concurrency: int | None = Field(default=None, ge=1, le=16)
-    proxy_url: SensitiveSettingPatch | None = None
+    proxy_url: str | None = None
+    proxy_username: str | None = Field(default=None, max_length=200)
+    proxy_password: SensitiveSettingPatch | None = None
     long_image_threshold: int | None = Field(default=None, ge=1000, le=100000)
     ocr_slice_height: int | None = Field(default=None, ge=500, le=50000)
     ocr_slice_overlap: int | None = Field(default=None, ge=0, le=5000)

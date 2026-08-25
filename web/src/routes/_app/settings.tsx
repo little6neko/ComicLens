@@ -46,21 +46,14 @@ type Draft = Omit<
   | "targetLanguage"
   | "accessPasswordEnabled"
   | "publicListenerWarning"
-  | "ocrApiUrl"
   | "ocrToken"
   | "ocrBasicPassword"
   | "deeplApiKey"
   | "deeplxUrl"
-  | "proxyUrl"
+  | "proxyPassword"
 >;
 
-type SecretKey =
-  | "ocrApiUrl"
-  | "ocrToken"
-  | "ocrBasicPassword"
-  | "deeplApiKey"
-  | "deeplxUrl"
-  | "proxyUrl";
+type SecretKey = "ocrToken" | "ocrBasicPassword" | "deeplApiKey" | "deeplxUrl" | "proxyPassword";
 
 interface SecretDraft {
   action: "keep" | "replace" | "clear";
@@ -68,12 +61,11 @@ interface SecretDraft {
 }
 
 const secretKeys: SecretKey[] = [
-  "ocrApiUrl",
   "ocrToken",
   "ocrBasicPassword",
   "deeplApiKey",
   "deeplxUrl",
-  "proxyUrl",
+  "proxyPassword",
 ];
 
 export const Route = createFileRoute("/_app/settings")({ component: SettingsPage });
@@ -260,6 +252,13 @@ function SettingsPage() {
               ]}
             />
           </Field>
+          <Field label="OCR API URL">
+            <Input
+              value={draft.ocrApiUrl}
+              onChange={(event) => patch("ocrApiUrl", event.target.value)}
+              placeholder="http://example.com/layout-parsing"
+            />
+          </Field>
           <Field label="OCR 鉴权">
             <Select
               value={draft.ocrAuthMode}
@@ -272,13 +271,6 @@ function SettingsPage() {
               ]}
             />
           </Field>
-          <SecretField
-            label="OCR API URL"
-            state={settings.data.ocrApiUrl}
-            draft={secrets.ocrApiUrl}
-            onChange={(value) => setSecret(setSecrets, "ocrApiUrl", value)}
-            placeholder="http://example.com/layout-parsing"
-          />
           {draft.ocrAuthMode === "bearer" && (
             <SecretField
               label="OCR Token"
@@ -429,15 +421,32 @@ function SettingsPage() {
 
         <SettingsSection icon={<NetworkIcon />} title="代理">
           <div className="sm:col-span-2">
-            <SecretField
+            <Field
               label="漫画代理 URL"
-              state={settings.data.proxyUrl}
-              draft={secrets.proxyUrl}
-              onChange={(value) => setSecret(setSecrets, "proxyUrl", value)}
-              placeholder="http://user:password@proxy:8080"
-              hint="仅用于漫画目录、搜索、详情、章节和源图；设置后只走该代理，留空时遵循标准代理环境变量。OCR、DeepL 和 DeepLX 不使用此设置，但仍遵循标准代理环境变量。"
-            />
+              hint="仅用于漫画目录、搜索、详情、章节和源图；独立账号或密码任一填写时，会在请求时覆盖 URL 自带凭据。留空时遵循标准代理环境变量。OCR、DeepL 和 DeepLX 不使用此设置，但仍遵循标准代理环境变量。"
+            >
+              <Input
+                value={draft.proxyUrl}
+                onChange={(event) => patch("proxyUrl", event.target.value)}
+                placeholder="http://proxy.example:8080"
+              />
+            </Field>
           </div>
+          <Field label="代理账号">
+            <Input
+              value={draft.proxyUsername}
+              onChange={(event) => patch("proxyUsername", event.target.value)}
+              maxLength={200}
+              autoComplete="off"
+            />
+          </Field>
+          <SecretField
+            label="代理密码"
+            state={settings.data.proxyPassword}
+            draft={secrets.proxyPassword}
+            onChange={(value) => setSecret(setSecrets, "proxyPassword", value)}
+            type="password"
+          />
         </SettingsSection>
 
         <SettingsSection icon={<DatabaseIcon />} title="缓存">
@@ -682,12 +691,11 @@ function toDraft(settings: ServerSettings): Draft {
     targetLanguage: _targetLanguage,
     accessPasswordEnabled: _accessPasswordEnabled,
     publicListenerWarning: _publicListenerWarning,
-    ocrApiUrl: _ocrApiUrl,
     ocrToken: _ocrToken,
     ocrBasicPassword: _ocrBasicPassword,
     deeplApiKey: _deeplApiKey,
     deeplxUrl: _deeplxUrl,
-    proxyUrl: _proxyUrl,
+    proxyPassword: _proxyPassword,
     ...draft
   } = settings;
   return draft;

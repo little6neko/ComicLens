@@ -94,6 +94,18 @@ CATEGORY_BASELINE = (
 )
 
 
+def proxy_url_with_credentials(proxy_url: str, username: str, password: str) -> str:
+    runtime_url = str(proxy_url or "").strip()
+    if not runtime_url or (not username and not password):
+        return runtime_url
+    return str(
+        httpx.URL(runtime_url).copy_with(
+            username=str(username or ""),
+            password=str(password or ""),
+        )
+    )
+
+
 class Manga18fxSource:
     def __init__(
         self,
@@ -367,8 +379,8 @@ class Manga18fxSource:
         return response.content
 
     async def _request(self, url: str, *, allow_media_host: bool) -> httpx.Response:
-        proxy_url = self._proxy_url()
         try:
+            proxy_url = self._proxy_url()
             if proxy_url:
                 async with self._proxy_client(proxy_url) as proxy_client:
                     return await self._request_with_retries(

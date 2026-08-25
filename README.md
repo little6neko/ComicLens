@@ -66,7 +66,8 @@ docker run -d \
 
 首次部署时可以额外添加 `-e COMICLENS_PROXY_URL='http://代理地址:端口'`，为 Web 设置中的
 “漫画代理 URL”提供初值。该字段非空时，漫画目录、搜索、详情、章节和源图只走指定代理，
-失败后不会改为直连；部署后可直接在设置页替换或清除。
+失败后不会改为直连；部署后可直接在设置页编辑或清除 URL，并可另行填写代理账号和加密保存
+的代理密码。
 
 应用也遵循 httpx 支持的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 和 `NO_PROXY`。漫画代理
 URL 留空时，漫画请求使用这些标准环境变量；OCR、DeepL 和 DeepLX 不使用漫画代理 URL，
@@ -142,7 +143,8 @@ docker compose logs -f comiclens
 
 上述 `docker run` 和 Compose 均将 `./data` 挂载到容器的 `/app/data`，其中包含：
 
-- `comiclens.db`：设置、收藏、历史、已读和翻译任务状态；
+- `comiclens.db`：设置、收藏、历史、已读和翻译任务状态；OCR API URL、漫画代理 URL 和代理
+  账号以明文保存在其中；
 - `secrets.key`：敏感设置的加密密钥；
 - `cache/`：封面、原图、OCR/译文检查点和译图。
 
@@ -159,7 +161,7 @@ docker start comiclens
 ```
 
 恢复时必须同时恢复数据库与 `secrets.key`，不能只恢复其中一个。请妥善保管备份，因为完整
-`data/` 目录可以解密其中的 OCR/翻译服务凭据。
+`data/` 目录可以解密其中的 OCR/翻译服务凭据和独立代理密码。
 
 ## OCR、翻译与代理设置
 
@@ -171,7 +173,7 @@ docker start comiclens
 4. OCR 模型、轮询间隔、总超时和全服务并发；
 5. OCR 长图阈值、分片高度、重叠和兼容阅读分片高度；
 6. 翻译服务：默认使用 DeepL 官方 API，也可切换为 DeepLX，并配置凭据、超时与并发；
-7. 可选漫画代理 URL，仅控制漫画目录和源图请求。
+7. 可选漫画代理 URL、账号和密码，仅控制漫画目录和源图请求。
 
 PaddleOCR 同时支持 PaddleX 服务化部署的同步 JSON 接口和云端异步任务接口。新安装的 OCR
 URL 是示例值 `http://example.com/layout-parsing`，必须替换为自己的服务地址。自动模式将
@@ -198,16 +200,23 @@ OCR 失败后的手动重试会创建新任务。同步模式不保存 `jobId`�
 并从之后进入的章节开始使用。已经打开的当前章节仍由阅读器顶部实时翻译开关独立控制；该
 开关不会反写浏览器默认值。
 
-敏感字段只返回掩码，编辑时明确选择“保留 / 替换 / 清除”。“漫画代理 URL”非空时，所有
-漫画目录和源图请求只使用该代理，同一请求的重试与重定向不会切换线路；留空时由标准代理
-环境变量和 `NO_PROXY` 决定使用代理还是直连。OCR、DeepL 和 DeepLX 不读取该字段，但同样
-遵循标准代理环境变量。
+OCR Token、Basic 密码、DeepL Key、DeepLX URL 和独立代理密码等敏感字段只返回掩码，编辑
+时明确选择“保留 / 替换 / 清除”。OCR API URL、漫画代理 URL 和代理账号则以明文保存在
+SQLite 中，由 `/api/settings` 完整返回并直接显示在设置页；如果把凭据写进代理 URL，这些凭据
+也会以明文可见。
+
+“漫画代理 URL”非空时，所有漫画目录和源图请求只使用该代理，同一请求的重试与重定向不会
+切换线路。独立账号或密码任一非空时，会在每次请求前覆盖 URL 自带凭据，但不会拆分、修改或
+写回原 URL；两者均为空时原 URL 保持生效。URL 留空时由标准代理环境变量和 `NO_PROXY` 决定
+使用代理还是直连。OCR、DeepL 和 DeepLX 不读取这些漫画代理字段，但同样遵循标准代理环境
+变量。
 
 `.env.example` 中的 `COMICLENS_OCR_*`、`COMICLENS_DEEPL_API_KEY`、
 `COMICLENS_DEEPLX_URL` 和 `COMICLENS_PROXY_URL` 只用于首次初始化或设置结构升级重建时提供
 初值，之后以数据库中的值为准。`HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 和 `NO_PROXY`
 则是每次启动时由 httpx 直接读取的运行期变量。Basic 用户名和密码环境变量不会自动切换
-鉴权模式，仍需在 Web 设置页选择 Basic Auth。
+鉴权模式，仍需在 Web 设置页选择 Basic Auth。独立代理账号和密码不提供环境变量，只能在
+设置页维护。
 
 ## 本地开发
 

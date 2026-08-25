@@ -19,7 +19,7 @@ from app.security.secrets import SecretCipher
 DEFAULT_OCR_API_URL = "http://example.com/layout-parsing"
 DEFAULT_OCR_MODEL = "PaddleOCR-VL-1.6"
 SETTINGS_SCHEMA_KEY = "settings_schema_version"
-SETTINGS_SCHEMA_VERSION = 6
+SETTINGS_SCHEMA_VERSION = 7
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +33,7 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
     "source_language": SettingDefinition("AUTO"),
     "ocr_mode": SettingDefinition("auto"),
     "ocr_auth_mode": SettingDefinition("none"),
-    "ocr_api_url": SettingDefinition(DEFAULT_OCR_API_URL, True),
+    "ocr_api_url": SettingDefinition(DEFAULT_OCR_API_URL),
     "ocr_token": SettingDefinition("", True),
     "ocr_basic_username": SettingDefinition(""),
     "ocr_basic_password": SettingDefinition("", True),
@@ -46,7 +46,9 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
     "deeplx_url": SettingDefinition("", True),
     "translation_timeout_seconds": SettingDefinition(30.0),
     "translation_concurrency": SettingDefinition(2),
-    "proxy_url": SettingDefinition("", True),
+    "proxy_url": SettingDefinition(""),
+    "proxy_username": SettingDefinition(""),
+    "proxy_password": SettingDefinition("", True),
     "long_image_threshold": SettingDefinition(8000),
     "ocr_slice_height": SettingDefinition(1600),
     "ocr_slice_overlap": SettingDefinition(200),

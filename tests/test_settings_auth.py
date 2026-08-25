@@ -82,7 +82,7 @@ def test_new_settings_use_auto_ocr_without_auth_and_sync_example_url(tmp_path: P
     assert payload["targetLanguage"] == "ZH-HANS"
     assert payload["ocrMode"] == "auto"
     assert payload["ocrAuthMode"] == "none"
-    assert payload["ocrApiUrl"]["configured"] is True
+    assert payload["ocrApiUrl"] == "http://example.com/layout-parsing"
     assert payload["ocrBasicUsername"] == ""
     assert payload["ocrBasicPassword"] == {"configured": False, "masked": None}
     assert payload["ocrModel"] == "PaddleOCR-VL-1.6"
@@ -95,7 +95,9 @@ def test_new_settings_use_auto_ocr_without_auth_and_sync_example_url(tmp_path: P
     assert payload["translationService"] == "deepl"
     assert payload["deeplApiKey"] == {"configured": False, "masked": None}
     assert payload["translationTimeoutSeconds"] == 30.0
-    assert payload["proxyUrl"] == {"configured": False, "masked": None}
+    assert payload["proxyUrl"] == ""
+    assert payload["proxyUsername"] == ""
+    assert payload["proxyPassword"] == {"configured": False, "masked": None}
     assert "fallbackProxyUrl" not in payload
     assert "deeplxTimeoutSeconds" not in payload
 
@@ -105,6 +107,54 @@ def test_new_settings_use_auto_ocr_without_auth_and_sync_example_url(tmp_path: P
     database.close()
 
     assert values["ocr_api_url"] == "http://example.com/layout-parsing"
+
+
+def test_new_url_and_proxy_credential_storage_matches_visibility_rules(
+    tmp_path: Path,
+) -> None:
+    ocr_url = "https://ocr.example/layout-parsing?tenant=visible"
+    proxy_url = "http://embedded:visible@proxy.example:8080"
+    config = config_for(
+        tmp_path,
+        initial_settings={
+            "ocr_api_url": ocr_url,
+            "proxy_url": proxy_url,
+            "proxy_username": "proxy-user",
+            "proxy_password": "proxy-secret-password",
+        },
+    )
+
+    with TestClient(create_app(config)) as client:
+        response = client.get("/api/settings")
+
+    database = Database(config.database_path)
+    cipher = SecretCipher(config.secrets_path, database)
+    rows = {
+        str(row["key"]): row
+        for row in database.fetchall(
+            "SELECT key, value, is_secret FROM app_settings ORDER BY key"
+        )
+    }
+    database.close()
+
+    assert response.status_code == 200
+    assert response.json()["ocrApiUrl"] == ocr_url
+    assert response.json()["proxyUrl"] == proxy_url
+    assert response.json()["proxyUsername"] == "proxy-user"
+    assert response.json()["proxyPassword"] == {
+        "configured": True,
+        "masked": "••••word",
+    }
+    assert rows["ocr_api_url"]["is_secret"] == 0
+    assert json.loads(str(rows["ocr_api_url"]["value"])) == ocr_url
+    assert rows["proxy_url"]["is_secret"] == 0
+    assert json.loads(str(rows["proxy_url"]["value"])) == proxy_url
+    assert rows["proxy_username"]["is_secret"] == 0
+    assert json.loads(str(rows["proxy_username"]["value"])) == "proxy-user"
+    assert rows["proxy_password"]["is_secret"] == 1
+    assert json.loads(cipher.decrypt(str(rows["proxy_password"]["value"]))) == (
+        "proxy-secret-password"
+    )
 
 
 def test_saved_ocr_concurrency_updates_running_manager_immediately(tmp_path: Path) -> None:
@@ -130,19 +180,53 @@ def test_saved_comic_proxy_updates_running_source_provider_immediately(tmp_path:
 
         updated = client.patch(
             "/api/settings",
+            json={"proxyUrl": "http://embedded:old@proxy.example:8080"},
+        )
+        assert updated.status_code == 200
+        assert source._proxy_url() == "http://embedded:old@proxy.example:8080"
+
+        username_updated = client.patch(
+            "/api/settings",
+            json={"proxyUsername": "new user"},
+        )
+        assert username_updated.status_code == 200
+        assert source._proxy_url() == "http://new%20user@proxy.example:8080"
+
+        password_updated = client.patch(
+            "/api/settings",
             json={
-                "proxyUrl": {
+                "proxyPassword": {
                     "action": "replace",
-                    "value": "http://comic-proxy.example:8080",
+                    "value": "new@password",
                 }
             },
         )
-        assert updated.status_code == 200
-        assert source._proxy_url() == "http://comic-proxy.example:8080"
+        assert password_updated.status_code == 200
+        assert password_updated.json()["proxyPassword"] == {
+            "configured": True,
+            "masked": "••••word",
+        }
+        assert source._proxy_url() == (
+            "http://new%20user:new%40password@proxy.example:8080"
+        )
+
+        username_cleared = client.patch(
+            "/api/settings",
+            json={"proxyUsername": ""},
+        )
+        assert username_cleared.status_code == 200
+        assert source._proxy_url() == "http://:new%40password@proxy.example:8080"
+
+        password_cleared = client.patch(
+            "/api/settings",
+            json={"proxyPassword": {"action": "clear"}},
+        )
+        assert password_cleared.status_code == 200
+        assert source._proxy_url() == "http://embedded:old@proxy.example:8080"
 
         cleared = client.patch(
             "/api/settings",
-            json={"proxyUrl": {"action": "clear"}},
+            json={"proxyUrl": ""},
         )
         assert cleared.status_code == 200
         assert source._proxy_url() == ""
@@ -234,7 +318,7 @@ def test_v5_settings_drop_realtime_translation_default_and_preserve_other_values
     assert migrated["page_direction"] == "rtl"
     assert migrated["ocr_concurrency"] == 1
     assert migrated["ocr_token"] == "preserved-secret"
-    assert schema_version == "6"
+    assert schema_version == "7"
 
 
 def test_v2_settings_migrate_only_the_old_default_slice_height(tmp_path: Path) -> None:
@@ -441,7 +525,58 @@ def test_v4_settings_drop_fallback_proxy_without_copying_its_value(
     assert migrated["proxy_url"] == expected_proxy_url
     assert "fallback_proxy_url" not in stored_keys
     assert "proxy_url" in stored_keys
-    assert schema_version == "6"
+    assert schema_version == "7"
+
+
+def test_v6_settings_convert_urls_to_plaintext_without_rewriting_values(
+    tmp_path: Path,
+) -> None:
+    config = config_for(tmp_path, initial_settings={"ocr_token": "preserved-token"})
+    database = Database(config.database_path)
+    cipher = SecretCipher(config.secrets_path, database)
+    SettingsService(database, cipher, config)
+    ocr_url = " https://ocr.example/layout-parsing?key=visible%20value "
+    proxy_url = "http://embedded:user%40pass@proxy.example:8080"
+    for key, value in (("ocr_api_url", ocr_url), ("proxy_url", proxy_url)):
+        serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        database.execute(
+            "UPDATE app_settings SET value = ?, is_secret = 1 WHERE key = ?",
+            (cipher.encrypt(serialized), key),
+        )
+    database.execute(
+        "DELETE FROM app_settings WHERE key IN ('proxy_username', 'proxy_password')"
+    )
+    database.execute(
+        "UPDATE app_metadata SET value = '6' WHERE key = ?",
+        ("settings_schema_version",),
+    )
+
+    migrated = SettingsService(database, cipher, config).values(include_secrets=True)
+    rows = {
+        str(row["key"]): row
+        for row in database.fetchall(
+            "SELECT key, value, is_secret FROM app_settings ORDER BY key"
+        )
+    }
+    schema_version = database.scalar(
+        "SELECT value FROM app_metadata WHERE key = ?",
+        ("settings_schema_version",),
+    )
+    database.close()
+
+    assert migrated["ocr_api_url"] == ocr_url
+    assert migrated["proxy_url"] == proxy_url
+    assert migrated["proxy_username"] == ""
+    assert migrated["proxy_password"] == ""
+    assert migrated["ocr_token"] == "preserved-token"
+    assert rows["ocr_api_url"]["is_secret"] == 0
+    assert json.loads(str(rows["ocr_api_url"]["value"])) == ocr_url
+    assert rows["proxy_url"]["is_secret"] == 0
+    assert json.loads(str(rows["proxy_url"]["value"])) == proxy_url
+    assert rows["proxy_username"]["is_secret"] == 0
+    assert rows["proxy_password"]["is_secret"] == 1
+    assert rows["ocr_token"]["is_secret"] == 1
+    assert schema_version == "7"
 
 
 def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> None:
@@ -456,6 +591,7 @@ def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> N
             "/api/settings",
             json={
                 "ocrToken": {"action": "replace", "value": "new-secret-token"},
+                "ocrApiUrl": "https://ocr.example/layout-parsing?key=visible-value",
                 "ocrAuthMode": "basic",
                 "ocrBasicUsername": "basic-user",
                 "ocrBasicPassword": {
@@ -467,9 +603,11 @@ def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> N
                     "action": "replace",
                     "value": "https://translator.example/api?key=private",
                 },
-                "proxyUrl": {
+                "proxyUrl": "http://url-user:url-password@proxy.example:8080",
+                "proxyUsername": "proxy-user",
+                "proxyPassword": {
                     "action": "replace",
-                    "value": "http://proxy-user:proxy-password@proxy.example:8080",
+                    "value": "proxy-secret-password",
                 },
             },
         )
@@ -478,7 +616,7 @@ def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> N
             json={
                 "ocrToken": {"action": "keep"},
                 "ocrBasicPassword": {"action": "keep"},
-                "proxyUrl": {"action": "keep"},
+                "proxyPassword": {"action": "keep"},
             },
         )
 
@@ -503,19 +641,30 @@ def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> N
         "configured": True,
         "masked": "••••y:fx",
     }
-    assert updated.json()["proxyUrl"] == {
+    assert updated.json()["ocrApiUrl"] == (
+        "https://ocr.example/layout-parsing?key=visible-value"
+    )
+    assert updated.json()["proxyUrl"] == (
+        "http://url-user:url-password@proxy.example:8080"
+    )
+    assert updated.json()["proxyUsername"] == "proxy-user"
+    assert updated.json()["proxyPassword"] == {
         "configured": True,
-        "masked": "••••8080",
+        "masked": "••••word",
     }
     assert kept.json()["ocrToken"]["configured"] is True
     assert kept.json()["ocrBasicPassword"]["configured"] is True
-    assert kept.json()["proxyUrl"]["configured"] is True
+    assert kept.json()["proxyPassword"]["configured"] is True
     assert b"new-secret-token" not in database_bytes
     assert b"basic-secret-password" not in database_bytes
     assert b"test-deepl-key:fx" not in database_bytes
     assert b"translator.example" not in database_bytes
-    assert b"proxy-password" not in database_bytes
-    assert b"proxy.example" not in database_bytes
+    assert b"proxy-secret-password" not in database_bytes
+    assert b"ocr.example" in database_bytes
+    assert b"visible-value" in database_bytes
+    assert b"url-password" in database_bytes
+    assert b"proxy.example" in database_bytes
+    assert b"proxy-user" in database_bytes
 
     # A later environment seed does not overwrite persisted settings.
     restarted_config = config_for(
@@ -529,7 +678,9 @@ def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> N
             json={
                 "ocrToken": {"action": "clear"},
                 "ocrBasicPassword": {"action": "clear"},
-                "proxyUrl": {"action": "clear"},
+                "proxyUrl": "",
+                "proxyUsername": "",
+                "proxyPassword": {"action": "clear"},
             },
         )
 
@@ -537,7 +688,9 @@ def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> N
     assert persisted.json()["ocrToken"]["masked"] == "••••oken"
     assert cleared.json()["ocrToken"] == {"configured": False, "masked": None}
     assert cleared.json()["ocrBasicPassword"] == {"configured": False, "masked": None}
-    assert cleared.json()["proxyUrl"] == {"configured": False, "masked": None}
+    assert cleared.json()["proxyUrl"] == ""
+    assert cleared.json()["proxyUsername"] == ""
+    assert cleared.json()["proxyPassword"] == {"configured": False, "masked": None}
 
 
 def test_settings_reject_invalid_secret_protocol_and_slice_geometry(

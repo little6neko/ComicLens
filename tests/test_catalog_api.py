@@ -370,10 +370,7 @@ def test_translation_api_polls_manifest_and_serves_immutable_version(
         configured = api_client.patch(
             "/api/settings",
             json={
-                "ocrApiUrl": {
-                    "action": "replace",
-                    "value": "https://ocr.example/api",
-                },
+                "ocrApiUrl": "https://ocr.example/api",
                 "ocrToken": {
                     "action": "replace",
                     "value": "test-ocr-token",

@@ -15,7 +15,7 @@ from app.application.settings import SettingsService
 from app.cache.storage import MediaCache
 from app.config import AppConfig
 from app.domain.comic import SourceChapterManifest, SourcePage
-from app.domain.settings import SensitiveSettingPatch, ServerSettingsPatch
+from app.domain.settings import ServerSettingsPatch
 from app.errors import AppError
 from app.media.registry import SourceMediaRegistry
 from app.repositories.database import Database
@@ -1878,10 +1878,7 @@ async def test_manager_http_client_trusts_env_and_ignores_comic_proxy_setting(
 
         harness.manager.settings.patch(
             ServerSettingsPatch(
-                proxy_url=SensitiveSettingPatch(
-                    action="replace",
-                    value="http://comic-only-proxy.example:8080",
-                )
+                proxy_url="http://comic-only-proxy.example:8080"
             )
         )
         configured_runtime = harness.manager._runtime_settings(require_services=True)
@@ -1899,9 +1896,7 @@ async def test_manager_http_client_trusts_env_and_ignores_comic_proxy_setting(
         assert deeplx_pipeline.ocr.client is shared_client
         assert deeplx_pipeline.translator.client is shared_client
 
-        harness.manager.settings.patch(
-            ServerSettingsPatch(proxy_url=SensitiveSettingPatch(action="clear"))
-        )
+        harness.manager.settings.patch(ServerSettingsPatch(proxy_url=""))
         cleared_runtime = harness.manager._runtime_settings(require_services=True)
         cleared_runtime.update(
             {

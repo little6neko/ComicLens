@@ -19,7 +19,7 @@ from app.repositories.translation import TranslationRepository
 from app.security.access import SESSION_COOKIE_NAME, AccessGate, LoginRateLimiter
 from app.security.secrets import SecretCipher
 from app.sources.base import ComicSource
-from app.sources.manga18fx import Manga18fxSource
+from app.sources.manga18fx import Manga18fxSource, proxy_url_with_credentials
 from app.translation.manager import TranslationManager
 from app.web import SpaStaticFiles
 
@@ -51,12 +51,19 @@ def create_app(
             logger.warning(
                 "ComicLens is listening on a public interface without an access password"
             )
+
+        def current_comic_proxy_url() -> str:
+            values = settings_service.values(include_secrets=True)
+            return proxy_url_with_credentials(
+                str(values.get("proxy_url") or ""),
+                str(values.get("proxy_username") or ""),
+                str(values.get("proxy_password") or ""),
+            )
+
         source = comic_source or Manga18fxSource(
             base_url=resolved_config.upstream_base_url,
             timeout=resolved_config.request_timeout,
-            proxy_provider=lambda: str(
-                settings_service.values(include_secrets=True).get("proxy_url") or ""
-            ),
+            proxy_provider=current_comic_proxy_url,
         )
         app.state.comic_source = source
         media_registry = SourceMediaRegistry(database)
