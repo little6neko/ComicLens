@@ -7,8 +7,10 @@ import {
   KeyRoundIcon,
   LanguagesIcon,
   LogOutIcon,
+  NetworkIcon,
   PackageIcon,
   SaveIcon,
+  ScanTextIcon,
   ServerCogIcon,
   SettingsIcon,
   ShieldAlertIcon,
@@ -48,7 +50,7 @@ type Draft = Omit<
   | "ocrBasicPassword"
   | "deeplApiKey"
   | "deeplxUrl"
-  | "fallbackProxyUrl"
+  | "proxyUrl"
 >;
 
 type SecretKey =
@@ -57,7 +59,7 @@ type SecretKey =
   | "ocrBasicPassword"
   | "deeplApiKey"
   | "deeplxUrl"
-  | "fallbackProxyUrl";
+  | "proxyUrl";
 
 interface SecretDraft {
   action: "keep" | "replace" | "clear";
@@ -70,7 +72,7 @@ const secretKeys: SecretKey[] = [
   "ocrBasicPassword",
   "deeplApiKey",
   "deeplxUrl",
-  "fallbackProxyUrl",
+  "proxyUrl",
 ];
 
 export const Route = createFileRoute("/_app/settings")({ component: SettingsPage });
@@ -227,7 +229,7 @@ function SettingsPage() {
           />
         </SettingsSection>
 
-        <SettingsSection icon={<LanguagesIcon />} title="OCR 与翻译">
+        <SettingsSection icon={<ScanTextIcon />} title="OCR">
           <Field label="源语言" hint="目标语言固定为简体中文（ZH-HANS）">
             <Select
               value={draft.sourceLanguage}
@@ -335,6 +337,45 @@ function SettingsPage() {
             max={16}
             onChange={(value) => patch("ocrConcurrency", value)}
           />
+        </SettingsSection>
+
+        <SettingsSection
+          icon={<SlidersHorizontalIcon />}
+          title="OCR 长图高级设置"
+          defaultOpen={false}
+        >
+          <NumberField
+            label="长图阈值（px）"
+            value={draft.longImageThreshold}
+            min={1000}
+            max={100000}
+            onChange={(value) => patch("longImageThreshold", value)}
+          />
+          <NumberField
+            label="OCR 分片高度（px）"
+            value={draft.ocrSliceHeight}
+            min={500}
+            max={50000}
+            onChange={(value) => patch("ocrSliceHeight", value)}
+          />
+          <NumberField
+            label="OCR 分片重叠（px）"
+            value={draft.ocrSliceOverlap}
+            min={0}
+            max={5000}
+            onChange={(value) => patch("ocrSliceOverlap", value)}
+          />
+          <NumberField
+            label="阅读分片高度（px）"
+            hint="仅兼容旧整页译图任务；新任务直接按 OCR 分片逐片显示。"
+            value={draft.readingSliceHeight}
+            min={500}
+            max={50000}
+            onChange={(value) => patch("readingSliceHeight", value)}
+          />
+        </SettingsSection>
+
+        <SettingsSection icon={<LanguagesIcon />} title="翻译">
           <Field label="翻译服务" hint="请求失败时不会自动切换到另一服务。">
             <Select
               value={draft.translationService}
@@ -381,49 +422,19 @@ function SettingsPage() {
             max={16}
             onChange={(value) => patch("translationConcurrency", value)}
           />
-          <SecretField
-            label="回退代理 URL"
-            state={settings.data.fallbackProxyUrl}
-            draft={secrets.fallbackProxyUrl}
-            onChange={(value) => setSecret(setSecrets, "fallbackProxyUrl", value)}
-            placeholder="http://user:password@proxy:8080"
-          />
         </SettingsSection>
 
-        <SettingsSection
-          icon={<SlidersHorizontalIcon />}
-          title="OCR 长图高级设置"
-          defaultOpen={false}
-        >
-          <NumberField
-            label="长图阈值（px）"
-            value={draft.longImageThreshold}
-            min={1000}
-            max={100000}
-            onChange={(value) => patch("longImageThreshold", value)}
-          />
-          <NumberField
-            label="OCR 分片高度（px）"
-            value={draft.ocrSliceHeight}
-            min={500}
-            max={50000}
-            onChange={(value) => patch("ocrSliceHeight", value)}
-          />
-          <NumberField
-            label="OCR 分片重叠（px）"
-            value={draft.ocrSliceOverlap}
-            min={0}
-            max={5000}
-            onChange={(value) => patch("ocrSliceOverlap", value)}
-          />
-          <NumberField
-            label="阅读分片高度（px）"
-            hint="仅兼容旧整页译图任务；新任务直接按 OCR 分片逐片显示。"
-            value={draft.readingSliceHeight}
-            min={500}
-            max={50000}
-            onChange={(value) => patch("readingSliceHeight", value)}
-          />
+        <SettingsSection icon={<NetworkIcon />} title="代理">
+          <div className="sm:col-span-2">
+            <SecretField
+              label="漫画代理 URL"
+              state={settings.data.proxyUrl}
+              draft={secrets.proxyUrl}
+              onChange={(value) => setSecret(setSecrets, "proxyUrl", value)}
+              placeholder="http://user:password@proxy:8080"
+              hint="仅用于漫画目录、搜索、详情、章节和源图；设置后只走该代理，留空时遵循标准代理环境变量。OCR 与翻译不使用此设置，但仍遵循标准代理环境变量。"
+            />
+          </div>
         </SettingsSection>
 
         <SettingsSection icon={<DatabaseIcon />} title="缓存">
@@ -673,7 +684,7 @@ function toDraft(settings: ServerSettings): Draft {
     ocrBasicPassword: _ocrBasicPassword,
     deeplApiKey: _deeplApiKey,
     deeplxUrl: _deeplxUrl,
-    fallbackProxyUrl: _fallbackProxyUrl,
+    proxyUrl: _proxyUrl,
     ...draft
   } = settings;
   return draft;

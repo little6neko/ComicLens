@@ -153,7 +153,7 @@ export interface ServerSettings {
   deeplxUrl: SensitiveSettingState;
   translationTimeoutSeconds: number;
   translationConcurrency: number;
-  fallbackProxyUrl: SensitiveSettingState;
+  proxyUrl: SensitiveSettingState;
   longImageThreshold: number;
   ocrSliceHeight: number;
   ocrSliceOverlap: number;
@@ -344,7 +344,7 @@ export type SettingsPatch = Partial<
     | "ocrBasicPassword"
     | "deeplApiKey"
     | "deeplxUrl"
-    | "fallbackProxyUrl"
+    | "proxyUrl"
   >
 > & {
   ocrApiUrl?: SensitiveAction;
@@ -352,5 +352,5 @@ export type SettingsPatch = Partial<
   ocrBasicPassword?: SensitiveAction;
   deeplApiKey?: SensitiveAction;
   deeplxUrl?: SensitiveAction;
-  fallbackProxyUrl?: SensitiveAction;
+  proxyUrl?: SensitiveAction;
 };
