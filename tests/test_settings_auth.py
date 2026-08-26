@@ -46,10 +46,17 @@ def test_database_runs_all_migrations_with_wal_and_foreign_keys(tmp_path: Path) 
         versions = database.fetchall("SELECT version FROM schema_migrations ORDER BY version")
         journal_mode = database.scalar("PRAGMA journal_mode")
         foreign_keys = database.scalar("PRAGMA foreign_keys")
+        generation_columns = {
+            str(row["name"])
+            for row in database.fetchall("PRAGMA table_info(translation_generations)")
+        }
+        batch_indexes = {
+            str(row["name"]) for row in database.fetchall("PRAGMA index_list(translation_batches)")
+        }
     finally:
         database.close()
 
-    assert {row["version"] for row in versions} == {1, 2, 3, 4, 5, 6, 7, 8}
+    assert {row["version"] for row in versions} == {1, 2, 3, 4, 5, 6, 7, 8, 9}
     assert {
         "app_settings",
         "favorites",
@@ -60,13 +67,86 @@ def test_database_runs_all_migrations_with_wal_and_foreign_keys(tmp_path: Path) 
         "active_translation_pages",
         "translation_segments",
         "active_translation_segments",
+        "translation_batches",
+        "translation_batch_items",
         "cache_bundles",
         "cache_entries",
         "media_sources",
         "app_metadata",
     }.issubset(tables)
+    assert "batch_item_id" in generation_columns
+    assert "translation_batches_open_comic_idx" in batch_indexes
     assert journal_mode == "wal"
     assert foreign_keys == 1
+
+
+def test_pretranslation_migration_preserves_existing_database(tmp_path: Path) -> None:
+    database_path = tmp_path / "legacy.db"
+    migrations_dir = Path(__file__).parents[1] / "app" / "repositories" / "migrations"
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute(
+            """
+            CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at INTEGER NOT NULL
+            )
+            """
+        )
+        for migration_path in sorted(migrations_dir.glob("00[1-8]_*.sql")):
+            version = int(migration_path.name.split("_", 1)[0])
+            connection.executescript(migration_path.read_text(encoding="utf-8"))
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, 1)",
+                (version, migration_path.name),
+            )
+        connection.execute(
+            """
+            INSERT INTO app_settings(key, value, is_secret, updated_at)
+            VALUES ('target_language', '"ZH-HANS"', 0, 1)
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO translation_generations(
+                generation_id, comic_id, chapter_id,
+                semantic_fingerprint, semantic_settings_json,
+                status, stop_requested, total_pages, completed_pages,
+                failed_pages, created_at, updated_at, kind,
+                planning_complete, total_segments, completed_segments,
+                failed_segments
+            ) VALUES (
+                'legacy-generation', 'alpha', 'chapter-1',
+                'fingerprint', '{}', 'completed', 0, 0, 0, 0,
+                1, 1, 'normal', 1, 0, 0, 0
+            )
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    migrated = Database(database_path)
+    try:
+        generation = migrated.fetchone(
+            "SELECT * FROM translation_generations WHERE generation_id = 'legacy-generation'"
+        )
+        setting = migrated.fetchone(
+            "SELECT value FROM app_settings WHERE key = 'target_language'"
+        )
+        versions = {
+            int(row["version"])
+            for row in migrated.fetchall("SELECT version FROM schema_migrations")
+        }
+    finally:
+        migrated.close()
+
+    assert generation is not None
+    assert generation["status"] == "completed"
+    assert generation["batch_item_id"] is None
+    assert setting is not None and setting["value"] == '"ZH-HANS"'
+    assert versions == {1, 2, 3, 4, 5, 6, 7, 8, 9}
 
 
 def test_new_settings_use_auto_ocr_without_auth_and_sync_example_url(tmp_path: Path) -> None:
