@@ -9,8 +9,8 @@ from app.domain.pretranslation import (
     TranslationBatchItemStatus,
     TranslationBatchItemSummary,
     TranslationBatchSummary,
+    TranslationBatchTaskSummary,
 )
-from app.domain.translation import TranslationTaskState
 from app.repositories.database import Database
 
 OPEN_BATCH_STATUSES = {
@@ -553,7 +553,7 @@ class PretranslationRepository:
         self,
         batch_id: str,
         *,
-        current_task: TranslationTaskState | None = None,
+        current_task: TranslationBatchTaskSummary | None = None,
     ) -> TranslationBatchSummary | None:
         row = self.database.fetchone(
             """

@@ -16,6 +16,8 @@ export const queryKeys = {
   settings: ["settings"] as const,
   cache: ["cache"] as const,
   backgroundTranslations: ["backgroundTranslations"] as const,
+  backgroundTranslationBatches: ["backgroundTranslationBatches"] as const,
+  translationOverview: (comicId: string) => ["translationOverview", comicId] as const,
   translation: (comicId: string, chapterId: string) => ["translation", comicId, chapterId] as const,
 };
 

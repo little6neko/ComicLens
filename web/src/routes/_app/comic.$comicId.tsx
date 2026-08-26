@@ -7,6 +7,7 @@ import {
   BookOpenIcon,
   HeartIcon,
   LoaderCircleIcon,
+  SparklesIcon,
   StarIcon,
 } from "lucide-react";
 import { Fragment, useState } from "react";
@@ -16,8 +17,10 @@ import { AppPage } from "@/components/app-page";
 import { ErrorState, LoadingState } from "@/components/query-state";
 import { Button, buttonVariants } from "@/components/ui/button";
 import type { ComicCreatorKind, ComicMetadataItem } from "@/domain/api";
+import { PretranslationDialog } from "@/features/comic-detail/pretranslation-dialog";
 import { resolveComicReadingTarget } from "@/features/comic-detail/reading-target";
 import { getComicStatusLabel } from "@/features/comic-detail/status-label";
+import { pretranslationBatchButtonLabel } from "@/features/pretranslation/pretranslation-batch-card";
 import { api } from "@/lib/api-client";
 import { queryKeys, queryTimes } from "@/lib/query-keys";
 import { cn } from "@/lib/utils";
@@ -30,6 +33,7 @@ function ComicDetailPage() {
   const { comicId } = Route.useParams();
   const queryClient = useQueryClient();
   const [chaptersDescending, setChaptersDescending] = useState(true);
+  const [pretranslationOpen, setPretranslationOpen] = useState(false);
   const comic = useQuery({
     queryKey: queryKeys.comic(comicId),
     queryFn: () => api.comic(comicId),
@@ -40,6 +44,23 @@ function ComicDetailPage() {
   const readChapters = useQuery({
     queryKey: queryKeys.readChapters(comicId),
     queryFn: () => api.readChapters(comicId),
+  });
+  const translationOverview = useQuery({
+    queryKey: queryKeys.translationOverview(comicId),
+    queryFn: () => api.translationOverview(comicId),
+    enabled: comic.isSuccess,
+    placeholderData: (previous) => previous,
+    refetchInterval: (query) => {
+      const status = query.state.data?.batch?.status;
+      return pretranslationOpen ||
+        status === "queued" ||
+        status === "running" ||
+        status === "pausing" ||
+        status === "cancelling"
+        ? 1000
+        : false;
+    },
+    refetchIntervalInBackground: true,
   });
   const isFavorite = favorites.data?.some((item) => item.comic.comicId === comicId) ?? false;
 
@@ -138,6 +159,21 @@ function ComicDetailPage() {
                 <HeartIcon className={cn("size-4", isFavorite && "fill-current")} />
               )}
               {isFavorite ? "已收藏" : "收藏"}
+            </Button>
+            <Button
+              variant="outline"
+              size="lg"
+              onClick={() => {
+                setPretranslationOpen(true);
+                void translationOverview.refetch();
+              }}
+            >
+              {translationOverview.isFetching && !translationOverview.data ? (
+                <LoaderCircleIcon className="size-4 animate-spin" />
+              ) : (
+                <SparklesIcon className="size-4" />
+              )}
+              {pretranslationBatchButtonLabel(translationOverview.data?.batch ?? null)}
             </Button>
           </div>
 
@@ -245,6 +281,17 @@ function ComicDetailPage() {
           })}
         </div>
       </section>
+
+      <PretranslationDialog
+        open={pretranslationOpen}
+        onOpenChange={setPretranslationOpen}
+        comicId={comicId}
+        comicTitle={detail.title}
+        overview={translationOverview.data}
+        loading={translationOverview.isPending}
+        error={translationOverview.error instanceof Error ? translationOverview.error : null}
+        onRetry={() => void translationOverview.refetch()}
+      />
     </AppPage>
   );
 }

@@ -6,7 +6,10 @@ import sqlite3
 from collections.abc import Callable, Sequence
 from typing import Protocol
 
-from app.domain.pretranslation import TranslationBatchSummary
+from app.domain.pretranslation import (
+    TranslationBatchSummary,
+    TranslationBatchTaskSummary,
+)
 from app.domain.translation import TranslationTaskState
 from app.errors import AppError
 from app.observability import log_event, short_ref
@@ -226,7 +229,21 @@ class PretranslationCoordinator:
         if current is not None:
             generation = self.repository.owned_generation(str(current["batch_item_id"]))
             if generation is not None:
-                current_task = self.manager.state_for_generation(str(generation["generation_id"]))
+                state = self.manager.state_for_generation(str(generation["generation_id"]))
+                if state is not None and state.generation_id is not None:
+                    current_task = TranslationBatchTaskSummary(
+                        generation_id=state.generation_id,
+                        status=state.status,
+                        current_page_index=state.current_page_index,
+                        current_segment=state.current_segment,
+                        planning_complete=state.planning_complete,
+                        total_pages=state.total_pages,
+                        completed_pages=state.completed_pages,
+                        failed_pages=state.failed_pages,
+                        total_segments=state.total_segments,
+                        completed_segments=state.completed_segments,
+                        failed_segments=state.failed_segments,
+                    )
         return self.repository.summary(batch_id, current_task=current_task)
 
     def background_batches(self) -> list[TranslationBatchSummary]:

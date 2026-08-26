@@ -5,12 +5,14 @@ import type {
   BackgroundTranslationTask,
   CacheStats,
   ChapterManifest,
+  ComicTranslationOverview,
   ComicCategory,
   ComicCreatorArchive,
   ComicCreatorKind,
   ComicDetail,
   ComicListPage,
   ComicOrder,
+  CreateTranslationBatchResult,
   FavoriteItem,
   ForceStopTranslationResult,
   HistoryItem,
@@ -21,6 +23,8 @@ import type {
   ServerSettings,
   SettingsPatch,
   TranslationActionResult,
+  TranslationBatchActionResult,
+  TranslationBatchSummary,
   TranslationTaskState,
 } from "@/domain/api";
 
@@ -157,6 +161,23 @@ export const api = {
     ),
   backgroundTranslations: () =>
     request<BackgroundTranslationTask[]>("/api/translations/background"),
+  translationOverview: (comicId: string) =>
+    request<ComicTranslationOverview>(
+      `/api/comics/${encodeURIComponent(comicId)}/translation-overview`,
+    ),
+  createTranslationBatch: (comicId: string, chapterIds: string[]) =>
+    request<CreateTranslationBatchResult>(
+      `/api/comics/${encodeURIComponent(comicId)}/translation-batches`,
+      json("POST", { chapterIds }),
+    ),
+  backgroundTranslationBatches: () =>
+    request<TranslationBatchSummary[]>("/api/translation-batches/background"),
+  pauseTranslationBatch: (batchId: string) => translationBatchAction(batchId, "pause"),
+  resumeTranslationBatch: (batchId: string) => translationBatchAction(batchId, "resume"),
+  cancelPendingTranslationBatch: (batchId: string) =>
+    translationBatchAction(batchId, "cancel-pending"),
+  retryFailedTranslationBatch: (batchId: string) => translationBatchAction(batchId, "retry-failed"),
+  closeTranslationBatch: (batchId: string) => translationBatchAction(batchId, "close"),
   translation: (comicId: string, chapterId: string) =>
     request<TranslationTaskState>(translationPath(comicId, chapterId)),
   startTranslation: (comicId: string, chapterId: string) =>
@@ -189,6 +210,13 @@ export const api = {
       json("POST"),
     ),
 };
+
+function translationBatchAction(batchId: string, action: string) {
+  return request<TranslationBatchActionResult>(
+    `/api/translation-batches/${encodeURIComponent(batchId)}/${action}`,
+    json("POST"),
+  );
+}
 
 function translationPath(comicId: string, chapterId: string) {
   return `/api/comics/${encodeURIComponent(comicId)}/chapters/${encodeURIComponent(chapterId)}/translation`;

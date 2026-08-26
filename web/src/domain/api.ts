@@ -320,6 +320,106 @@ export interface ForceStopTranslationResult {
   stoppedGenerations: number;
 }
 
+export type TranslationBatchStatus =
+  | "queued"
+  | "running"
+  | "pausing"
+  | "paused"
+  | "cancelling"
+  | "completed"
+  | "completed_with_errors"
+  | "cancelled"
+  | "failed";
+
+export type TranslationBatchItemStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "skipped"
+  | "failed"
+  | "cancelled";
+
+export type ChapterTranslationOverviewStatus =
+  | "not_started"
+  | "active"
+  | "paused"
+  | "completed"
+  | "needs_retry"
+  | "failed";
+
+export interface TranslationBatchItemSummary {
+  batchItemId: string;
+  chapterId: string;
+  chapterTitle: string;
+  position: number;
+  status: TranslationBatchItemStatus;
+  attempts: number;
+  errorCode: string | null;
+  errorSummary: string | null;
+}
+
+export interface TranslationBatchTaskSummary {
+  generationId: string;
+  status: TranslationTaskStatus;
+  currentPageIndex: number | null;
+  currentSegment: CurrentTranslationSegment | null;
+  planningComplete: boolean;
+  totalPages: number;
+  completedPages: number;
+  failedPages: number;
+  totalSegments: number;
+  completedSegments: number;
+  failedSegments: number;
+}
+
+export interface TranslationBatchSummary {
+  batchId: string;
+  comicId: string;
+  comicTitle: string;
+  status: TranslationBatchStatus;
+  pauseReason: "user" | "config" | null;
+  interactiveYielded: boolean;
+  errorCode: string | null;
+  errorSummary: string | null;
+  totalChapters: number;
+  pendingChapters: number;
+  runningChapters: number;
+  completedChapters: number;
+  skippedChapters: number;
+  failedChapters: number;
+  cancelledChapters: number;
+  currentItem: TranslationBatchItemSummary | null;
+  currentTask: TranslationBatchTaskSummary | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ChapterTranslationOverview {
+  chapterId: string;
+  chapterTitle: string;
+  position: number;
+  status: ChapterTranslationOverviewStatus;
+  requiresWork: boolean;
+  batchItem: TranslationBatchItemSummary | null;
+}
+
+export interface ComicTranslationOverview {
+  comicId: string;
+  chapters: ChapterTranslationOverview[];
+  batch: TranslationBatchSummary | null;
+}
+
+export interface CreateTranslationBatchResult {
+  batch: TranslationBatchSummary | null;
+  selectedCount: number;
+  workCount: number;
+  noWork: boolean;
+}
+
+export interface TranslationBatchActionResult {
+  batch: TranslationBatchSummary;
+}
+
 export interface AuthConfig {
   enabled: boolean;
 }

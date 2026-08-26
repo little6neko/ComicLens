@@ -755,6 +755,7 @@ def test_create_translation_batch_validates_deduplicates_and_orders_catalog(
     assert created.json()["workCount"] == 3
     assert created.json()["noWork"] is False
     assert created.json()["batch"]["status"] == "queued"
+    assert "pages" not in created.text
     assert [str(item["chapter_id"]) for item in items] == [
         "chapter-1",
         "special",
