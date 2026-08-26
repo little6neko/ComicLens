@@ -374,6 +374,7 @@ class PretranslationCoordinator:
         chapter_id = str(item["chapter_id"])
         state = self.manager.state(comic_id, chapter_id)
         if state.status == "completed" and not state.failed_pages and not state.failed_segments:
+            self.repository.clear_resume_requested(str(batch["batch_id"]))
             self.repository.finish_item(str(item["batch_item_id"]), "skipped")
             self._log_item("item_skipped", batch, item)
             self.repository.settle_after_item(str(batch["batch_id"]))
@@ -443,6 +444,7 @@ class PretranslationCoordinator:
                 "章节翻译任务启动失败",
             )
             return True
+        self.repository.clear_resume_requested(batch_id)
         self._log_item("item_dispatched", batch, item, action=action)
         return True
 
@@ -460,13 +462,31 @@ class PretranslationCoordinator:
             return True
         if task.status in {"preparing", "queued"}:
             return await self._start_or_retry_item(batch, item, task)
-        if task.status in {"running", "stopping_after_page", "stopping_after_segment"}:
+        if task.status == "running":
+            if bool(batch["resume_requested"]):
+                self.repository.clear_resume_requested(str(batch["batch_id"]))
+                return True
+            return False
+        if task.status in {"stopping_after_page", "stopping_after_segment"}:
             return False
         if task.status == "paused":
             if str(batch["status"]) == "paused":
                 return False
-            return await self._start_or_retry_item(batch, item, task)
+            if bool(batch["resume_requested"]):
+                return await self._start_or_retry_item(batch, item, task)
+            settled = self.repository.settle_stopped_current(
+                str(batch["batch_id"]),
+                str(item["batch_item_id"]),
+            )
+            self._log_item(
+                "current_stopped",
+                batch,
+                item,
+                status=str(settled["status"]) if settled is not None else "missing",
+            )
+            return True
         if task.status == "completed":
+            self.repository.clear_resume_requested(str(batch["batch_id"]))
             self.repository.finish_item(str(item["batch_item_id"]), "completed")
             self._log_item("item_completed", batch, item)
             self.repository.settle_after_item(str(batch["batch_id"]))
@@ -484,6 +504,7 @@ class PretranslationCoordinator:
         code: str,
         summary: str,
     ) -> None:
+        self.repository.clear_resume_requested(str(batch["batch_id"]))
         self.repository.finish_item(
             str(item["batch_item_id"]),
             "failed",

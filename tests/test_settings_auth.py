@@ -56,7 +56,7 @@ def test_database_runs_all_migrations_with_wal_and_foreign_keys(tmp_path: Path) 
     finally:
         database.close()
 
-    assert {row["version"] for row in versions} == {1, 2, 3, 4, 5, 6, 7, 8, 9}
+    assert {row["version"] for row in versions} == {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
     assert {
         "app_settings",
         "favorites",
@@ -146,7 +146,7 @@ def test_pretranslation_migration_preserves_existing_database(tmp_path: Path) ->
     assert generation["status"] == "completed"
     assert generation["batch_item_id"] is None
     assert setting is not None and setting["value"] == '"ZH-HANS"'
-    assert versions == {1, 2, 3, 4, 5, 6, 7, 8, 9}
+    assert versions == {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
 
 
 def test_new_settings_use_auto_ocr_without_auth_and_sync_example_url(tmp_path: Path) -> None:

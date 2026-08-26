@@ -12,6 +12,11 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import type { BackgroundTranslationStage, BackgroundTranslationTask } from "@/domain/api";
+import {
+  PretranslationBatchCard,
+  type PretranslationBatchAction,
+} from "@/features/pretranslation/pretranslation-batch-card";
+import { usePretranslationBatchActions } from "@/features/pretranslation/use-pretranslation-batch-actions";
 import { api } from "@/lib/api-client";
 import { queryKeys } from "@/lib/query-keys";
 import { cn } from "@/lib/utils";
@@ -35,6 +40,8 @@ const activeTaskStatuses = new Set<BackgroundTranslationTask["status"]>([
   "stopping_after_segment",
 ]);
 
+const activeBatchStatuses = new Set(["queued", "running", "pausing", "cancelling"]);
+
 interface TaskIdentity {
   comicId: string;
   chapterId: string;
@@ -52,6 +59,14 @@ export function BackgroundTranslationTasks() {
     refetchIntervalInBackground: true,
     placeholderData: (previous) => previous,
   });
+  const batches = useQuery({
+    queryKey: queryKeys.backgroundTranslationBatches,
+    queryFn: api.backgroundTranslationBatches,
+    refetchInterval: 1000,
+    refetchIntervalInBackground: true,
+    placeholderData: (previous) => previous,
+  });
+  const batchActions = usePretranslationBatchActions();
   const forceStop = useMutation({
     mutationFn: ({ comicId, chapterId }: TaskIdentity) =>
       api.forceStopTranslation(comicId, chapterId),
@@ -66,11 +81,15 @@ export function BackgroundTranslationTasks() {
       );
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.backgroundTranslations }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.backgroundTranslationBatches }),
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.translationOverview(target.comicId),
+        }),
         queryClient.invalidateQueries({
           queryKey: queryKeys.translation(target.comicId, target.chapterId),
         }),
       ]);
-      toast.success("已强制停止，可从阅读器继续");
+      toast.success("已强制停止，检查点已保留");
     },
     onError: (error) => {
       toast.error(error instanceof Error ? error.message : "强制停止失败");
@@ -126,15 +145,46 @@ export function BackgroundTranslationTasks() {
   });
 
   const taskItems = tasks.data ?? [];
+  const batchItems = batches.data ?? [];
   const activeCount = taskItems.filter((task) => activeTaskStatuses.has(task.status)).length;
   const waitingCount = taskItems.length - activeCount;
+  const activeBatchCount = batchItems.filter((batch) =>
+    activeBatchStatuses.has(batch.status),
+  ).length;
+  const pausedBatchCount = batchItems.filter((batch) => batch.status === "paused").length;
+  const failedBatchCount = batchItems.filter(
+    (batch) => batch.status === "completed_with_errors" || batch.status === "failed",
+  ).length;
   const taskSummary = [
+    activeBatchCount > 0 ? `${activeBatchCount} 个批次处理中` : null,
+    pausedBatchCount > 0 ? `${pausedBatchCount} 个批次暂停` : null,
+    failedBatchCount > 0 ? `${failedBatchCount} 个批次有失败` : null,
     activeCount > 0 ? `${activeCount} 话正在处理` : null,
     waitingCount > 0 ? `${waitingCount} 话等待重试` : null,
   ]
     .filter(Boolean)
     .join(" · ");
-  if (taskItems.length === 0 && !tasks.isError) return null;
+  if (taskItems.length === 0 && batchItems.length === 0 && !tasks.isError && !batches.isError) {
+    return null;
+  }
+
+  const runBatchAction = (batchId: string, action: PretranslationBatchAction) => {
+    if (
+      action === "cancel-pending" &&
+      !window.confirm(
+        "取消尚未开始的章节？\n\n当前章节会正常完成；如需立即停止，请使用当前章节区域中的“强制停止”。",
+      )
+    ) {
+      return;
+    }
+    if (
+      action === "close" &&
+      !window.confirm("结束这个批次？\n\n底层单话翻译记录会保留，之后仍可重新处理失败章节。")
+    ) {
+      return;
+    }
+    batchActions.mutate({ batchId, action });
+  };
 
   return (
     <section aria-labelledby="background-translation-heading">
@@ -149,7 +199,7 @@ export function BackgroundTranslationTasks() {
             </h2>
             <p className="text-xs text-muted-foreground">{taskSummary || "任务状态暂时无法读取"}</p>
           </div>
-          {activeCount > 0 && !tasks.isError && (
+          {(activeCount > 0 || activeBatchCount > 0) && !tasks.isError && !batches.isError && (
             <LoaderCircleIcon
               className="size-4 animate-spin text-muted-foreground"
               aria-label="后台任务处理中"
@@ -157,12 +207,50 @@ export function BackgroundTranslationTasks() {
           )}
         </div>
 
-        {tasks.isError && (
+        {(tasks.isError || batches.isError) && (
           <div className="flex items-center gap-2 bg-amber-500/10 px-4 py-3 text-sm text-amber-950 sm:px-5 dark:text-amber-100">
             <AlertCircleIcon className="size-4 shrink-0" />
-            后台任务状态刷新失败，正在保留上一次结果。
+            部分后台任务状态刷新失败，正在保留上一次结果。
           </div>
         )}
+
+        {batchItems.map((batch) => {
+          const current = batch.currentItem;
+          const pendingAction =
+            batchActions.isPending && batchActions.variables?.batchId === batch.batchId
+              ? batchActions.variables.action
+              : null;
+          return (
+            <div key={batch.batchId} className="p-3 sm:p-4">
+              <PretranslationBatchCard
+                batch={batch}
+                pendingAction={pendingAction}
+                onAction={(action) => runBatchAction(batch.batchId, action)}
+                forceStoppingCurrent={Boolean(
+                  current &&
+                  stopping.has(taskKey({ comicId: batch.comicId, chapterId: current.chapterId })),
+                )}
+                onForceStopCurrent={
+                  current && batch.currentTask
+                    ? () => {
+                        if (
+                          window.confirm(
+                            `强制停止「${batch.comicTitle} · ${current.chapterTitle}」？\n\n这会立即中断本机 OCR、翻译和渲染，并暂停预先翻译批次；检查点会保留。PaddleOCR 云端任务可能仍会继续运行。`,
+                          )
+                        ) {
+                          forceStop.mutate({
+                            comicId: batch.comicId,
+                            chapterId: current.chapterId,
+                          });
+                        }
+                      }
+                    : undefined
+                }
+                className="shadow-none"
+              />
+            </div>
+          );
+        })}
 
         {taskItems.map((task) => {
           const key = taskKey(task);

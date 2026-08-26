@@ -4,6 +4,7 @@ import {
   CirclePauseIcon,
   CirclePlayIcon,
   LoaderCircleIcon,
+  OctagonXIcon,
   RotateCwIcon,
   XCircleIcon,
 } from "lucide-react";
@@ -35,11 +36,15 @@ export function PretranslationBatchCard({
   batch,
   pendingAction,
   onAction,
+  forceStoppingCurrent = false,
+  onForceStopCurrent,
   className,
 }: {
   batch: TranslationBatchSummary;
   pendingAction: PretranslationBatchAction | null;
   onAction: (action: PretranslationBatchAction) => void;
+  forceStoppingCurrent?: boolean;
+  onForceStopCurrent?: () => void;
   className?: string;
 }) {
   const resolved =
@@ -60,13 +65,26 @@ export function PretranslationBatchCard({
       : task.completedPages
     : 0;
   const taskFailed = task ? (taskUsesSegments ? task.failedSegments : task.failedPages) : 0;
+  const taskStopping =
+    task?.status === "stopping_after_page" || task?.status === "stopping_after_segment";
+  const taskActive = Boolean(
+    task &&
+    ["preparing", "queued", "running", "stopping_after_page", "stopping_after_segment"].includes(
+      task.status,
+    ),
+  );
 
   return (
     <article className={cn("overflow-hidden rounded-3xl border bg-card", className)}>
       <div className="space-y-5 p-4 sm:p-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
-            <p className="truncate font-semibold">{batch.comicTitle}</p>
+            <a
+              href={`/comic/${encodeURIComponent(batch.comicId)}`}
+              className="block truncate font-semibold hover:underline"
+            >
+              {batch.comicTitle}
+            </a>
             <p className="mt-1 text-sm text-muted-foreground">
               {resolved} / {batch.totalChapters} 话已处理
             </p>
@@ -123,7 +141,7 @@ export function PretranslationBatchCard({
               )}
             </div>
             {task && (
-              <div className="mt-3 text-xs text-muted-foreground">
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
                 {taskTotal > 0 ? (
                   <span className="tabular-nums">
                     {taskCompleted} / {taskTotal} {taskUsesSegments ? "个分片" : "张图片"}
@@ -131,6 +149,22 @@ export function PretranslationBatchCard({
                   </span>
                 ) : (
                   <span>正在准备源图与分片</span>
+                )}
+                {onForceStopCurrent && taskActive && (
+                  <Button
+                    type="button"
+                    variant="destructive"
+                    size="sm"
+                    disabled={pendingAction !== null || forceStoppingCurrent || taskStopping}
+                    onClick={onForceStopCurrent}
+                  >
+                    {forceStoppingCurrent || taskStopping ? (
+                      <LoaderCircleIcon className="size-3.5 animate-spin" />
+                    ) : (
+                      <OctagonXIcon className="size-3.5" />
+                    )}
+                    {forceStoppingCurrent || taskStopping ? "停止中…" : "强制停止"}
+                  </Button>
                 )}
               </div>
             )}

@@ -295,7 +295,8 @@ class PretranslationRepository:
             connection.execute(
                 """
                 UPDATE translation_batches
-                SET status = ?, pause_reason = ?, updated_at = ?
+                SET status = ?, pause_reason = ?, resume_requested = 0,
+                    updated_at = ?
                 WHERE batch_id = ?
                 """,
                 (next_status, reason, timestamp, batch_id),
@@ -331,11 +332,57 @@ class PretranslationRepository:
                 """
                 UPDATE translation_batches
                 SET status = 'paused', pause_reason = 'config',
-                    error_code = ?, error_summary = ?, updated_at = ?
+                    resume_requested = 0, error_code = ?, error_summary = ?,
+                    updated_at = ?
                 WHERE batch_id = ? AND status NOT IN ('completed', 'cancelled')
                 """,
                 (error_code, error_summary, timestamp, batch_id),
             )
+        return self.batch(batch_id)
+
+    def settle_stopped_current(
+        self,
+        batch_id: str,
+        batch_item_id: str,
+    ) -> sqlite3.Row | None:
+        """Persist an immediate stop without letting the scheduler restart it."""
+        timestamp = self._timestamp()
+        with self.database.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM translation_batches WHERE batch_id = ?",
+                (batch_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            status = str(row["status"])
+            if status == "cancelling":
+                connection.execute(
+                    """
+                    UPDATE translation_batch_items
+                    SET status = 'cancelled', updated_at = ?
+                    WHERE batch_item_id = ? AND batch_id = ? AND status = 'running'
+                    """,
+                    (timestamp, batch_item_id, batch_id),
+                )
+                connection.execute(
+                    """
+                    UPDATE translation_batches
+                    SET status = 'cancelled', pause_reason = NULL,
+                        interactive_yielded = 0, resume_requested = 0, updated_at = ?
+                    WHERE batch_id = ?
+                    """,
+                    (timestamp, batch_id),
+                )
+            elif status in {"queued", "running", "pausing"}:
+                connection.execute(
+                    """
+                    UPDATE translation_batches
+                    SET status = 'paused', pause_reason = 'user',
+                        interactive_yielded = 0, resume_requested = 0, updated_at = ?
+                    WHERE batch_id = ?
+                    """,
+                    (timestamp, batch_id),
+                )
         return self.batch(batch_id)
 
     def resume_batch(self, batch_id: str) -> sqlite3.Row | None:
@@ -343,7 +390,7 @@ class PretranslationRepository:
         self.database.execute(
             """
             UPDATE translation_batches
-            SET status = 'queued', pause_reason = NULL,
+            SET status = 'queued', pause_reason = NULL, resume_requested = 1,
                 error_code = NULL, error_summary = NULL, updated_at = ?
             WHERE batch_id = ? AND status IN ('paused', 'failed')
             """,
@@ -403,7 +450,7 @@ class PretranslationRepository:
                 UPDATE translation_batches
                 SET status = ?, pause_reason = NULL,
                     interactive_yielded = CASE WHEN ? THEN interactive_yielded ELSE 0 END,
-                    updated_at = ?
+                    resume_requested = 0, updated_at = ?
                 WHERE batch_id = ?
                 """,
                 (
@@ -439,7 +486,7 @@ class PretranslationRepository:
                 """
                 UPDATE translation_batches
                 SET status = CASE WHEN ? > 0 THEN 'queued' ELSE 'completed' END,
-                    pause_reason = NULL, error_code = NULL,
+                    pause_reason = NULL, resume_requested = 0, error_code = NULL,
                     error_summary = NULL, updated_at = ?
                 WHERE batch_id = ?
                 """,
@@ -452,7 +499,7 @@ class PretranslationRepository:
             """
             UPDATE translation_batches
             SET status = 'cancelled', pause_reason = NULL,
-                interactive_yielded = 0, updated_at = ?
+                interactive_yielded = 0, resume_requested = 0, updated_at = ?
             WHERE batch_id = ? AND status IN ('completed_with_errors', 'failed')
             """,
             (self._timestamp(), batch_id),
@@ -470,6 +517,16 @@ class PretranslationRepository:
         )
         return self.batch(batch_id)
 
+    def clear_resume_requested(self, batch_id: str) -> None:
+        self.database.execute(
+            """
+            UPDATE translation_batches
+            SET resume_requested = 0, updated_at = ?
+            WHERE batch_id = ? AND resume_requested = 1
+            """,
+            (self._timestamp(), batch_id),
+        )
+
     def set_batch_failed(
         self,
         batch_id: str,
@@ -480,7 +537,7 @@ class PretranslationRepository:
         self.database.execute(
             """
             UPDATE translation_batches
-            SET status = 'failed', interactive_yielded = 0,
+            SET status = 'failed', interactive_yielded = 0, resume_requested = 0,
                 error_code = ?, error_summary = ?, updated_at = ?
             WHERE batch_id = ? AND status NOT IN ('completed', 'cancelled')
             """,
@@ -502,7 +559,8 @@ class PretranslationRepository:
                 connection.execute(
                     """
                     UPDATE translation_batches
-                    SET status = 'paused', updated_at = ? WHERE batch_id = ?
+                    SET status = 'paused', resume_requested = 0, updated_at = ?
+                    WHERE batch_id = ?
                     """,
                     (timestamp, batch_id),
                 )
@@ -511,7 +569,7 @@ class PretranslationRepository:
                     """
                     UPDATE translation_batches
                     SET status = 'cancelled', interactive_yielded = 0,
-                        updated_at = ? WHERE batch_id = ?
+                        resume_requested = 0, updated_at = ? WHERE batch_id = ?
                     """,
                     (timestamp, batch_id),
                 )
@@ -538,7 +596,8 @@ class PretranslationRepository:
                     connection.execute(
                         """
                         UPDATE translation_batches
-                        SET status = ?, interactive_yielded = 0, updated_at = ?
+                        SET status = ?, interactive_yielded = 0,
+                            resume_requested = 0, updated_at = ?
                         WHERE batch_id = ?
                         """,
                         (

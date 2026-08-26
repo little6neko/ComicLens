@@ -344,6 +344,61 @@ async def test_pause_waits_for_current_chapter_and_cancel_keeps_current_running(
 
 
 @pytest.mark.asyncio
+async def test_force_stopped_owned_chapter_pauses_batch_until_resumed(
+    tmp_path: Path,
+) -> None:
+    harness = create_coordinator_harness(tmp_path)
+    try:
+        batch = harness.coordinator.create_batch(
+            "alpha",
+            "Alpha",
+            [("chapter-1", "Chapter 1")],
+        )
+        harness.coordinator.start()
+        await wait_for(lambda: len(harness.manager.start_calls) == 1)
+
+        harness.manager.finish_pause("alpha", "chapter-1")
+        await wait_for(lambda: harness.batches.batch(batch.batch_id)["status"] == "paused")
+        await asyncio.sleep(0.05)
+        assert len(harness.manager.start_calls) == 1
+        assert harness.batches.batch_items(batch.batch_id)[0]["status"] == "running"
+
+        harness.coordinator.resume(batch.batch_id)
+        await wait_for(lambda: len(harness.manager.start_calls) == 2)
+        harness.manager.complete("alpha", "chapter-1")
+        await wait_for(lambda: harness.batches.batch(batch.batch_id)["status"] == "completed")
+    finally:
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_force_stopped_chapter_finishes_batch_when_pending_items_were_cancelled(
+    tmp_path: Path,
+) -> None:
+    harness = create_coordinator_harness(tmp_path)
+    try:
+        batch = harness.coordinator.create_batch(
+            "alpha",
+            "Alpha",
+            [("chapter-1", "Chapter 1"), ("chapter-2", "Chapter 2")],
+        )
+        harness.coordinator.start()
+        await wait_for(lambda: len(harness.manager.start_calls) == 1)
+        assert harness.coordinator.cancel_pending(batch.batch_id).status == "cancelling"
+
+        harness.manager.finish_pause("alpha", "chapter-1")
+        await wait_for(
+            lambda: harness.batches.batch(batch.batch_id)["status"] == "cancelled"
+        )
+        assert [
+            str(item["status"]) for item in harness.batches.batch_items(batch.batch_id)
+        ] == ["cancelled", "cancelled"]
+        assert len(harness.manager.start_calls) == 1
+    finally:
+        await harness.close()
+
+
+@pytest.mark.asyncio
 async def test_interactive_task_yields_batch_and_user_pause_prevents_auto_resume(
     tmp_path: Path,
 ) -> None:
