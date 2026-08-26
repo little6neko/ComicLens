@@ -609,6 +609,48 @@ class TranslationRepository:
             """
         )
 
+    def chapter_overview_statuses(self, comic_id: str) -> dict[str, str]:
+        rows = self.database.fetchall(
+            """
+            SELECT * FROM translation_generations
+            WHERE comic_id = ?
+            ORDER BY chapter_id ASC,
+                CASE WHEN status IN (
+                    'preparing', 'queued', 'running',
+                    'stopping_after_page', 'stopping_after_segment'
+                ) THEN 0 ELSE 1 END,
+                created_at DESC, rowid DESC
+            """,
+            (comic_id,),
+        )
+        statuses: dict[str, str] = {}
+        for row in rows:
+            chapter_id = str(row["chapter_id"])
+            if chapter_id in statuses:
+                continue
+            status = str(row["status"])
+            if status in {
+                "preparing",
+                "queued",
+                "running",
+                "stopping_after_page",
+                "stopping_after_segment",
+            }:
+                statuses[chapter_id] = "active"
+            elif status == "paused":
+                statuses[chapter_id] = "paused"
+            elif status == "completed" and not (
+                int(row["failed_pages"]) or int(row["failed_segments"])
+            ):
+                statuses[chapter_id] = "completed"
+            elif status == "completed_with_errors" or status == "completed":
+                statuses[chapter_id] = "needs_retry"
+            elif status == "failed":
+                statuses[chapter_id] = "failed"
+            else:
+                statuses[chapter_id] = "not_started"
+        return statuses
+
     def matching_generation(
         self,
         comic_id: str,

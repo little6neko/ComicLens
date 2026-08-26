@@ -103,6 +103,9 @@ class PretranslationRepository:
             (batch_id,),
         )
 
+    def batch_item_summaries(self, batch_id: str) -> list[TranslationBatchItemSummary]:
+        return [self._item_summary(row) for row in self.batch_items(batch_id)]
+
     def current_item(self, batch_id: str) -> sqlite3.Row | None:
         return self.database.fetchone(
             """

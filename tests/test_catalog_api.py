@@ -124,6 +124,20 @@ class FakeComicSource:
         )
 
 
+class MultiChapterComicSource(FakeComicSource):
+    async def detail(self, comic_id: str) -> ComicDetail:
+        detail = await super().detail(comic_id)
+        return detail.model_copy(
+            update={
+                "chapters": [
+                    ComicChapter(chapter_id="chapter-3", title="Chapter 3"),
+                    ComicChapter(chapter_id="special", title="Special"),
+                    ComicChapter(chapter_id="chapter-1", title="Chapter 1"),
+                ]
+            }
+        )
+
+
 class FastPipeline:
     async def run_ocr(self, original_bytes: bytes) -> OCROutput:
         with Image.open(io.BytesIO(original_bytes)) as opened:
@@ -169,6 +183,37 @@ def catalog_client(tmp_path: Path) -> tuple[TestClient, FakeComicSource]:
         log_level="INFO",
     )
     source = FakeComicSource()
+    return TestClient(create_app(config, comic_source=source)), source
+
+
+def pretranslation_client(
+    tmp_path: Path,
+    *,
+    configured: bool = True,
+) -> tuple[TestClient, MultiChapterComicSource]:
+    initial_settings = (
+        {
+            "ocr_api_url": "https://ocr.example/api",
+            "translation_service": "deeplx",
+            "deeplx_url": "https://translate.example/api",
+        }
+        if configured
+        else {}
+    )
+    config = AppConfig(
+        app_name="ComicLens",
+        host="0.0.0.0",
+        port=8233,
+        data_dir=tmp_path / "data",
+        static_dir=tmp_path / "static",
+        cache_max_mb=5120,
+        access_password=None,
+        upstream_base_url="https://manga18fx.com",
+        request_timeout=30,
+        log_level="INFO",
+        initial_settings=initial_settings,
+    )
+    source = MultiChapterComicSource()
     return TestClient(create_app(config, comic_source=source)), source
 
 
@@ -585,3 +630,236 @@ def test_background_translation_api_lists_all_chapters_and_force_stops_idempoten
     assert [task["comicId"] for task in remaining.json()] == ["beta-comic"]
     assert beta_stopped.json()["stoppedGenerations"] == 1
     assert source.calls == []
+
+
+def test_translation_overview_is_bulk_ordered_and_no_work_skips_configuration(
+    tmp_path: Path,
+) -> None:
+    api_client, source = pretranslation_client(tmp_path, configured=False)
+    with api_client:
+        assert api_client.portal is not None
+        api_client.portal.call(api_client.app.state.pretranslation_coordinator.shutdown)
+        repository = api_client.app.state.translation_repository
+        completed_id = repository.create_generation(
+            "alpha-comic",
+            "chapter-1",
+            semantic_fingerprint="completed",
+            semantic_settings={},
+            page_indexes=[],
+            kind="normal",
+        )
+        repository.set_generation_status(completed_id, "completed")
+        retry_id = repository.create_generation(
+            "alpha-comic",
+            "special",
+            semantic_fingerprint="retry",
+            semantic_settings={},
+            page_indexes=[],
+            kind="normal",
+        )
+        repository.set_generation_status(retry_id, "completed_with_errors")
+        repository.create_generation(
+            "alpha-comic",
+            "chapter-3",
+            semantic_fingerprint="active",
+            semantic_settings={},
+            page_indexes=[],
+            kind="normal",
+        )
+
+        overview = api_client.get("/api/comics/alpha-comic/translation-overview")
+        no_work = api_client.post(
+            "/api/comics/alpha-comic/translation-batches",
+            json={"chapterIds": ["chapter-1", "chapter-1"]},
+        )
+        has_batch = (
+            api_client.app.state.pretranslation_repository.open_batch_for_comic("alpha-comic")
+            is not None
+        )
+
+    assert overview.status_code == 200
+    assert [chapter["chapterId"] for chapter in overview.json()["chapters"]] == [
+        "chapter-3",
+        "special",
+        "chapter-1",
+    ]
+    assert [chapter["position"] for chapter in overview.json()["chapters"]] == [2, 1, 0]
+    assert [chapter["status"] for chapter in overview.json()["chapters"]] == [
+        "active",
+        "needs_retry",
+        "completed",
+    ]
+    assert [chapter["requiresWork"] for chapter in overview.json()["chapters"]] == [
+        True,
+        True,
+        False,
+    ]
+    assert overview.json()["batch"] is None
+    assert no_work.status_code == 200
+    assert no_work.json() == {
+        "batch": None,
+        "selectedCount": 1,
+        "workCount": 0,
+        "noWork": True,
+    }
+    assert has_batch is False
+    assert source.calls.count(("detail", "alpha-comic")) == 2
+
+
+def test_create_translation_batch_validates_deduplicates_and_orders_catalog(
+    tmp_path: Path,
+) -> None:
+    api_client, _source = pretranslation_client(tmp_path)
+    with api_client:
+        assert api_client.portal is not None
+        api_client.portal.call(api_client.app.state.pretranslation_coordinator.shutdown)
+        empty = api_client.post(
+            "/api/comics/alpha-comic/translation-batches",
+            json={"chapterIds": []},
+        )
+        too_many = api_client.post(
+            "/api/comics/alpha-comic/translation-batches",
+            json={"chapterIds": [f"chapter-{index}" for index in range(5001)]},
+        )
+        unknown = api_client.post(
+            "/api/comics/alpha-comic/translation-batches",
+            json={"chapterIds": ["missing"]},
+        )
+        created = api_client.post(
+            "/api/comics/alpha-comic/translation-batches",
+            json={
+                "chapterIds": [
+                    "chapter-3",
+                    "chapter-1",
+                    "special",
+                    "chapter-3",
+                ]
+            },
+        )
+        batch_id = created.json()["batch"]["batchId"]
+        listed = api_client.get("/api/translation-batches/background")
+        conflict = api_client.post(
+            "/api/comics/alpha-comic/translation-batches",
+            json={"chapterIds": ["chapter-1"]},
+        )
+        overview = api_client.get("/api/comics/alpha-comic/translation-overview")
+
+        items = api_client.app.state.pretranslation_repository.batch_items(batch_id)
+
+    assert empty.status_code == 422 and empty.json()["code"] == "VALIDATION_ERROR"
+    assert too_many.status_code == 422 and too_many.json()["code"] == "VALIDATION_ERROR"
+    assert unknown.status_code == 422
+    assert unknown.json()["code"] == "TRANSLATION_BATCH_CHAPTER_NOT_FOUND"
+    assert created.status_code == 200
+    assert created.json()["selectedCount"] == 3
+    assert created.json()["workCount"] == 3
+    assert created.json()["noWork"] is False
+    assert created.json()["batch"]["status"] == "queued"
+    assert [str(item["chapter_id"]) for item in items] == [
+        "chapter-1",
+        "special",
+        "chapter-3",
+    ]
+    assert [int(item["position"]) for item in items] == [0, 1, 2]
+    assert [batch["batchId"] for batch in listed.json()] == [batch_id]
+    assert conflict.status_code == 409
+    assert conflict.json()["code"] == "TRANSLATION_BATCH_EXISTS"
+    overview_items = {
+        chapter["chapterId"]: chapter["batchItem"] for chapter in overview.json()["chapters"]
+    }
+    assert all(overview_items.values())
+    assert "ocr.example" not in created.text
+    assert "translate.example" not in created.text
+
+
+def test_translation_batch_action_apis_are_idempotent_and_state_limited(
+    tmp_path: Path,
+) -> None:
+    api_client, _source = pretranslation_client(tmp_path)
+    with api_client:
+        assert api_client.portal is not None
+        api_client.portal.call(api_client.app.state.pretranslation_coordinator.shutdown)
+        batches = api_client.app.state.pretranslation_repository
+        batch_id = batches.create_batch("alpha", "Alpha", [("chapter-1", "Chapter 1")])
+
+        paused = api_client.post(f"/api/translation-batches/{batch_id}/pause")
+        paused_again = api_client.post(f"/api/translation-batches/{batch_id}/pause")
+        resumed = api_client.post(f"/api/translation-batches/{batch_id}/resume")
+        cancelled = api_client.post(f"/api/translation-batches/{batch_id}/cancel-pending")
+        cancelled_again = api_client.post(
+            f"/api/translation-batches/{batch_id}/cancel-pending"
+        )
+
+        failed_batch_id = batches.create_batch(
+            "beta",
+            "Beta",
+            [("chapter-1", "Chapter 1")],
+        )
+        batches.claim_batch(failed_batch_id)
+        failed_item = batches.next_pending_item(failed_batch_id)
+        assert failed_item is not None
+        batches.claim_item(str(failed_item["batch_item_id"]))
+        batches.finish_item(str(failed_item["batch_item_id"]), "failed")
+        batches.settle_after_item(failed_batch_id)
+        before_retry = api_client.get("/api/translation-batches/background")
+        retried = api_client.post(
+            f"/api/translation-batches/{failed_batch_id}/retry-failed"
+        )
+        retried_again = api_client.post(
+            f"/api/translation-batches/{failed_batch_id}/retry-failed"
+        )
+        retry_close_conflict = api_client.post(
+            f"/api/translation-batches/{failed_batch_id}/close"
+        )
+        batches.cancel_pending(failed_batch_id)
+
+        coordinator_failed_id = batches.create_batch(
+            "gamma",
+            "Gamma",
+            [("chapter-1", "Chapter 1")],
+        )
+        batches.set_batch_failed(
+            coordinator_failed_id,
+            error_code="COORDINATOR_ERROR",
+            error_summary="Coordinator failed",
+        )
+        closed = api_client.post(
+            f"/api/translation-batches/{coordinator_failed_id}/close"
+        )
+        closed_again = api_client.post(
+            f"/api/translation-batches/{coordinator_failed_id}/close"
+        )
+        missing = api_client.post("/api/translation-batches/missing/pause")
+
+    assert paused.json()["batch"]["status"] == "paused"
+    assert paused_again.json()["batch"]["status"] == "paused"
+    assert resumed.json()["batch"]["status"] == "queued"
+    assert cancelled.json()["batch"]["status"] == "cancelled"
+    assert cancelled_again.json()["batch"]["status"] == "cancelled"
+    assert [batch["batchId"] for batch in before_retry.json()] == [failed_batch_id]
+    assert retried.json()["batch"]["status"] == "queued"
+    assert retried_again.json()["batch"]["status"] == "queued"
+    assert retry_close_conflict.status_code == 409
+    assert closed.json()["batch"]["status"] == "cancelled"
+    assert closed_again.json()["batch"]["status"] == "cancelled"
+    assert missing.status_code == 404
+    assert missing.json()["code"] == "TRANSLATION_BATCH_NOT_FOUND"
+
+
+def test_resume_revalidates_configuration_without_changing_paused_batch(
+    tmp_path: Path,
+) -> None:
+    api_client, _source = pretranslation_client(tmp_path, configured=False)
+    with api_client:
+        assert api_client.portal is not None
+        api_client.portal.call(api_client.app.state.pretranslation_coordinator.shutdown)
+        batches = api_client.app.state.pretranslation_repository
+        batch_id = batches.create_batch("alpha", "Alpha", [("chapter-1", "Chapter 1")])
+        batches.request_pause(batch_id)
+
+        response = api_client.post(f"/api/translation-batches/{batch_id}/resume")
+        stored = batches.batch(batch_id)
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "TRANSLATOR_NOT_CONFIGURED"
+    assert stored is not None and stored["status"] == "paused"

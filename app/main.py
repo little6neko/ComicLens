@@ -16,12 +16,14 @@ from app.media.registry import SourceMediaRegistry
 from app.observability import LOG_FORMAT
 from app.repositories.database import Database
 from app.repositories.library import LibraryRepository
+from app.repositories.pretranslation import PretranslationRepository
 from app.repositories.translation import TranslationRepository
 from app.security.access import SESSION_COOKIE_NAME, AccessGate, LoginRateLimiter
 from app.security.secrets import SecretCipher
 from app.sources.base import ComicSource
 from app.sources.manga18fx import Manga18fxSource, proxy_url_with_credentials
 from app.translation.manager import TranslationManager
+from app.translation.pretranslation import PretranslationCoordinator
 from app.web import SpaStaticFiles
 
 logger = logging.getLogger("comiclens")
@@ -76,6 +78,7 @@ def create_app(
         app.state.media_registry = media_registry
         app.state.media_cache = media_cache
         app.state.translation_repository = TranslationRepository(database)
+        app.state.pretranslation_repository = PretranslationRepository(database)
         app.state.translation_manager = TranslationManager(
             repository=app.state.translation_repository,
             cache=media_cache,
@@ -83,9 +86,15 @@ def create_app(
             registry=media_registry,
             settings=settings_service,
         )
+        app.state.pretranslation_coordinator = PretranslationCoordinator(
+            repository=app.state.pretranslation_repository,
+            manager=app.state.translation_manager,
+        )
+        app.state.pretranslation_coordinator.start()
         try:
             yield
         finally:
+            await app.state.pretranslation_coordinator.shutdown()
             await app.state.translation_manager.shutdown()
             if comic_source is None:
                 await source.aclose()

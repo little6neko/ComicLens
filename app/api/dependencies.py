@@ -9,9 +9,12 @@ from app.cache.storage import MediaCache
 from app.media.registry import SourceMediaRegistry
 from app.repositories.database import Database
 from app.repositories.library import LibraryRepository
+from app.repositories.pretranslation import PretranslationRepository
+from app.repositories.translation import TranslationRepository
 from app.security.access import AccessGate, LoginRateLimiter
 from app.sources.base import ComicSource
 from app.translation.manager import TranslationManager
+from app.translation.pretranslation import PretranslationCoordinator
 
 
 def get_comic_source(request: Request) -> ComicSource:
@@ -48,3 +51,15 @@ def get_login_rate_limiter(request: Request) -> LoginRateLimiter:
 
 def get_translation_manager(request: Request) -> TranslationManager:
     return cast(TranslationManager, request.app.state.translation_manager)
+
+
+def get_translation_repository(request: Request) -> TranslationRepository:
+    return cast(TranslationRepository, request.app.state.translation_repository)
+
+
+def get_pretranslation_repository(request: Request) -> PretranslationRepository:
+    return cast(PretranslationRepository, request.app.state.pretranslation_repository)
+
+
+def get_pretranslation_coordinator(request: Request) -> PretranslationCoordinator:
+    return cast(PretranslationCoordinator, request.app.state.pretranslation_coordinator)

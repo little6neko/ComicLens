@@ -36,6 +36,20 @@ def test_lifespan_creates_data_directories(client: TestClient, app_config: AppCo
     assert app_config.cache_dir.is_dir()
 
 
+def test_pretranslation_coordinator_starts_and_stops_with_application(
+    app_config: AppConfig,
+) -> None:
+    app = create_app(app_config)
+    with TestClient(app):
+        coordinator = app.state.pretranslation_coordinator
+        scheduler_task = coordinator._scheduler_task
+        assert scheduler_task is not None
+        assert scheduler_task.done() is False
+
+    assert coordinator._scheduler_task is None
+    assert scheduler_task.done() is True
+
+
 def test_config_defaults_to_public_listener(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.delenv("COMICLENS_HOST", raising=False)
     monkeypatch.delenv("COMICLENS_ACCESS_PASSWORD", raising=False)

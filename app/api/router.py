@@ -14,6 +14,7 @@ from app.api.dependencies import (
     get_translation_manager,
 )
 from app.api.library import router as library_router
+from app.api.pretranslation import router as pretranslation_router
 from app.api.settings import router as settings_router
 from app.api.translation import router as translation_router
 from app.cache.keys import (
@@ -43,6 +44,7 @@ router.include_router(settings_router)
 router.include_router(library_router)
 router.include_router(cache_router)
 router.include_router(translation_router)
+router.include_router(pretranslation_router)
 
 ComicSourceDependency = Annotated[ComicSource, Depends(get_comic_source)]
 MediaRegistryDependency = Annotated[SourceMediaRegistry, Depends(get_media_registry)]
