@@ -208,17 +208,25 @@ function BatchSelection({
 
   const createBatch = useMutation({
     mutationFn: () => api.createTranslationBatch(comicId, selectedIds),
-    onSuccess: async (result) => {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.translationOverview(comicId) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.backgroundTranslationBatches }),
-      ]);
+    onSuccess: (result) => {
+      if (result.batch) {
+        queryClient.setQueryData<ComicTranslationOverview>(
+          queryKeys.translationOverview(comicId),
+          (current) => (current ? { ...current, batch: result.batch } : current),
+        );
+      }
       if (result.noWork) {
         toast.success("所选章节都已完整翻译，无需处理");
-        onOpenChange(false);
       } else {
         toast.success(`已加入 ${result.workCount} 话，后台将从旧到新处理`);
       }
+      onOpenChange(false);
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.translationOverview(comicId),
+      });
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.backgroundTranslationBatches,
+      });
     },
     onError: async (requestError) => {
       if (requestError instanceof ApiError && requestError.code === "TRANSLATION_BATCH_EXISTS") {
