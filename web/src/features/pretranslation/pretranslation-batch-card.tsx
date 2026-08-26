@@ -11,6 +11,10 @@ import {
 
 import { Button } from "@/components/ui/button";
 import type { TranslationBatchStatus, TranslationBatchSummary } from "@/domain/api";
+import {
+  TranslationTaskProgressDetails,
+  TranslationTaskStageBadge,
+} from "@/features/translation/translation-task-progress";
 import { cn } from "@/lib/utils";
 
 export type PretranslationBatchAction =
@@ -57,14 +61,6 @@ export function PretranslationBatchCard({
   const active = ["queued", "running", "pausing", "cancelling"].includes(batch.status);
   const current = batch.currentItem;
   const task = batch.currentTask;
-  const taskUsesSegments = Boolean(task && (task.planningComplete || task.totalSegments > 0));
-  const taskTotal = task ? (taskUsesSegments ? task.totalSegments : task.totalPages) : 0;
-  const taskCompleted = task
-    ? taskUsesSegments
-      ? task.completedSegments
-      : task.completedPages
-    : 0;
-  const taskFailed = task ? (taskUsesSegments ? task.failedSegments : task.failedPages) : 0;
   const taskStopping =
     task?.status === "stopping_after_page" || task?.status === "stopping_after_segment";
   const taskActive = Boolean(
@@ -125,7 +121,7 @@ export function PretranslationBatchCard({
         {current && (
           <div className="rounded-2xl bg-muted/60 p-4">
             <div className="flex flex-wrap items-start justify-between gap-2">
-              <div className="min-w-0">
+              <div className="min-w-0 flex-1">
                 <p className="text-xs text-muted-foreground">当前章节</p>
                 <a
                   href={`/reader/${encodeURIComponent(batch.comicId)}/${encodeURIComponent(current.chapterId)}`}
@@ -134,38 +130,32 @@ export function PretranslationBatchCard({
                   {current.chapterTitle}
                 </a>
               </div>
-              {batch.interactiveYielded && (
-                <span className="rounded-full bg-background px-2.5 py-1 text-[11px] text-muted-foreground">
-                  正在让位给阅读器任务
-                </span>
-              )}
-            </div>
-            {task && (
-              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-                {taskTotal > 0 ? (
-                  <span className="tabular-nums">
-                    {taskCompleted} / {taskTotal} {taskUsesSegments ? "个分片" : "张图片"}
-                    {taskFailed > 0 ? ` · ${taskFailed} 个失败` : ""}
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <TranslationTaskStageBadge stage={task?.stage ?? "queued"} />
+                {batch.interactiveYielded && (
+                  <span className="rounded-full bg-background px-2.5 py-1 text-[11px] text-muted-foreground">
+                    正在让位给阅读器任务
                   </span>
-                ) : (
-                  <span>正在准备源图与分片</span>
                 )}
-                {onForceStopCurrent && taskActive && (
-                  <Button
-                    type="button"
-                    variant="destructive"
-                    size="sm"
-                    disabled={pendingAction !== null || forceStoppingCurrent || taskStopping}
-                    onClick={onForceStopCurrent}
-                  >
-                    {forceStoppingCurrent || taskStopping ? (
-                      <LoaderCircleIcon className="size-3.5 animate-spin" />
-                    ) : (
-                      <OctagonXIcon className="size-3.5" />
-                    )}
-                    {forceStoppingCurrent || taskStopping ? "停止中…" : "强制停止"}
-                  </Button>
-                )}
+              </div>
+            </div>
+            <TranslationTaskProgressDetails task={task} className="mt-3" />
+            {onForceStopCurrent && taskActive && (
+              <div className="mt-3 flex justify-end">
+                <Button
+                  type="button"
+                  variant="destructive"
+                  size="sm"
+                  disabled={pendingAction !== null || forceStoppingCurrent || taskStopping}
+                  onClick={onForceStopCurrent}
+                >
+                  {forceStoppingCurrent || taskStopping ? (
+                    <LoaderCircleIcon className="size-3.5 animate-spin" />
+                  ) : (
+                    <OctagonXIcon className="size-3.5" />
+                  )}
+                  {forceStoppingCurrent || taskStopping ? "停止中…" : "强制停止"}
+                </Button>
               </div>
             )}
           </div>

@@ -11,26 +11,18 @@ import { useState, type Dispatch, type SetStateAction } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import type { BackgroundTranslationStage, BackgroundTranslationTask } from "@/domain/api";
+import type { BackgroundTranslationTask } from "@/domain/api";
 import {
   PretranslationBatchCard,
   type PretranslationBatchAction,
 } from "@/features/pretranslation/pretranslation-batch-card";
 import { usePretranslationBatchActions } from "@/features/pretranslation/use-pretranslation-batch-actions";
+import {
+  TranslationTaskProgressDetails,
+  TranslationTaskStageBadge,
+} from "@/features/translation/translation-task-progress";
 import { api } from "@/lib/api-client";
 import { queryKeys } from "@/lib/query-keys";
-import { cn } from "@/lib/utils";
-
-const stageLabels: Record<BackgroundTranslationStage, string> = {
-  preparing: "缓存与切分",
-  queued: "等待开始",
-  ocr: "OCR",
-  translating: "翻译",
-  rendering: "渲染",
-  stopping: "正在停止",
-  processing: "处理中",
-  needs_retry: "等待重试",
-};
 
 const activeTaskStatuses = new Set<BackgroundTranslationTask["status"]>([
   "preparing",
@@ -307,12 +299,6 @@ function BackgroundTaskRow({
   onRetranslate: () => void;
   onForceStop: () => void;
 }) {
-  const usesSegments = task.totalSegments > 0 || task.planningComplete;
-  const totalItems = usesSegments ? task.totalSegments : task.totalPages;
-  const completedItems = usesSegments ? task.completedSegments : task.completedPages;
-  const failedItems = usesSegments ? task.failedSegments : task.failedPages;
-  const percentage =
-    totalItems > 0 ? Math.min(100, Math.round((completedItems / totalItems) * 100)) : null;
   const active = activeTaskStatuses.has(task.status);
   const stoppingStatus =
     task.status === "stopping_after_page" || task.status === "stopping_after_segment";
@@ -338,16 +324,7 @@ function BackgroundTaskRow({
             </a>
           </div>
           <div className="flex flex-wrap items-center justify-between gap-2 sm:justify-end">
-            <span
-              className={cn(
-                "shrink-0 rounded-full bg-muted px-2.5 py-1 text-[11px] font-medium text-muted-foreground",
-                task.stage === "stopping" && "bg-amber-500/15 text-amber-700 dark:text-amber-300",
-                task.stage === "needs_retry" &&
-                  "bg-amber-500/15 text-amber-700 dark:text-amber-300",
-              )}
-            >
-              {stageLabels[task.stage]}
-            </span>
+            <TranslationTaskStageBadge stage={task.stage} />
             <Button
               type="button"
               variant="outline"
@@ -381,50 +358,26 @@ function BackgroundTaskRow({
           </div>
         </div>
 
-        <div>
-          <div className="h-2 overflow-hidden rounded-full bg-muted">
-            {percentage === null ? (
-              <div className="h-full w-1/3 animate-pulse rounded-full bg-primary/70" />
-            ) : (
-              <div
-                className="h-full rounded-full bg-primary transition-[width] duration-300"
-                style={{ width: `${percentage}%` }}
-              />
-            )}
-          </div>
-          <div className="mt-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs text-muted-foreground">
-            {percentage === null ? (
-              <span>正在发现分片</span>
-            ) : (
-              <span className="tabular-nums">
-                {completedItems} / {totalItems} {usesSegments ? "个分片" : "张图片"} · {percentage}%
-              </span>
-            )}
-            <span className="shrink-0 tabular-nums">
-              已缓存 {task.preparedPages} / {task.totalPages} 张源图
-            </span>
-            {failedItems > 0 && (
-              <span className="flex w-full items-center gap-2 text-destructive">
-                <span className="tabular-nums">{failedItems} 个失败</span>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-7 border-destructive/30 px-2.5 text-destructive hover:bg-destructive/10 hover:text-destructive"
-                  disabled={actionPending || stoppingStatus}
-                  onClick={onRetryFailed}
-                >
-                  {retryingFailed ? (
-                    <LoaderCircleIcon className="size-3.5 animate-spin" />
-                  ) : (
-                    <RotateCwIcon className="size-3.5" />
-                  )}
-                  {retryingFailed ? "提交中…" : "重试失败"}
-                </Button>
-              </span>
-            )}
-          </div>
-        </div>
+        <TranslationTaskProgressDetails
+          task={task}
+          failureAction={
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 border-destructive/30 px-2.5 text-destructive hover:bg-destructive/10 hover:text-destructive"
+              disabled={actionPending || stoppingStatus}
+              onClick={onRetryFailed}
+            >
+              {retryingFailed ? (
+                <LoaderCircleIcon className="size-3.5 animate-spin" />
+              ) : (
+                <RotateCwIcon className="size-3.5" />
+              )}
+              {retryingFailed ? "提交中…" : "重试失败"}
+            </Button>
+          }
+        />
       </div>
     </article>
   );

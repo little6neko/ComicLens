@@ -662,6 +662,16 @@ def test_background_tasks_and_force_pause_preserve_segment_checkpoints(tmp_path:
         assert tasks[0].completed_segments == 1
         assert tasks[0].total_segments == 2
 
+        progress = harness.repository.task_progress(generation_id)
+        assert progress is not None
+        assert progress.generation_id == generation_id
+        assert progress.stage == tasks[0].stage == "ocr"
+        assert progress.prepared_pages == tasks[0].prepared_pages == 1
+        assert progress.current_segment == tasks[0].current_segment
+        assert progress.completed_segments == tasks[0].completed_segments == 1
+        assert progress.total_segments == tasks[0].total_segments == 2
+        assert harness.repository.task_progress("missing-generation") is None
+
         assert harness.repository.force_pause_chapter("alpha", "chapter-1") == 1
         assert harness.repository.force_pause_chapter("alpha", "chapter-1") == 0
 

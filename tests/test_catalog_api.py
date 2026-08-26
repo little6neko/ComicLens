@@ -737,6 +737,26 @@ def test_create_translation_batch_validates_deduplicates_and_orders_catalog(
             },
         )
         batch_id = created.json()["batch"]["batchId"]
+        batches = api_client.app.state.pretranslation_repository
+        assert batches.claim_batch(batch_id) is True
+        current_item = batches.next_pending_item(batch_id)
+        assert current_item is not None
+        batch_item_id = str(current_item["batch_item_id"])
+        assert batches.claim_item(batch_item_id) is True
+        generation_id = api_client.app.state.translation_repository.create_generation(
+            "alpha-comic",
+            str(current_item["chapter_id"]),
+            semantic_fingerprint="batch-api-progress",
+            semantic_settings={},
+            page_indexes=[],
+            kind="normal",
+            progressive=True,
+            batch_item_id=batch_item_id,
+        )
+        api_client.app.state.translation_repository.set_generation_status(
+            generation_id,
+            "running",
+        )
         listed = api_client.get("/api/translation-batches/background")
         conflict = api_client.post(
             "/api/comics/alpha-comic/translation-batches",
@@ -763,6 +783,8 @@ def test_create_translation_batch_validates_deduplicates_and_orders_catalog(
     ]
     assert [int(item["position"]) for item in items] == [0, 1, 2]
     assert [batch["batchId"] for batch in listed.json()] == [batch_id]
+    assert listed.json()[0]["currentTask"]["stage"] == "processing"
+    assert listed.json()[0]["currentTask"]["preparedPages"] == 0
     assert conflict.status_code == 409
     assert conflict.json()["code"] == "TRANSLATION_BATCH_EXISTS"
     overview_items = {

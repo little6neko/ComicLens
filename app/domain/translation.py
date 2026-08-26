@@ -131,13 +131,8 @@ class RetryFailedTranslationResult(ComicModel):
     retried_count: int = Field(ge=0)
 
 
-class BackgroundTranslationTask(ComicModel):
-    comic_id: str
-    chapter_id: str
-    comic_title: str
-    chapter_title: str
+class TranslationTaskProgress(ComicModel):
     generation_id: str
-    kind: Literal["normal", "retranslate", "retry"] = "normal"
     status: TranslationTaskStatus
     stage: BackgroundTranslationStage
     current_page_index: int | None = None
@@ -150,6 +145,14 @@ class BackgroundTranslationTask(ComicModel):
     total_segments: int = 0
     completed_segments: int = 0
     failed_segments: int = 0
+
+
+class BackgroundTranslationTask(TranslationTaskProgress):
+    comic_id: str
+    chapter_id: str
+    comic_title: str
+    chapter_title: str
+    kind: Literal["normal", "retranslate", "retry"] = "normal"
 
 
 class ForceStopTranslationResult(ComicModel):

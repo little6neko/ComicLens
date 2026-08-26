@@ -10,7 +10,7 @@ from app.domain.pretranslation import (
     TranslationBatchSummary,
     TranslationBatchTaskSummary,
 )
-from app.domain.translation import TranslationTaskState
+from app.domain.translation import TranslationTaskProgress, TranslationTaskState
 from app.errors import AppError
 from app.observability import log_event, short_ref
 from app.repositories.pretranslation import PretranslationRepository
@@ -43,6 +43,8 @@ class TranslationManagerProtocol(Protocol):
     def state(self, comic_id: str, chapter_id: str) -> TranslationTaskState: ...
 
     def state_for_generation(self, generation_id: str) -> TranslationTaskState | None: ...
+
+    def progress_for_generation(self, generation_id: str) -> TranslationTaskProgress | None: ...
 
     async def start(
         self,
@@ -234,21 +236,9 @@ class PretranslationCoordinator:
         if current is not None:
             generation = self.repository.owned_generation(str(current["batch_item_id"]))
             if generation is not None:
-                state = self.manager.state_for_generation(str(generation["generation_id"]))
-                if state is not None and state.generation_id is not None:
-                    current_task = TranslationBatchTaskSummary(
-                        generation_id=state.generation_id,
-                        status=state.status,
-                        current_page_index=state.current_page_index,
-                        current_segment=state.current_segment,
-                        planning_complete=state.planning_complete,
-                        total_pages=state.total_pages,
-                        completed_pages=state.completed_pages,
-                        failed_pages=state.failed_pages,
-                        total_segments=state.total_segments,
-                        completed_segments=state.completed_segments,
-                        failed_segments=state.failed_segments,
-                    )
+                progress = self.manager.progress_for_generation(str(generation["generation_id"]))
+                if progress is not None:
+                    current_task = TranslationBatchTaskSummary(**progress.model_dump())
         return self.repository.summary(batch_id, current_task=current_task)
 
     def background_batches(self) -> list[TranslationBatchSummary]:

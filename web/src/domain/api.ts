@@ -293,13 +293,8 @@ export type BackgroundTranslationStage =
   | "processing"
   | "needs_retry";
 
-export interface BackgroundTranslationTask {
-  comicId: string;
-  chapterId: string;
-  comicTitle: string;
-  chapterTitle: string;
+export interface TranslationTaskProgress {
   generationId: string;
-  kind: "normal" | "retranslate" | "retry";
   status: TranslationTaskStatus;
   stage: BackgroundTranslationStage;
   currentPageIndex: number | null;
@@ -312,6 +307,14 @@ export interface BackgroundTranslationTask {
   totalSegments: number;
   completedSegments: number;
   failedSegments: number;
+}
+
+export interface BackgroundTranslationTask extends TranslationTaskProgress {
+  comicId: string;
+  chapterId: string;
+  comicTitle: string;
+  chapterTitle: string;
+  kind: "normal" | "retranslate" | "retry";
 }
 
 export interface ForceStopTranslationResult {
@@ -358,19 +361,7 @@ export interface TranslationBatchItemSummary {
   errorSummary: string | null;
 }
 
-export interface TranslationBatchTaskSummary {
-  generationId: string;
-  status: TranslationTaskStatus;
-  currentPageIndex: number | null;
-  currentSegment: CurrentTranslationSegment | null;
-  planningComplete: boolean;
-  totalPages: number;
-  completedPages: number;
-  failedPages: number;
-  totalSegments: number;
-  completedSegments: number;
-  failedSegments: number;
-}
+export type TranslationBatchTaskSummary = TranslationTaskProgress;
 
 export interface TranslationBatchSummary {
   batchId: string;

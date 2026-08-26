@@ -13,6 +13,7 @@ from app.domain.translation import (
     TranslationLayer,
     TranslationPageState,
     TranslationSegmentState,
+    TranslationTaskProgress,
     TranslationTaskState,
 )
 from app.repositories.database import Database
@@ -681,6 +682,33 @@ class TranslationRepository:
             (comic_id, chapter_id),
         )
 
+    def task_progress(self, generation_id: str) -> TranslationTaskProgress | None:
+        row = self.database.fetchone(
+            """
+            SELECT generations.*,
+                COALESCE((
+                    SELECT SUM(CASE WHEN prepared = 1 THEN 1 ELSE 0 END)
+                    FROM translation_pages prepared_pages
+                    WHERE prepared_pages.generation_id = generations.generation_id
+                ), 0) prepared_pages,
+                current_segments.status current_segment_status,
+                current_pages.status current_page_status
+            FROM translation_generations generations
+            LEFT JOIN translation_segments current_segments
+              ON current_segments.generation_id = generations.generation_id
+             AND current_segments.page_index = generations.current_page_index
+             AND current_segments.segment_index = generations.current_segment_index
+            LEFT JOIN translation_pages current_pages
+              ON current_pages.generation_id = generations.generation_id
+             AND current_pages.page_index = generations.current_page_index
+            WHERE generations.generation_id = ?
+            """,
+            (generation_id,),
+        )
+        if row is None:
+            return None
+        return TranslationTaskProgress(**self._task_progress_values(row))
+
     def background_tasks(self) -> list[BackgroundTranslationTask]:
         rows = self.database.fetchall(
             """
@@ -756,36 +784,12 @@ class TranslationRepository:
             seen_chapters.add(chapter_key)
             tasks.append(
                 BackgroundTranslationTask(
+                    **self._task_progress_values(row),
                     comic_id=comic_id,
                     chapter_id=chapter_id,
                     comic_title=str(row["history_comic_title"] or comic_id),
                     chapter_title=str(row["history_chapter_title"] or chapter_id),
-                    generation_id=str(row["generation_id"]),
                     kind=str(row["kind"]),
-                    status=str(row["status"]),
-                    stage=self._background_stage(row),
-                    current_page_index=(
-                        int(row["current_page_index"])
-                        if row["current_page_index"] is not None
-                        else None
-                    ),
-                    current_segment=(
-                        CurrentTranslationSegment(
-                            page_index=int(row["current_page_index"]),
-                            segment_index=int(row["current_segment_index"]),
-                        )
-                        if row["current_page_index"] is not None
-                        and row["current_segment_index"] is not None
-                        else None
-                    ),
-                    planning_complete=bool(row["planning_complete"]),
-                    total_pages=int(row["total_pages"]),
-                    prepared_pages=int(row["prepared_pages"]),
-                    completed_pages=int(row["completed_pages"]),
-                    failed_pages=int(row["failed_pages"]),
-                    total_segments=int(row["total_segments"]),
-                    completed_segments=int(row["completed_segments"]),
-                    failed_segments=int(row["failed_segments"]),
                 )
             )
         return tasks
@@ -842,6 +846,36 @@ class TranslationRepository:
                 (timestamp, comic_id, chapter_id),
             )
             return len(generation_ids)
+
+    @classmethod
+    def _task_progress_values(cls, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "generation_id": str(row["generation_id"]),
+            "status": str(row["status"]),
+            "stage": cls._background_stage(row),
+            "current_page_index": (
+                int(row["current_page_index"])
+                if row["current_page_index"] is not None
+                else None
+            ),
+            "current_segment": (
+                CurrentTranslationSegment(
+                    page_index=int(row["current_page_index"]),
+                    segment_index=int(row["current_segment_index"]),
+                )
+                if row["current_page_index"] is not None
+                and row["current_segment_index"] is not None
+                else None
+            ),
+            "planning_complete": bool(row["planning_complete"]),
+            "total_pages": int(row["total_pages"]),
+            "prepared_pages": int(row["prepared_pages"]),
+            "completed_pages": int(row["completed_pages"]),
+            "failed_pages": int(row["failed_pages"]),
+            "total_segments": int(row["total_segments"]),
+            "completed_segments": int(row["completed_segments"]),
+            "failed_segments": int(row["failed_segments"]),
+        }
 
     @staticmethod
     def _background_stage(row: sqlite3.Row) -> str:

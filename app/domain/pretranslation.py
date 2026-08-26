@@ -5,10 +5,7 @@ from typing import Literal
 from pydantic import Field
 
 from app.domain.comic import ComicModel
-from app.domain.translation import (
-    CurrentTranslationSegment,
-    TranslationTaskStatus,
-)
+from app.domain.translation import TranslationTaskProgress
 
 TranslationBatchStatus = Literal[
     "queued",
@@ -58,18 +55,8 @@ class TranslationBatchItemSummary(ComicModel):
     error_summary: str | None = None
 
 
-class TranslationBatchTaskSummary(ComicModel):
-    generation_id: str
-    status: TranslationTaskStatus
-    current_page_index: int | None = None
-    current_segment: CurrentTranslationSegment | None = None
-    planning_complete: bool = False
-    total_pages: int = Field(ge=0)
-    completed_pages: int = Field(ge=0)
-    failed_pages: int = Field(ge=0)
-    total_segments: int = Field(ge=0)
-    completed_segments: int = Field(ge=0)
-    failed_segments: int = Field(ge=0)
+class TranslationBatchTaskSummary(TranslationTaskProgress):
+    pass
 
 
 class TranslationBatchSummary(ComicModel):

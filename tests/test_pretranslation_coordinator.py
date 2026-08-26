@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from app.domain.translation import TranslationTaskState
+from app.domain.translation import TranslationTaskProgress, TranslationTaskState
 from app.errors import AppError
 from app.repositories.database import Database
 from app.repositories.pretranslation import PretranslationRepository
@@ -55,6 +55,9 @@ class FakeTranslationManager:
             str(generation["chapter_id"]),
             generation_id,
         )
+
+    def progress_for_generation(self, generation_id: str) -> TranslationTaskProgress | None:
+        return self.repository.task_progress(generation_id)
 
     async def start(
         self,
@@ -241,6 +244,13 @@ async def test_batches_run_old_to_new_with_one_global_slot(tmp_path: Path) -> No
 
         await wait_for(lambda: len(harness.manager.start_calls) == 1)
         assert harness.manager.start_calls[0][:2] == ("alpha", "chapter-1")
+        running = harness.coordinator.summary(first.batch_id)
+        assert running is not None
+        assert running.current_item is not None
+        assert running.current_item.chapter_id == "chapter-1"
+        assert running.current_task is not None
+        assert running.current_task.stage == "processing"
+        assert running.current_task.prepared_pages == 0
         harness.manager.complete("alpha", "chapter-1")
         await wait_for(lambda: len(harness.manager.start_calls) == 2)
         assert harness.manager.start_calls[1][:2] == ("alpha", "chapter-2")

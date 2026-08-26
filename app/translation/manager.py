@@ -22,6 +22,7 @@ from app.domain.comic import ChapterManifest
 from app.domain.translation import (
     BackgroundTranslationTask,
     ForceStopTranslationResult,
+    TranslationTaskProgress,
     TranslationTaskState,
 )
 from app.errors import AppError
@@ -149,6 +150,9 @@ class TranslationManager:
             str(generation["chapter_id"]),
             generation_id,
         )
+
+    def progress_for_generation(self, generation_id: str) -> TranslationTaskProgress | None:
+        return self.repository.task_progress(generation_id)
 
     @property
     def ocr_concurrency(self) -> int:
