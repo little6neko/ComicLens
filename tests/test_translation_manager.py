@@ -2130,6 +2130,49 @@ async def test_batch_start_persists_owner_before_worker_and_hides_interactive_ta
 
 
 @pytest.mark.asyncio
+async def test_pause_generation_only_stops_the_batch_owned_target(tmp_path: Path) -> None:
+    harness = create_harness(tmp_path, page_count=1)
+    batches = PretranslationRepository(harness.database)
+    batch_id = batches.create_batch("alpha", "Alpha", [("chapter-1", "Chapter 1")])
+    batches.claim_batch(batch_id)
+    item = batches.next_pending_item(batch_id)
+    assert item is not None
+    item_id = str(item["batch_item_id"])
+    batches.claim_item(item_id)
+    owned_id = harness.repository.create_generation(
+        "alpha",
+        "chapter-1",
+        semantic_fingerprint="owned",
+        semantic_settings={},
+        page_indexes=[],
+        kind="normal",
+        batch_item_id=item_id,
+    )
+    interactive_id = harness.repository.create_generation(
+        "alpha",
+        "chapter-1",
+        semantic_fingerprint="interactive",
+        semantic_settings={},
+        page_indexes=[],
+        kind="retranslate",
+    )
+    harness.repository.set_generation_status(owned_id, "running")
+    harness.repository.set_generation_status(interactive_id, "running")
+    try:
+        paused = await harness.manager.pause_generation(owned_id)
+        owned = harness.repository.generation(owned_id)
+        interactive = harness.repository.generation(interactive_id)
+
+        assert paused is not None and paused.generation_id == owned_id
+        assert owned is not None and owned["stop_requested"] == 1
+        assert owned["status"] == "stopping_after_page"
+        assert interactive is not None and interactive["status"] == "running"
+        assert interactive["stop_requested"] == 0
+    finally:
+        await harness.close()
+
+
+@pytest.mark.asyncio
 async def test_batch_owner_rejects_wrong_chapter_and_transfers_to_new_fingerprint(
     tmp_path: Path,
 ) -> None:

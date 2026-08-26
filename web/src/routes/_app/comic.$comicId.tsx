@@ -99,6 +99,9 @@ function ComicDetailPage() {
   const readSet = new Set(readChapters.data?.chapterIds ?? []);
   const displayedChapters = chaptersDescending ? detail.chapters : [...detail.chapters].reverse();
   const chapterSortLabel = chaptersDescending ? "当前为逆序，切换为正序" : "当前为正序，切换为逆序";
+  const batchActive = ["queued", "running", "pausing", "cancelling"].includes(
+    translationOverview.data?.batch?.status ?? "",
+  );
 
   return (
     <AppPage>
@@ -168,7 +171,7 @@ function ComicDetailPage() {
                 void translationOverview.refetch();
               }}
             >
-              {translationOverview.isFetching && !translationOverview.data ? (
+              {(translationOverview.isFetching && !translationOverview.data) || batchActive ? (
                 <LoaderCircleIcon className="size-4 animate-spin" />
               ) : (
                 <SparklesIcon className="size-4" />

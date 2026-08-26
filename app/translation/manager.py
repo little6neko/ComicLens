@@ -379,6 +379,31 @@ class TranslationManager:
         latest_id = str(active_rows[-1]["generation_id"])
         return self.repository.task_state(comic_id, chapter_id, latest_id)
 
+    async def pause_generation(self, generation_id: str) -> TranslationTaskState | None:
+        generation = self.repository.generation(generation_id)
+        if generation is None:
+            return None
+        comic_id = str(generation["comic_id"])
+        chapter_id = str(generation["chapter_id"])
+        if str(generation["status"]) in {
+            "preparing",
+            "queued",
+            "running",
+            "stopping_after_page",
+            "stopping_after_segment",
+        }:
+            self.repository.request_stop(generation_id)
+            self._wake_generation(generation_id)
+            self._log_task_event(
+                "pause_requested",
+                comic_id=comic_id,
+                chapter_id=chapter_id,
+                generation_id=generation_id,
+                reason="batch_yield",
+            )
+            self._notify_activity_changed()
+        return self.repository.task_state(comic_id, chapter_id, generation_id)
+
     def background_tasks(self) -> list[BackgroundTranslationTask]:
         return self.repository.background_tasks()
 

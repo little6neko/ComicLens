@@ -52,7 +52,10 @@ class TranslationManagerProtocol(Protocol):
         batch_item_id: str | None = None,
     ) -> TranslationTaskState: ...
 
-    async def pause(self, comic_id: str, chapter_id: str) -> TranslationTaskState: ...
+    async def pause_generation(
+        self,
+        generation_id: str,
+    ) -> TranslationTaskState | None: ...
 
     async def retry_failed(
         self,
@@ -136,6 +139,8 @@ class PretranslationCoordinator:
     def pause(self, batch_id: str) -> TranslationBatchSummary:
         row = self._batch_or_error(batch_id)
         status = str(row["status"])
+        if status in {"pausing", "paused"}:
+            return self._summary_or_error(batch_id)
         if status not in {"queued", "running", "pausing", "paused"}:
             raise AppError(
                 "TRANSLATION_BATCH_NOT_PAUSABLE",
@@ -333,7 +338,7 @@ class PretranslationCoordinator:
         if task is None or task.status not in ACTIVE_TASK_STATUSES:
             return False
         if not bool(batch["interactive_yielded"]):
-            await self.manager.pause(str(batch["comic_id"]), str(current["chapter_id"]))
+            await self.manager.pause_generation(str(generation["generation_id"]))
             self.repository.set_interactive_yielded(str(batch["batch_id"]), True)
             if str(batch["pause_reason"] or "") == "user":
                 self.repository.request_pause(str(batch["batch_id"]), reason="user")

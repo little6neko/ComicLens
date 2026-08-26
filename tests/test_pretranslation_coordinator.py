@@ -21,6 +21,7 @@ class FakeTranslationManager:
         self.start_calls: list[tuple[str, str, str | None]] = []
         self.retry_calls: list[tuple[str, str, str | None]] = []
         self.pause_calls: list[tuple[str, str]] = []
+        self.paused_generation_ids: list[str] = []
         self.listeners: set[Callable[[], None]] = set()
         self.interactive = False
         self.config_error: AppError | None = None
@@ -99,6 +100,21 @@ class FakeTranslationManager:
             )
         self.notify()
         return self.repository.task_state(comic_id, chapter_id)
+
+    async def pause_generation(self, generation_id: str) -> TranslationTaskState | None:
+        generation = self.repository.generation(generation_id)
+        if generation is None:
+            return None
+        comic_id = str(generation["comic_id"])
+        chapter_id = str(generation["chapter_id"])
+        self.pause_calls.append((comic_id, chapter_id))
+        self.paused_generation_ids.append(generation_id)
+        self.repository.set_generation_status(
+            generation_id,
+            "stopping_after_segment" if self.defer_pause else "paused",
+        )
+        self.notify()
+        return self.repository.task_state(comic_id, chapter_id, generation_id)
 
     async def retry_failed(
         self,
@@ -466,6 +482,36 @@ async def test_interactive_yield_auto_resumes_current_chapter_when_batch_is_runn
         assert not bool(harness.batches.batch(batch.batch_id)["interactive_yielded"])
         harness.manager.complete("alpha", "chapter-1")
         await wait_for(lambda: harness.batches.batch(batch.batch_id)["status"] == "completed")
+    finally:
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_same_chapter_interactive_task_only_pauses_batch_owned_generation(
+    tmp_path: Path,
+) -> None:
+    harness = create_coordinator_harness(tmp_path)
+    try:
+        batch = harness.coordinator.create_batch(
+            "alpha",
+            "Alpha",
+            [("chapter-1", "Chapter 1")],
+        )
+        harness.coordinator.start()
+        await wait_for(lambda: len(harness.manager.start_calls) == 1)
+        item = harness.batches.current_item(batch.batch_id)
+        assert item is not None
+        owned = harness.batches.owned_generation(str(item["batch_item_id"]))
+        assert owned is not None
+        owned_id = str(owned["generation_id"])
+        interactive_id = harness.manager.seed("alpha", "chapter-1", "running")
+
+        harness.manager.set_interactive(True)
+        await wait_for(lambda: len(harness.manager.paused_generation_ids) == 1)
+
+        assert harness.manager.paused_generation_ids == [owned_id]
+        assert harness.translations.generation(owned_id)["status"] == "paused"
+        assert harness.translations.generation(interactive_id)["status"] == "running"
     finally:
         await harness.close()
 
