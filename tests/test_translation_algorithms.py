@@ -775,10 +775,16 @@ async def test_deepl_selects_free_or_pro_and_maps_languages() -> None:
     assert requests[0].headers["authorization"] == "DeepL-Auth-Key free-key:fx"
     assert requests[0].url.host == "api-free.deepl.com"
     assert requests[0].read().decode() == (
-        '{"text":["source-0","source-1"],"target_lang":"ZH-HANS"}'
+        '{"text":["source-0","source-1"],"target_lang":"ZH-HANS",'
+        '"model_type":"quality_optimized"}'
     )
     assert requests[1].url.host == "api.deepl.com"
-    assert '"source_lang":"KO"' in requests[1].read().decode()
+    assert json.loads(requests[1].read()) == {
+        "text": ["source-0"],
+        "target_lang": "ZH-HANS",
+        "model_type": "quality_optimized",
+        "source_lang": "KO",
+    }
 
 
 @pytest.mark.asyncio

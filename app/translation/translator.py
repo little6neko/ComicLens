@@ -309,6 +309,7 @@ class DeepLClient:
         payload: dict[str, object] = {
             "text": texts,
             "target_lang": "ZH-HANS",
+            "model_type": "quality_optimized",
         }
         if source_lang != "AUTO":
             payload["source_lang"] = source_lang
