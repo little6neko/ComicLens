@@ -78,7 +78,7 @@ export function PretranslationDialog({
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className={overlayClass} />
-        <Dialog.Content className="fixed inset-0 z-[80] flex h-[100dvh] w-screen flex-col bg-background outline-none sm:top-1/2 sm:left-1/2 sm:h-auto sm:max-h-[min(48rem,calc(100dvh-2rem))] sm:w-[min(44rem,calc(100vw-2rem))] sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-3xl sm:border sm:shadow-2xl">
+        <Dialog.Content className="fixed inset-0 z-[80] flex h-[100dvh] w-screen flex-col overflow-hidden bg-background outline-none sm:top-1/2 sm:left-1/2 sm:h-auto sm:max-h-[min(48rem,calc(100dvh-2rem))] sm:w-[min(44rem,calc(100vw-2rem))] sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-3xl sm:border sm:shadow-2xl">
           <div className="flex shrink-0 items-start gap-3 border-b px-4 py-4 sm:px-6 sm:py-5">
             <span className="flex size-10 shrink-0 items-center justify-center rounded-2xl bg-primary/10 text-primary">
               <SparklesIcon className="size-4" />
