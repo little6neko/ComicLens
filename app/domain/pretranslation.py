@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import Field
 
 from app.domain.comic import ComicModel
-from app.domain.translation import BackgroundTranslationTask
+from app.domain.translation import TranslationTaskState
 
 TranslationBatchStatus = Literal[
     "queued",
@@ -72,7 +72,7 @@ class TranslationBatchSummary(ComicModel):
     failed_chapters: int = Field(ge=0)
     cancelled_chapters: int = Field(ge=0)
     current_item: TranslationBatchItemSummary | None = None
-    current_task: BackgroundTranslationTask | None = None
+    current_task: TranslationTaskState | None = None
     created_at: int
     updated_at: int
 

@@ -114,6 +114,7 @@ def test_pause_reason_and_interactive_yield_are_independent(
     assert resumed["status"] == "queued"
     assert resumed["pause_reason"] is None
     assert resumed["interactive_yielded"] == 1
+    batch_repository.set_interactive_yielded(batch_id, False)
 
     batch_repository.claim_batch(batch_id)
     item = batch_repository.next_pending_item(batch_id)
@@ -122,6 +123,7 @@ def test_pause_reason_and_interactive_yield_are_independent(
     pausing = batch_repository.request_pause(batch_id)
     assert pausing is not None and pausing["status"] == "pausing"
     assert pausing["pause_reason"] == "user"
+    batch_repository.set_interactive_yielded(batch_id, True)
 
     batch_repository.finish_item(str(item["batch_item_id"]), "completed")
     settled = batch_repository.settle_after_item(batch_id)

@@ -10,7 +10,7 @@ from app.domain.pretranslation import (
     TranslationBatchItemSummary,
     TranslationBatchSummary,
 )
-from app.domain.translation import BackgroundTranslationTask
+from app.domain.translation import TranslationTaskState
 from app.repositories.database import Database
 
 OPEN_BATCH_STATUSES = {
@@ -132,6 +132,23 @@ class PretranslationRepository:
             (batch_item_id,),
         )
 
+    def owned_unfinished_item(self, batch_id: str) -> sqlite3.Row | None:
+        return self.database.fetchone(
+            """
+            SELECT items.* FROM translation_batch_items items
+            JOIN translation_generations generations
+              ON generations.batch_item_id = items.batch_item_id
+            WHERE items.batch_id = ?
+              AND items.status IN ('pending', 'running')
+              AND generations.status IN (
+                  'preparing', 'queued', 'running',
+                  'stopping_after_page', 'stopping_after_segment', 'paused'
+              )
+            ORDER BY items.position ASC LIMIT 1
+            """,
+            (batch_id,),
+        )
+
     def scheduler_batch(self) -> sqlite3.Row | None:
         return self.database.fetchone(
             """
@@ -143,6 +160,16 @@ class PretranslationRepository:
                 END,
                 created_at ASC, rowid ASC
             LIMIT 1
+            """
+        )
+
+    def interactive_yielded_batch(self) -> sqlite3.Row | None:
+        return self.database.fetchone(
+            """
+            SELECT * FROM translation_batches
+            WHERE interactive_yielded = 1
+              AND status NOT IN ('completed', 'cancelled')
+            ORDER BY created_at ASC, rowid ASC LIMIT 1
             """
         )
 
@@ -243,7 +270,25 @@ class PretranslationRepository:
                     (batch_id,),
                 ).fetchone()
             )
-            next_status = "pausing" if has_running and reason == "user" else "paused"
+            next_status = (
+                "pausing"
+                if has_running and reason == "user" and not bool(row["interactive_yielded"])
+                else "paused"
+            )
+            if (
+                next_status == "paused"
+                and has_running
+                and reason == "user"
+                and bool(row["interactive_yielded"])
+            ):
+                connection.execute(
+                    """
+                    UPDATE translation_batch_items
+                    SET status = 'pending', updated_at = ?
+                    WHERE batch_id = ? AND status = 'running'
+                    """,
+                    (timestamp, batch_id),
+                )
             connection.execute(
                 """
                 UPDATE translation_batches
@@ -251,6 +296,42 @@ class PretranslationRepository:
                 WHERE batch_id = ?
                 """,
                 (next_status, reason, timestamp, batch_id),
+            )
+        return self.batch(batch_id)
+
+    def pause_for_config(
+        self,
+        batch_id: str,
+        batch_item_id: str,
+        *,
+        error_code: str,
+        error_summary: str,
+    ) -> sqlite3.Row | None:
+        timestamp = self._timestamp()
+        with self.database.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM translation_batches WHERE batch_id = ?",
+                (batch_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                """
+                UPDATE translation_batch_items
+                SET status = 'pending', error_code = NULL,
+                    error_summary = NULL, updated_at = ?
+                WHERE batch_item_id = ? AND batch_id = ? AND status = 'running'
+                """,
+                (timestamp, batch_item_id, batch_id),
+            )
+            connection.execute(
+                """
+                UPDATE translation_batches
+                SET status = 'paused', pause_reason = 'config',
+                    error_code = ?, error_summary = ?, updated_at = ?
+                WHERE batch_id = ? AND status NOT IN ('completed', 'cancelled')
+                """,
+                (error_code, error_summary, timestamp, batch_id),
             )
         return self.batch(batch_id)
 
@@ -279,6 +360,24 @@ class PretranslationRepository:
             status = str(row["status"])
             if status in {"completed", "cancelled"}:
                 return row
+            if bool(row["interactive_yielded"]):
+                connection.execute(
+                    """
+                    UPDATE translation_batch_items
+                    SET status = 'running', updated_at = ?
+                    WHERE batch_id = ? AND status = 'pending'
+                      AND EXISTS (
+                          SELECT 1 FROM translation_generations generations
+                          WHERE generations.batch_item_id =
+                                translation_batch_items.batch_item_id
+                            AND generations.status IN (
+                                'preparing', 'queued', 'running',
+                                'stopping_after_page', 'stopping_after_segment', 'paused'
+                            )
+                      )
+                    """,
+                    (timestamp, batch_id),
+                )
             connection.execute(
                 """
                 UPDATE translation_batch_items
@@ -299,10 +398,17 @@ class PretranslationRepository:
             connection.execute(
                 """
                 UPDATE translation_batches
-                SET status = ?, pause_reason = NULL, updated_at = ?
+                SET status = ?, pause_reason = NULL,
+                    interactive_yielded = CASE WHEN ? THEN interactive_yielded ELSE 0 END,
+                    updated_at = ?
                 WHERE batch_id = ?
                 """,
-                ("cancelling" if has_running else "cancelled", timestamp, batch_id),
+                (
+                    "cancelling" if has_running else "cancelled",
+                    int(has_running),
+                    timestamp,
+                    batch_id,
+                ),
             )
         return self.batch(batch_id)
 
@@ -371,7 +477,8 @@ class PretranslationRepository:
         self.database.execute(
             """
             UPDATE translation_batches
-            SET status = 'failed', error_code = ?, error_summary = ?, updated_at = ?
+            SET status = 'failed', interactive_yielded = 0,
+                error_code = ?, error_summary = ?, updated_at = ?
             WHERE batch_id = ? AND status NOT IN ('completed', 'cancelled')
             """,
             (error_code, error_summary, self._timestamp(), batch_id),
@@ -443,7 +550,7 @@ class PretranslationRepository:
         self,
         batch_id: str,
         *,
-        current_task: BackgroundTranslationTask | None = None,
+        current_task: TranslationTaskState | None = None,
     ) -> TranslationBatchSummary | None:
         row = self.database.fetchone(
             """
