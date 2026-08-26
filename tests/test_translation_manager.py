@@ -21,6 +21,7 @@ from app.errors import AppError
 from app.media.registry import SourceMediaRegistry
 from app.observability import current_log_context, short_ref
 from app.repositories.database import Database
+from app.repositories.pretranslation import PretranslationRepository
 from app.repositories.translation import TranslationRepository
 from app.security.secrets import SecretCipher
 from app.translation.concurrency import DynamicConcurrencyLimiter
@@ -2085,6 +2086,220 @@ async def test_interrupted_stage_recovers_to_paused_pending(tmp_path: Path) -> N
     )
     assert bundle is not None and bundle["active_task"] == 0
     await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_batch_start_persists_owner_before_worker_and_hides_interactive_task(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path, page_count=1)
+    batches = PretranslationRepository(harness.database)
+    batch_id = batches.create_batch("alpha", "Alpha", [("chapter-1", "Chapter 1")])
+    batches.claim_batch(batch_id)
+    item = batches.next_pending_item(batch_id)
+    assert item is not None
+    item_id = str(item["batch_item_id"])
+    batches.claim_item(item_id)
+    harness.pipeline.block_first_ocr = True
+    notifications = 0
+
+    def notified() -> None:
+        nonlocal notifications
+        notifications += 1
+
+    remove_listener = harness.manager.add_activity_listener(notified)
+    try:
+        started = await harness.manager.start(
+            "alpha",
+            "chapter-1",
+            batch_item_id=item_id,
+        )
+        generation = harness.repository.generation(str(started.generation_id))
+        assert generation is not None and generation["batch_item_id"] == item_id
+        assert harness.manager.has_interactive_tasks() is False
+        assert harness.manager.background_tasks() == []
+        assert notifications >= 1
+
+        await wait_for(harness.pipeline.ocr_started.is_set)
+        harness.pipeline.ocr_release.set()
+        await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
+        await wait_for(lambda: notifications >= 2)
+    finally:
+        remove_listener()
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_batch_owner_rejects_wrong_chapter_and_transfers_to_new_fingerprint(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path, page_count=1)
+    batches = PretranslationRepository(harness.database)
+    batch_id = batches.create_batch("alpha", "Alpha", [("chapter-1", "Chapter 1")])
+    batches.claim_batch(batch_id)
+    item = batches.next_pending_item(batch_id)
+    assert item is not None
+    item_id = str(item["batch_item_id"])
+    batches.claim_item(item_id)
+    try:
+        with pytest.raises(ValueError, match="does not match"):
+            await harness.manager.start(
+                "alpha",
+                "chapter-2",
+                batch_item_id=item_id,
+            )
+
+        first = await harness.manager.start(
+            "alpha",
+            "chapter-1",
+            batch_item_id=item_id,
+        )
+        await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
+        harness.manager.settings.patch(ServerSettingsPatch(source_language="KO"))
+        second = await harness.manager.start(
+            "alpha",
+            "chapter-1",
+            batch_item_id=item_id,
+        )
+        assert second.generation_id != first.generation_id
+        first_row = harness.repository.generation(str(first.generation_id))
+        second_row = harness.repository.generation(str(second.generation_id))
+        assert first_row is not None and first_row["batch_item_id"] is None
+        assert second_row is not None and second_row["batch_item_id"] == item_id
+        await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
+    finally:
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_failed_binds_batch_owner_before_resuming(tmp_path: Path) -> None:
+    harness = create_harness(tmp_path, page_count=1)
+    try:
+        harness.pipeline.fail_translation_calls.add(1)
+        failed = await harness.manager.start("alpha", "chapter-1")
+        await wait_for(
+            lambda: harness.manager.state("alpha", "chapter-1").status
+            == "completed_with_errors"
+        )
+
+        batches = PretranslationRepository(harness.database)
+        batch_id = batches.create_batch("alpha", "Alpha", [("chapter-1", "Chapter 1")])
+        batches.claim_batch(batch_id)
+        item = batches.next_pending_item(batch_id)
+        assert item is not None
+        item_id = str(item["batch_item_id"])
+        batches.claim_item(item_id)
+
+        _state, retried_count = await harness.manager.retry_failed(
+            "alpha",
+            "chapter-1",
+            batch_item_id=item_id,
+        )
+        generation = harness.repository.generation(str(failed.generation_id))
+        assert retried_count == 1
+        assert generation is not None and generation["batch_item_id"] == item_id
+        await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
+    finally:
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_starts_normal_worker_but_leaves_open_batch_generation_for_coordinator(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path, page_count=1)
+    source_pages = await harness.manager._ensure_source_pages("alpha", "chapter-1")
+    runtime = harness.manager._runtime_settings(require_services=True)
+    semantic, fingerprint = harness.manager._semantic_settings(source_pages, runtime)
+    await harness.manager.shutdown()
+
+    batches = PretranslationRepository(harness.database)
+    batch_id = batches.create_batch("alpha", "Alpha", [("chapter-1", "Chapter 1")])
+    batches.claim_batch(batch_id)
+    item = batches.next_pending_item(batch_id)
+    assert item is not None
+    item_id = str(item["batch_item_id"])
+    batches.claim_item(item_id)
+    owned_id = harness.repository.create_generation(
+        "alpha",
+        "chapter-1",
+        semantic_fingerprint=fingerprint,
+        semantic_settings=semantic,
+        page_indexes=[0],
+        source_pages=source_pages,
+        kind="normal",
+        progressive=True,
+        batch_item_id=item_id,
+    )
+    normal_id = harness.repository.create_generation(
+        "beta",
+        "chapter-1",
+        semantic_fingerprint=fingerprint,
+        semantic_settings=semantic,
+        page_indexes=[0],
+        source_pages={0: "https://img01.manga18fx.com/0.png"},
+        kind="normal",
+        progressive=True,
+    )
+    harness.pipeline.block_first_ocr = True
+    replacement = TranslationManager(
+        repository=harness.repository,
+        cache=harness.cache,
+        source=harness.source,
+        registry=harness.manager.registry,
+        settings=harness.manager.settings,
+        pipeline_factory=lambda _semantic, _runtime: harness.pipeline,  # type: ignore[arg-type]
+    )
+    harness.pipeline.ocr_limiter = replacement._ocr_limiter
+    harness.manager = replacement
+    try:
+        await wait_for(harness.pipeline.ocr_started.is_set)
+        assert harness.repository.generation(owned_id)["status"] == "queued"
+        assert ("alpha", "chapter-1") not in replacement._tasks
+        assert ("beta", "chapter-1") in replacement._tasks
+        assert harness.repository.generation(normal_id)["batch_item_id"] is None
+        harness.pipeline.ocr_release.set()
+        await wait_for(lambda: replacement.state("beta", "chapter-1").status == "completed")
+    finally:
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_closed_batch_failed_generation_returns_to_normal_background_tasks(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path, page_count=1)
+    batches = PretranslationRepository(harness.database)
+    batch_id = batches.create_batch("alpha", "Alpha", [("chapter-1", "Chapter 1")])
+    batches.claim_batch(batch_id)
+    item = batches.next_pending_item(batch_id)
+    assert item is not None
+    item_id = str(item["batch_item_id"])
+    batches.claim_item(item_id)
+    generation_id = harness.repository.create_generation(
+        "alpha",
+        "chapter-1",
+        semantic_fingerprint="failed",
+        semantic_settings={},
+        page_indexes=[0],
+        kind="normal",
+        batch_item_id=item_id,
+    )
+    harness.repository.set_generation_status(generation_id, "failed")
+    try:
+        assert harness.manager.background_tasks() == []
+        assert harness.manager.has_interactive_tasks() is False
+
+        batches.set_batch_failed(
+            batch_id,
+            error_code="COORDINATOR_ERROR",
+            error_summary="Coordinator stopped",
+        )
+        batches.close_failed_batch(batch_id)
+        background = harness.manager.background_tasks()
+        assert [task.generation_id for task in background] == [generation_id]
+    finally:
+        await harness.close()
 
 
 @pytest.mark.asyncio

@@ -91,6 +91,8 @@ class TranslationManager:
         self._force_stop_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._force_stopping: set[tuple[str, str]] = set()
         self._generation_events: dict[str, asyncio.Event] = {}
+        self._activity_listeners: set[Callable[[], None]] = set()
+        self._shutting_down = False
         self._ocr_limiter = DynamicConcurrencyLimiter(
             int(settings.values(include_secrets=False)["ocr_concurrency"])
         )
@@ -107,13 +109,46 @@ class TranslationManager:
         self._resume_recovered_workers()
 
     async def shutdown(self) -> None:
+        self._shutting_down = True
         active_tasks = [task for task in self._tasks.values() if not task.done()]
         for task in active_tasks:
             task.cancel()
         if active_tasks:
             await asyncio.gather(*active_tasks, return_exceptions=True)
         self.repository.recover_interrupted()
+        self._activity_listeners.clear()
         await self._http_client.aclose()
+
+    def add_activity_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
+        self._activity_listeners.add(listener)
+
+        def remove() -> None:
+            self._activity_listeners.discard(listener)
+
+        return remove
+
+    def _notify_activity_changed(self) -> None:
+        for listener in tuple(self._activity_listeners):
+            try:
+                listener()
+            except Exception:
+                logger.warning("Translation activity listener failed", exc_info=True)
+
+    def validate_runtime_services(self) -> None:
+        self._runtime_settings(require_services=True)
+
+    def has_interactive_tasks(self) -> bool:
+        return bool(self.repository.interactive_generations())
+
+    def state_for_generation(self, generation_id: str) -> TranslationTaskState | None:
+        generation = self.repository.generation(generation_id)
+        if generation is None:
+            return None
+        return self.repository.task_state(
+            str(generation["comic_id"]),
+            str(generation["chapter_id"]),
+            generation_id,
+        )
 
     @property
     def ocr_concurrency(self) -> int:
@@ -163,12 +198,28 @@ class TranslationManager:
         elif status == "paused":
             log_event("task", "task_paused", **fields)
 
-    async def start(self, comic_id: str, chapter_id: str) -> TranslationTaskState:
+    async def start(
+        self,
+        comic_id: str,
+        chapter_id: str,
+        *,
+        batch_item_id: str | None = None,
+    ) -> TranslationTaskState:
         action_lock = self._force_stop_locks.setdefault((comic_id, chapter_id), asyncio.Lock())
         async with action_lock:
-            return await self._start(comic_id, chapter_id)
+            return await self._start(
+                comic_id,
+                chapter_id,
+                batch_item_id=batch_item_id,
+            )
 
-    async def _start(self, comic_id: str, chapter_id: str) -> TranslationTaskState:
+    async def _start(
+        self,
+        comic_id: str,
+        chapter_id: str,
+        *,
+        batch_item_id: str | None = None,
+    ) -> TranslationTaskState:
         source_pages = await self._ensure_source_pages(comic_id, chapter_id)
         runtime = self._runtime_settings(require_services=True)
         semantic, fingerprint = self._semantic_settings(source_pages, runtime)
@@ -181,6 +232,13 @@ class TranslationManager:
             and str(latest["semantic_fingerprint"]) == fingerprint
         ):
             generation_id = str(latest["generation_id"])
+            if batch_item_id is not None:
+                self.repository.assign_batch_item(
+                    generation_id,
+                    batch_item_id,
+                    comic_id,
+                    chapter_id,
+                )
             self.repository.resume(generation_id)
             self._log_task_event(
                 "task_resumed",
@@ -189,11 +247,18 @@ class TranslationManager:
                 generation_id=generation_id,
                 reason="start",
             )
-            self._ensure_worker(comic_id, chapter_id)
+            self._ensure_scoped_worker(comic_id, chapter_id, batch_item_id)
             return self.repository.task_state(comic_id, chapter_id, generation_id)
         matching = self.repository.matching_generation(comic_id, chapter_id, fingerprint)
 
         if active is not None and str(active["semantic_fingerprint"]) == fingerprint:
+            if batch_item_id is not None:
+                self.repository.assign_batch_item(
+                    str(active["generation_id"]),
+                    batch_item_id,
+                    comic_id,
+                    chapter_id,
+                )
             if bool(active["stop_requested"]):
                 current_page_index = (
                     int(active["current_page_index"])
@@ -224,11 +289,18 @@ class TranslationManager:
                     generation_id=str(active["generation_id"]),
                     reason="stop_cancelled",
                 )
-            self._ensure_worker(comic_id, chapter_id)
+            self._ensure_scoped_worker(comic_id, chapter_id, batch_item_id)
             return self.repository.task_state(comic_id, chapter_id, str(active["generation_id"]))
 
         if matching is not None:
             generation_id = str(matching["generation_id"])
+            if batch_item_id is not None:
+                self.repository.assign_batch_item(
+                    generation_id,
+                    batch_item_id,
+                    comic_id,
+                    chapter_id,
+                )
             status = str(matching["status"])
             if status == "paused":
                 self.repository.resume(generation_id)
@@ -252,7 +324,7 @@ class TranslationManager:
                 )
             if active is not None and str(active["generation_id"]) != generation_id:
                 self.repository.request_stop(str(active["generation_id"]))
-            self._ensure_worker(comic_id, chapter_id)
+            self._ensure_scoped_worker(comic_id, chapter_id, batch_item_id)
             return self.repository.task_state(comic_id, chapter_id, generation_id)
 
         generation_id = self.repository.create_generation(
@@ -264,6 +336,7 @@ class TranslationManager:
             kind="normal",
             source_pages=source_pages,
             progressive=True,
+            batch_item_id=batch_item_id,
         )
         if active is not None:
             self.repository.request_stop(str(active["generation_id"]))
@@ -274,7 +347,7 @@ class TranslationManager:
             generation_id=generation_id,
             kind="normal",
         )
-        self._ensure_worker(comic_id, chapter_id)
+        self._ensure_scoped_worker(comic_id, chapter_id, batch_item_id)
         return self.repository.task_state(comic_id, chapter_id, generation_id)
 
     async def pause(self, comic_id: str, chapter_id: str) -> TranslationTaskState:
@@ -302,6 +375,7 @@ class TranslationManager:
                 chapter_id=chapter_id,
                 generation_id=generation_id,
             )
+        self._notify_activity_changed()
         latest_id = str(active_rows[-1]["generation_id"])
         return self.repository.task_state(comic_id, chapter_id, latest_id)
 
@@ -341,6 +415,7 @@ class TranslationManager:
                     stopped_generations=stopped,
                     reason="force_stop",
                 )
+            self._notify_activity_changed()
             return ForceStopTranslationResult(
                 comic_id=comic_id,
                 chapter_id=chapter_id,
@@ -497,6 +572,8 @@ class TranslationManager:
         self,
         comic_id: str,
         chapter_id: str,
+        *,
+        batch_item_id: str | None = None,
     ) -> tuple[TranslationTaskState, int]:
         action_lock = self._force_stop_locks.setdefault((comic_id, chapter_id), asyncio.Lock())
         async with action_lock:
@@ -513,6 +590,13 @@ class TranslationManager:
                 )
 
             generation_id = str(generation["generation_id"])
+            if batch_item_id is not None:
+                self.repository.assign_batch_item(
+                    generation_id,
+                    batch_item_id,
+                    comic_id,
+                    chapter_id,
+                )
             retried_count, paths = self.repository.prepare_failed_retries(generation_id)
             self._log_task_event(
                 "retry_failed_requested",
@@ -540,7 +624,7 @@ class TranslationManager:
                         reason="retry_failed",
                     )
                 self._wake_generation(generation_id)
-                self._ensure_worker(comic_id, chapter_id)
+                self._ensure_scoped_worker(comic_id, chapter_id, batch_item_id)
             return (
                 self.repository.task_state(comic_id, chapter_id, generation_id),
                 retried_count,
@@ -665,47 +749,97 @@ class TranslationManager:
     def _resume_recovered_workers(self) -> None:
         rows = self.repository.database.fetchall(
             """
-            SELECT DISTINCT comic_id, chapter_id FROM translation_generations
-            WHERE status IN ('preparing', 'queued')
+            SELECT DISTINCT generations.comic_id, generations.chapter_id
+            FROM translation_generations generations
+            WHERE generations.status IN ('preparing', 'queued')
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM translation_batch_items batch_items
+                  JOIN translation_batches batches
+                    ON batches.batch_id = batch_items.batch_id
+                  WHERE batch_items.batch_item_id = generations.batch_item_id
+                    AND batches.status NOT IN ('completed', 'cancelled')
+              )
             """
         )
         for row in rows:
             self._ensure_worker(str(row["comic_id"]), str(row["chapter_id"]))
 
-    def _ensure_worker(self, comic_id: str, chapter_id: str) -> None:
+    def _ensure_scoped_worker(
+        self,
+        comic_id: str,
+        chapter_id: str,
+        batch_item_id: str | None,
+    ) -> None:
+        if batch_item_id is None:
+            self._ensure_worker(comic_id, chapter_id)
+        else:
+            self._ensure_worker(
+                comic_id,
+                chapter_id,
+                batch_item_id=batch_item_id,
+            )
+
+    def _ensure_worker(
+        self,
+        comic_id: str,
+        chapter_id: str,
+        *,
+        batch_item_id: str | None = None,
+    ) -> None:
         key = (comic_id, chapter_id)
-        if key in self._force_stopping:
+        if self._shutting_down or key in self._force_stopping:
             return
         existing = self._tasks.get(key)
         if existing is not None and not existing.done():
             return
         task = asyncio.create_task(
-            self._run_chapter(comic_id, chapter_id),
+            self._run_chapter(
+                comic_id,
+                chapter_id,
+                batch_item_id=batch_item_id,
+            ),
             name=f"translate:{comic_id}:{chapter_id}",
         )
         self._tasks[key] = task
         task.add_done_callback(
             lambda completed, task_key=key: self._worker_done(task_key, completed)
         )
+        self._notify_activity_changed()
 
     def _worker_done(self, key: tuple[str, str], task: asyncio.Task[None]) -> None:
         if self._tasks.get(key) is task:
             self._tasks.pop(key, None)
-        if task.cancelled():
-            return
-        error = task.exception()
-        if error is not None:
-            logger.error(
-                "Translation worker stopped unexpectedly",
-                extra={"comic_id": key[0], "chapter_id": key[1]},
-                exc_info=(type(error), error, error.__traceback__),
-            )
+        if not task.cancelled():
+            error = task.exception()
+            if error is not None:
+                logger.error(
+                    "Translation worker stopped unexpectedly",
+                    extra={"comic_id": key[0], "chapter_id": key[1]},
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+        self._notify_activity_changed()
+        if (
+            not self._shutting_down
+            and self.repository.next_queued_generation(key[0], key[1]) is not None
+        ):
+            self._ensure_worker(key[0], key[1])
 
-    async def _run_chapter(self, comic_id: str, chapter_id: str) -> None:
+    async def _run_chapter(
+        self,
+        comic_id: str,
+        chapter_id: str,
+        *,
+        batch_item_id: str | None = None,
+    ) -> None:
         key = (comic_id, chapter_id)
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
-            while generation := self.repository.next_queued_generation(comic_id, chapter_id):
+            while generation := self.repository.next_queued_generation(
+                comic_id,
+                chapter_id,
+                batch_item_id=batch_item_id,
+            ):
                 await self._run_queued_generation(generation, comic_id, chapter_id)
 
     async def _run_queued_generation(

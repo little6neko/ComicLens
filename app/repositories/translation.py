@@ -403,11 +403,26 @@ class TranslationRepository:
         kind: str,
         source_pages: dict[int, str] | None = None,
         progressive: bool = False,
+        batch_item_id: str | None = None,
     ) -> str:
         generation_id = uuid.uuid4().hex
         timestamp = self._timestamp()
         initial_status = "preparing" if progressive else "queued"
         with self.database.transaction() as connection:
+            if batch_item_id is not None:
+                self._validate_batch_item_owner(
+                    connection,
+                    batch_item_id,
+                    comic_id,
+                    chapter_id,
+                )
+                connection.execute(
+                    """
+                    UPDATE translation_generations SET batch_item_id = NULL
+                    WHERE batch_item_id = ?
+                    """,
+                    (batch_item_id,),
+                )
             connection.execute(
                 """
                 INSERT INTO translation_generations(
@@ -416,8 +431,8 @@ class TranslationRepository:
                     status, stop_requested, total_pages, completed_pages,
                     failed_pages, created_at, updated_at, kind,
                     planning_complete, total_segments, completed_segments,
-                    failed_segments
-                ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, 0, 0, ?, ?, ?, 0, 0, 0, 0)
+                    failed_segments, batch_item_id
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, 0, 0, ?, ?, ?, 0, 0, 0, 0, ?)
                 """,
                 (
                     generation_id,
@@ -435,6 +450,7 @@ class TranslationRepository:
                     timestamp,
                     timestamp,
                     kind,
+                    batch_item_id,
                 ),
             )
             connection.executemany(
@@ -455,6 +471,72 @@ class TranslationRepository:
             )
         return generation_id
 
+    def assign_batch_item(
+        self,
+        generation_id: str,
+        batch_item_id: str,
+        comic_id: str,
+        chapter_id: str,
+    ) -> None:
+        with self.database.transaction() as connection:
+            self._validate_batch_item_owner(
+                connection,
+                batch_item_id,
+                comic_id,
+                chapter_id,
+            )
+            generation = connection.execute(
+                """
+                SELECT comic_id, chapter_id FROM translation_generations
+                WHERE generation_id = ?
+                """,
+                (generation_id,),
+            ).fetchone()
+            if generation is None:
+                raise ValueError("Translation generation does not exist")
+            if (
+                str(generation["comic_id"]) != comic_id
+                or str(generation["chapter_id"]) != chapter_id
+            ):
+                raise ValueError("Batch item and translation generation do not match")
+            connection.execute(
+                """
+                UPDATE translation_generations SET batch_item_id = NULL
+                WHERE batch_item_id = ? AND generation_id != ?
+                """,
+                (batch_item_id, generation_id),
+            )
+            connection.execute(
+                """
+                UPDATE translation_generations SET batch_item_id = ?
+                WHERE generation_id = ?
+                """,
+                (batch_item_id, generation_id),
+            )
+
+    @staticmethod
+    def _validate_batch_item_owner(
+        connection: sqlite3.Connection,
+        batch_item_id: str,
+        comic_id: str,
+        chapter_id: str,
+    ) -> None:
+        item = connection.execute(
+            """
+            SELECT items.chapter_id, batches.comic_id, batches.status
+            FROM translation_batch_items items
+            JOIN translation_batches batches ON batches.batch_id = items.batch_id
+            WHERE items.batch_item_id = ?
+            """,
+            (batch_item_id,),
+        ).fetchone()
+        if item is None:
+            raise ValueError("Translation batch item does not exist")
+        if str(item["comic_id"]) != comic_id or str(item["chapter_id"]) != chapter_id:
+            raise ValueError("Batch item does not match the requested chapter")
+        if str(item["status"]) in {"completed", "cancelled"}:
+            raise ValueError("Translation batch is already closed")
+
     def latest_generation(self, comic_id: str, chapter_id: str) -> sqlite3.Row | None:
         return self.database.fetchone(
             """
@@ -471,15 +553,60 @@ class TranslationRepository:
             (generation_id,),
         )
 
-    def next_queued_generation(self, comic_id: str, chapter_id: str) -> sqlite3.Row | None:
+    def next_queued_generation(
+        self,
+        comic_id: str,
+        chapter_id: str,
+        *,
+        batch_item_id: str | None = None,
+    ) -> sqlite3.Row | None:
+        if batch_item_id is not None:
+            return self.database.fetchone(
+                """
+                SELECT * FROM translation_generations
+                WHERE comic_id = ? AND chapter_id = ?
+                  AND batch_item_id = ?
+                  AND status IN ('preparing', 'queued')
+                ORDER BY created_at ASC, rowid ASC LIMIT 1
+                """,
+                (comic_id, chapter_id, batch_item_id),
+            )
         return self.database.fetchone(
             """
-            SELECT * FROM translation_generations
-            WHERE comic_id = ? AND chapter_id = ?
-              AND status IN ('preparing', 'queued')
-            ORDER BY created_at ASC, rowid ASC LIMIT 1
+            SELECT generations.* FROM translation_generations generations
+            WHERE generations.comic_id = ? AND generations.chapter_id = ?
+              AND generations.status IN ('preparing', 'queued')
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM translation_batch_items batch_items
+                  JOIN translation_batches batches
+                    ON batches.batch_id = batch_items.batch_id
+                  WHERE batch_items.batch_item_id = generations.batch_item_id
+                    AND batches.status NOT IN ('completed', 'cancelled')
+              )
+            ORDER BY generations.created_at ASC, generations.rowid ASC LIMIT 1
             """,
             (comic_id, chapter_id),
+        )
+
+    def interactive_generations(self) -> list[sqlite3.Row]:
+        return self.database.fetchall(
+            """
+            SELECT generations.* FROM translation_generations generations
+            WHERE generations.status IN (
+                'preparing', 'queued', 'running',
+                'stopping_after_page', 'stopping_after_segment'
+            )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM translation_batch_items batch_items
+                  JOIN translation_batches batches
+                    ON batches.batch_id = batch_items.batch_id
+                  WHERE batch_items.batch_item_id = generations.batch_item_id
+                    AND batches.status NOT IN ('completed', 'cancelled')
+              )
+            ORDER BY generations.created_at ASC, generations.rowid ASC
+            """
         )
 
     def matching_generation(
@@ -536,11 +663,12 @@ class TranslationRepository:
              AND current_pages.page_index = generations.current_page_index
             LEFT JOIN reading_history history
               ON history.comic_id = generations.comic_id
-            WHERE generations.status IN (
-                    'preparing', 'queued', 'running', 'stopping_after_page',
-                    'stopping_after_segment'
-                )
-               OR (
+            WHERE (
+                generations.status IN (
+                        'preparing', 'queued', 'running', 'stopping_after_page',
+                        'stopping_after_segment'
+                    )
+                OR (
                     generations.status IN ('completed_with_errors', 'failed')
                     AND generations.rowid = (
                         SELECT latest.rowid FROM translation_generations latest
@@ -558,6 +686,15 @@ class TranslationRepository:
                           )
                     )
                 )
+            )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM translation_batch_items batch_items
+                  JOIN translation_batches batches
+                    ON batches.batch_id = batch_items.batch_id
+                  WHERE batch_items.batch_item_id = generations.batch_item_id
+                    AND batches.status NOT IN ('completed', 'cancelled')
+              )
             ORDER BY
                 CASE WHEN generations.status IN (
                     'preparing', 'queued', 'running', 'stopping_after_page',
