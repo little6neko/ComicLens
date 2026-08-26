@@ -17,7 +17,7 @@ def test_health_endpoint(client: TestClient) -> None:
     assert response.json() == {
         "status": "ok",
         "app": "ComicLens",
-        "version": "0.1.5",
+        "version": "0.1.6",
     }
 
 
