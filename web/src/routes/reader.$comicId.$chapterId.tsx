@@ -204,17 +204,39 @@ function ReaderPageView() {
 
   useEffect(() => {
     if (readingMode !== "strip" || !totalPages) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const visible = entries
-          .filter((entry) => entry.isIntersecting)
-          .sort((left, right) => right.intersectionRatio - left.intersectionRatio)[0];
-        if (visible) setCurrentPageIndex(Number((visible.target as HTMLElement).dataset.page));
-      },
-      { rootMargin: "-36% 0px -46% 0px", threshold: [0, 0.01] },
-    );
-    for (const element of pageElements.current.values()) observer.observe(element);
-    return () => observer.disconnect();
+    let animationFrame: number | null = null;
+    const updateCurrentPage = () => {
+      animationFrame = null;
+      const visiblePage = mostVisiblePageIndex(
+        pageElements.current,
+        window.innerWidth,
+        window.innerHeight,
+      );
+      if (visiblePage !== null) {
+        setCurrentPageIndex((current) => (current === visiblePage ? current : visiblePage));
+      }
+    };
+    const scheduleUpdate = () => {
+      if (animationFrame === null) {
+        animationFrame = window.requestAnimationFrame(updateCurrentPage);
+      }
+    };
+    const intersectionObserver = new IntersectionObserver(scheduleUpdate);
+    const resizeObserver = new ResizeObserver(scheduleUpdate);
+    for (const element of pageElements.current.values()) {
+      intersectionObserver.observe(element);
+      resizeObserver.observe(element);
+    }
+    window.addEventListener("scroll", scheduleUpdate, { passive: true });
+    window.addEventListener("resize", scheduleUpdate);
+    scheduleUpdate();
+    return () => {
+      if (animationFrame !== null) window.cancelAnimationFrame(animationFrame);
+      intersectionObserver.disconnect();
+      resizeObserver.disconnect();
+      window.removeEventListener("scroll", scheduleUpdate);
+      window.removeEventListener("resize", scheduleUpdate);
+    };
   }, [chapterKey, readingMode, totalPages]);
 
   useEffect(() => {
@@ -538,4 +560,30 @@ function getVisiblePages(
 
 function clamp(value: number, minimum: number, maximum: number) {
   return Math.min(Math.max(value, minimum), maximum);
+}
+
+function mostVisiblePageIndex(
+  elements: Map<number, HTMLElement>,
+  viewportWidth: number,
+  viewportHeight: number,
+) {
+  let visiblePage: number | null = null;
+  let largestArea = 0;
+  for (const [pageIndex, element] of elements) {
+    const bounds = element.getBoundingClientRect();
+    const visibleWidth = Math.max(
+      0,
+      Math.min(bounds.right, viewportWidth) - Math.max(bounds.left, 0),
+    );
+    const visibleHeight = Math.max(
+      0,
+      Math.min(bounds.bottom, viewportHeight) - Math.max(bounds.top, 0),
+    );
+    const visibleArea = visibleWidth * visibleHeight;
+    if (visibleArea > largestArea) {
+      largestArea = visibleArea;
+      visiblePage = pageIndex;
+    }
+  }
+  return visiblePage;
 }
