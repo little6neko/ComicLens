@@ -376,6 +376,7 @@ export interface TranslationBatchSummary {
   pendingChapters: number;
   runningChapters: number;
   completedChapters: number;
+  availableChapters: number;
   skippedChapters: number;
   failedChapters: number;
   cancelledChapters: number;

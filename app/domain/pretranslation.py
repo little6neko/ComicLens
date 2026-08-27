@@ -72,6 +72,7 @@ class TranslationBatchSummary(ComicModel):
     pending_chapters: int = Field(ge=0)
     running_chapters: int = Field(ge=0)
     completed_chapters: int = Field(ge=0)
+    available_chapters: int = Field(ge=0)
     skipped_chapters: int = Field(ge=0)
     failed_chapters: int = Field(ge=0)
     cancelled_chapters: int = Field(ge=0)

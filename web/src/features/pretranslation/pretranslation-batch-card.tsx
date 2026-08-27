@@ -109,7 +109,7 @@ export function PretranslationBatchCard({
           </div>
           <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
             <span className="tabular-nums">{percentage}%</span>
-            <span>完成 {batch.completedChapters}</span>
+            <span>当前已翻译 {batch.availableChapters}</span>
             {batch.skippedChapters > 0 && <span>跳过 {batch.skippedChapters}</span>}
             {batch.failedChapters > 0 && (
               <span className="text-destructive">失败 {batch.failedChapters}</span>

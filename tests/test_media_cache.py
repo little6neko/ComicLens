@@ -9,6 +9,7 @@ from PIL import Image
 from app.cache.storage import MediaCache
 from app.errors import AppError
 from app.repositories.database import Database
+from app.repositories.translation import TranslationRepository
 
 
 def png_bytes(color: str = "white", size: tuple[int, int] = (2, 2)) -> bytes:
@@ -135,6 +136,65 @@ async def test_lru_evicts_whole_old_bundle_but_protects_current_write(
     assert (tmp_path / "cache/covers/second.img").is_file()
     assert cache.stats().bundle_count == 1
     assert cache.stats().over_limit is False
+    database.close()
+
+
+@pytest.mark.parametrize("removal", ["chapter", "clear", "lru"])
+@pytest.mark.asyncio
+async def test_chapter_cache_removal_deletes_translation_state(
+    tmp_path: Path,
+    removal: str,
+) -> None:
+    database = Database(tmp_path / "comiclens.db")
+    cache = MediaCache(tmp_path / "cache", database, 1_000_000)
+    translations = TranslationRepository(database)
+    generation_id = translations.create_generation(
+        "alpha",
+        "chapter-1",
+        semantic_fingerprint="completed",
+        semantic_settings={},
+        page_indexes=[0],
+        kind="normal",
+    )
+    translations.set_generation_status(generation_id, "completed")
+    chapter_content = png_bytes("red", (8, 8))
+    cache.put_bytes(
+        bundle_key="chapter:alpha:chapter-1",
+        bundle_kind="chapter",
+        comic_id="alpha",
+        chapter_id="chapter-1",
+        relative_path="chapters/alpha/chapter-1/originals/00000.png",
+        entry_kind="original",
+        content=chapter_content,
+        media_type="image/png",
+    )
+
+    if removal == "chapter":
+        assert cache.remove_chapter("alpha", "chapter-1") is True
+    elif removal == "clear":
+        assert cache.clear() == 1
+    else:
+        cover_content = png_bytes("blue", (8, 8))
+        cache.max_bytes = max(len(chapter_content), len(cover_content)) + 8
+        database.execute(
+            "UPDATE cache_bundles SET accessed_at = 1 WHERE bundle_key = 'chapter:alpha:chapter-1'"
+        )
+        cache.put_bytes(
+            bundle_key="cover:beta",
+            bundle_kind="cover",
+            comic_id="beta",
+            chapter_id=None,
+            relative_path="covers/beta.png",
+            entry_kind="cover",
+            content=cover_content,
+            media_type="image/png",
+        )
+
+    assert translations.generation(generation_id) is None
+    assert translations.task_state("alpha", "chapter-1").status == "idle"
+    assert translations.chapter_overview_statuses("alpha") == {}
+    assert database.scalar("SELECT COUNT(*) FROM translation_pages") == 0
+    assert not (tmp_path / "cache/chapters/alpha/chapter-1/originals/00000.png").exists()
     database.close()
 
 

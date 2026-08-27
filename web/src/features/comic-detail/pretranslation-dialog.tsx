@@ -372,7 +372,7 @@ function BatchSelection({
             </p>
             <p className="mt-0.5 text-xs text-muted-foreground">
               {summary.skippedCount > 0
-                ? `${summary.skippedCount} 话将跳过 · 后台按旧到新`
+                ? `${summary.skippedCount} 话已翻译 · 后台按旧到新`
                 : "后台按旧到新"}
               {summary.retryCount > 0 ? ` · ${summary.retryCount} 话将重试失败项` : ""}
               {" · 一次处理一章"}
@@ -441,7 +441,7 @@ function ChapterStateLabel({ chapter }: { chapter: ChapterTranslationOverview })
     not_started: "未开始",
     active: "已有任务",
     paused: "将继续",
-    completed: "将跳过",
+    completed: "已翻译",
     needs_retry: "将重试失败项",
     failed: "将继续",
   };

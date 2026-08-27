@@ -7,6 +7,7 @@ import pytest
 
 from app.repositories.database import Database
 from app.repositories.pretranslation import PretranslationRepository
+from app.repositories.translation import TranslationRepository
 
 
 @pytest.fixture
@@ -48,6 +49,45 @@ def test_create_batch_persists_order_and_enforces_one_open_batch_per_comic(
     )
     assert batch_repository.open_batch_for_comic("alpha")["batch_id"] == batch_id
     assert batch_repository.open_batch_for_comic("beta")["batch_id"] == second_id
+
+
+def test_summary_separates_processed_success_from_currently_translated_chapters(
+    batch_repository: PretranslationRepository,
+) -> None:
+    batch_id = batch_repository.create_batch(
+        "alpha",
+        "Alpha",
+        [("chapter-1", "Chapter 1"), ("chapter-2", "Chapter 2")],
+    )
+    assert batch_repository.claim_batch(batch_id) is True
+    first_item = batch_repository.batch_items(batch_id)[0]
+    assert batch_repository.claim_item(str(first_item["batch_item_id"])) is True
+    assert batch_repository.finish_item(str(first_item["batch_item_id"]), "completed") is True
+
+    translations = TranslationRepository(batch_repository.database)
+    generation_id = translations.create_generation(
+        "alpha",
+        "chapter-1",
+        semantic_fingerprint="completed",
+        semantic_settings={},
+        page_indexes=[],
+        kind="normal",
+    )
+    translations.set_generation_status(generation_id, "completed")
+
+    available = batch_repository.summary(batch_id)
+    assert available is not None
+    assert available.completed_chapters == 1
+    assert available.available_chapters == 1
+
+    batch_repository.database.execute(
+        "DELETE FROM translation_generations WHERE generation_id = ?",
+        (generation_id,),
+    )
+    evicted = batch_repository.summary(batch_id)
+    assert evicted is not None
+    assert evicted.completed_chapters == 1
+    assert evicted.available_chapters == 0
 
 
 def test_create_batch_rolls_back_when_item_constraints_fail(

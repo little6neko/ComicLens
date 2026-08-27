@@ -439,6 +439,7 @@ def test_translation_api_polls_manifest_and_serves_immutable_version(
                 break
             time.sleep(0.01)
         manifest = api_client.get("/api/comics/alpha-comic/chapters/chapter-12/manifest")
+        translated_overview = api_client.get("/api/comics/alpha-comic/translation-overview")
         translated_url = manifest.json()["pages"][0]["translatedUrl"]
         translated_part_urls = manifest.json()["pages"][0]["translatedPartUrls"]
         translation_layers = manifest.json()["pages"][0]["translationLayers"]
@@ -451,6 +452,17 @@ def test_translation_api_polls_manifest_and_serves_immutable_version(
             "/api/comics/alpha-comic/chapters/chapter-12/translation/retranslate",
             json={"confirmed": False},
         )
+        api_client.app.state.database.execute(
+            """
+            UPDATE cache_bundles SET protected_until = 0
+            WHERE kind = 'chapter' AND comic_id = 'alpha-comic'
+              AND chapter_id = 'chapter-12'
+            """
+        )
+        cleared = api_client.delete("/api/system/cache/comics/alpha-comic/chapters/chapter-12")
+        cleared_state = api_client.get("/api/comics/alpha-comic/chapters/chapter-12/translation")
+        cleared_manifest = api_client.get("/api/comics/alpha-comic/chapters/chapter-12/manifest")
+        cleared_overview = api_client.get("/api/comics/alpha-comic/translation-overview")
 
     assert initial.json()["status"] == "idle"
     assert started.status_code == 200
@@ -466,6 +478,15 @@ def test_translation_api_polls_manifest_and_serves_immutable_version(
     assert translated_segment.headers["cache-control"].endswith("immutable")
     assert wrong_version.status_code == 404
     assert unconfirmed.status_code == 422
+    assert translated_overview.json()["chapters"][0]["status"] == "completed"
+    assert translated_overview.json()["chapters"][0]["requiresWork"] is False
+    assert cleared.status_code == 204
+    assert cleared_state.json()["status"] == "idle"
+    assert cleared_state.json()["generationId"] is None
+    assert cleared_manifest.json()["pages"][0]["translationStatus"] == "idle"
+    assert cleared_manifest.json()["pages"][0]["translationLayers"] == []
+    assert cleared_overview.json()["chapters"][0]["status"] == "not_started"
+    assert cleared_overview.json()["chapters"][0]["requiresWork"] is True
 
 
 def test_retry_failed_translation_api_is_camel_case_idempotent_and_safe(
@@ -775,6 +796,7 @@ def test_create_translation_batch_validates_deduplicates_and_orders_catalog(
     assert created.json()["workCount"] == 3
     assert created.json()["noWork"] is False
     assert created.json()["batch"]["status"] == "queued"
+    assert created.json()["batch"]["availableChapters"] == 0
     assert "pages" not in created.text
     assert [str(item["chapter_id"]) for item in items] == [
         "chapter-1",

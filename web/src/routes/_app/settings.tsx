@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import {
   BadgeCheckIcon,
@@ -89,10 +89,14 @@ function SettingsPage() {
   const save = useMutation({
     mutationFn: api.patchSettings,
     onSuccess: async (next) => {
+      const cacheLimitDecreased = next.cacheMaxMb < (settings.data?.cacheMaxMb ?? next.cacheMaxMb);
       queryClient.setQueryData(queryKeys.settings, next);
       setDraft(toDraft(next));
       setSecrets(emptySecrets());
-      await queryClient.invalidateQueries({ queryKey: queryKeys.cache });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.cache }),
+        cacheLimitDecreased ? clearCachedTranslationAvailability(queryClient) : Promise.resolve(),
+      ]);
       toast.success("设置已保存到服务器");
     },
     onError: showError,
@@ -100,7 +104,10 @@ function SettingsPage() {
   const clearCache = useMutation({
     mutationFn: api.clearCache,
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: queryKeys.cache });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.cache }),
+        clearCachedTranslationAvailability(queryClient),
+      ]);
       toast.success("普通缓存已清除");
     },
     onError: showError,
@@ -722,6 +729,16 @@ function setSecret(
 function secretAction(value: SecretDraft): SensitiveAction {
   if (value.action === "replace") return { action: "replace", value: value.value };
   return { action: value.action };
+}
+
+async function clearCachedTranslationAvailability(queryClient: QueryClient) {
+  for (const queryKey of [["manifest"], ["translation"], ["translationOverview"]]) {
+    queryClient.removeQueries({ queryKey });
+  }
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: queryKeys.backgroundTranslations }),
+    queryClient.invalidateQueries({ queryKey: queryKeys.backgroundTranslationBatches }),
+  ]);
 }
 
 function formatBytes(value: number) {

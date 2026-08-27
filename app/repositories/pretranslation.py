@@ -653,6 +653,7 @@ class PretranslationRepository:
             pending_chapters=int(row["pending_chapters"]),
             running_chapters=int(row["running_chapters"]),
             completed_chapters=int(row["completed_chapters"]),
+            available_chapters=self._available_chapter_count(batch_id),
             skipped_chapters=int(row["skipped_chapters"]),
             failed_chapters=int(row["failed_chapters"]),
             cancelled_chapters=int(row["cancelled_chapters"]),
@@ -661,6 +662,41 @@ class PretranslationRepository:
             created_at=int(row["created_at"]),
             updated_at=int(row["updated_at"]),
         )
+
+    def _available_chapter_count(self, batch_id: str) -> int:
+        rows = self.database.fetchall(
+            """
+            SELECT items.chapter_id, generations.status,
+                generations.failed_pages, generations.failed_segments
+            FROM translation_batch_items items
+            JOIN translation_batches batches ON batches.batch_id = items.batch_id
+            LEFT JOIN translation_generations generations
+              ON generations.comic_id = batches.comic_id
+             AND generations.chapter_id = items.chapter_id
+            WHERE items.batch_id = ?
+            ORDER BY items.position ASC,
+                CASE WHEN generations.status IN (
+                    'preparing', 'queued', 'running',
+                    'stopping_after_page', 'stopping_after_segment'
+                ) THEN 0 ELSE 1 END,
+                generations.created_at DESC, generations.rowid DESC
+            """,
+            (batch_id,),
+        )
+        seen: set[str] = set()
+        available = 0
+        for row in rows:
+            chapter_id = str(row["chapter_id"])
+            if chapter_id in seen:
+                continue
+            seen.add(chapter_id)
+            if (
+                row["status"] == "completed"
+                and not int(row["failed_pages"] or 0)
+                and not int(row["failed_segments"] or 0)
+            ):
+                available += 1
+        return available
 
     def background_batch_ids(self) -> list[str]:
         rows = self.database.fetchall(
