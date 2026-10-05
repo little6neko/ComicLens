@@ -1812,27 +1812,6 @@ class TranslationManager:
                     verify_image=True,
                 )
                 width, height = render_output.width, render_output.height
-                for part_index, content in enumerate(render_output.display_parts):
-                    part_path = generation_page_path(
-                        comic_id,
-                        chapter_id,
-                        generation_id,
-                        f"display-parts/{page_index:05d}",
-                        part_index,
-                        "png",
-                    )
-                    self.cache.put_bytes(
-                        bundle_key=bundle_key,
-                        bundle_kind="chapter",
-                        comic_id=comic_id,
-                        chapter_id=chapter_id,
-                        relative_path=part_path,
-                        entry_kind="display_part",
-                        content=content,
-                        media_type="image/png",
-                        verify_image=True,
-                    )
-                    display_paths.append(part_path)
             else:
                 with Image.open(io.BytesIO(translated_media.content)) as translated_image:
                     width, height = translated_image.size
@@ -1974,7 +1953,6 @@ class TranslationManager:
             "translationService": runtime["translation_service"],
             "ocrSliceHeightRatio": runtime["ocr_slice_height_ratio"],
             "ocrSliceOverlapRatio": runtime["ocr_slice_overlap_ratio"],
-            "readingSliceHeightRatio": runtime["reading_slice_height_ratio"],
             "sliceOptionsVersion": "width-ratio-v1",
             "pipelineVersion": PROGRESSIVE_PIPELINE_VERSION,
             "ocrOptionsVersion": "text-block-ocr-v2",
@@ -2034,12 +2012,8 @@ class TranslationManager:
                 if "ocrSliceHeight" in semantic
                 else None,
                 ocr_slice_overlap=int(semantic.get("ocrSliceOverlap", 200)),
-                reading_slice_height=int(semantic["readingSliceHeight"])
-                if "readingSliceHeight" in semantic
-                else None,
                 ocr_slice_height_ratio=float(semantic.get("ocrSliceHeightRatio", 2.2)),
                 ocr_slice_overlap_ratio=float(semantic.get("ocrSliceOverlapRatio", 0.28)),
-                reading_slice_height_ratio=float(semantic.get("readingSliceHeightRatio", 4.2)),
             ),
         )
 

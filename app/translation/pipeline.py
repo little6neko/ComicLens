@@ -43,10 +43,8 @@ class PipelineSettings:
     long_image_aspect_ratio: float = 2.6
     ocr_slice_height: int | None = None
     ocr_slice_overlap: int = 180
-    reading_slice_height: int | None = None
     ocr_slice_height_ratio: float = 2.2
     ocr_slice_overlap_ratio: float = 0.28
-    reading_slice_height_ratio: float = 4.2
     font_path: str = ""
 
 
@@ -70,7 +68,6 @@ class RenderOutput:
     translated_bytes: bytes
     width: int
     height: int
-    display_parts: list[bytes]
 
 
 class ImageTranslationPipeline:
@@ -211,33 +208,10 @@ class ImageTranslationPipeline:
             self.settings.font_path,
         )
         translated_bytes = await asyncio.to_thread(rendered_png_bytes, rendered)
-        display_parts: list[bytes] = []
-        display_slices = (
-            await asyncio.to_thread(
-                plan_vertical_slices,
-                rendered,
-                self.settings.reading_slice_height,
-                0,
-                self.settings.long_image_threshold,
-                self.settings.long_image_aspect_ratio,
-            )
-            if self.settings.reading_slice_height is not None
-            else await asyncio.to_thread(
-                plan_ratio_slices,
-                rendered,
-                self.settings.reading_slice_height_ratio,
-                0,
-            )
-        )
-        if len(display_slices) > 1:
-            for display_slice in display_slices:
-                cropped = await asyncio.to_thread(crop_vertical_slice, rendered, display_slice)
-                display_parts.append(await asyncio.to_thread(rendered_png_bytes, cropped))
         return RenderOutput(
             translated_bytes=translated_bytes,
             width=rendered.width,
             height=rendered.height,
-            display_parts=display_parts,
         )
 
     async def process(

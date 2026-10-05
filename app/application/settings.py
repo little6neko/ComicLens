@@ -19,7 +19,7 @@ from app.security.secrets import SecretCipher
 DEFAULT_OCR_API_URL = "http://example.com/layout-parsing"
 DEFAULT_OCR_MODEL = "PaddleOCR-VL-1.6"
 SETTINGS_SCHEMA_KEY = "settings_schema_version"
-SETTINGS_SCHEMA_VERSION = 8
+SETTINGS_SCHEMA_VERSION = 9
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +51,6 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
     "proxy_password": SettingDefinition("", True),
     "ocr_slice_height_ratio": SettingDefinition(2.2),
     "ocr_slice_overlap_ratio": SettingDefinition(0.28),
-    "reading_slice_height_ratio": SettingDefinition(4.2),
     "cache_max_mb": SettingDefinition(5120),
 }
 
@@ -232,7 +231,6 @@ class SettingsService:
             for old_key, new_key, old_default, minimum, maximum in (
                 ("ocr_slice_height", "ocr_slice_height_ratio", 1600, 0.5, 50),
                 ("ocr_slice_overlap", "ocr_slice_overlap_ratio", 200, 0, 10),
-                ("reading_slice_height", "reading_slice_height_ratio", 3000, 0.5, 50),
             ):
                 old = old_values.get(old_key)
                 if old is not None and float(old) != old_default:

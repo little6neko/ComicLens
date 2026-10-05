@@ -49,7 +49,6 @@ class ServerSettings(ComicModel):
     proxy_password: SensitiveSettingState
     ocr_slice_height_ratio: float
     ocr_slice_overlap_ratio: float
-    reading_slice_height_ratio: float
     cache_max_mb: int
     access_password_enabled: bool
     public_listener_warning: bool
@@ -80,9 +79,6 @@ class ServerSettingsPatch(ComicModel):
     proxy_password: SensitiveSettingPatch | None = None
     ocr_slice_height_ratio: float | None = Field(default=None, ge=0.5, le=50, allow_inf_nan=False)
     ocr_slice_overlap_ratio: float | None = Field(default=None, ge=0, le=10, allow_inf_nan=False)
-    reading_slice_height_ratio: float | None = Field(
-        default=None, ge=0.5, le=50, allow_inf_nan=False
-    )
     cache_max_mb: int | None = Field(default=None, ge=128, le=102400)
 
 

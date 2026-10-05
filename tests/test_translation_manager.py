@@ -223,7 +223,6 @@ class ControlledPipeline:
             translated_bytes=buffer.getvalue(),
             width=rendered.width,
             height=rendered.height,
-            display_parts=[],
         )
 
 
@@ -298,6 +297,58 @@ async def wait_for(predicate, timeout: float = 3.0) -> None:
 
 
 @pytest.mark.asyncio
+async def test_existing_reading_slice_cache_remains_readable(tmp_path: Path) -> None:
+    harness = create_harness(tmp_path, page_count=1)
+    try:
+        generation_id = harness.repository.create_generation(
+            "legacy",
+            "chapter-1",
+            semantic_fingerprint="old-reading-parts",
+            semantic_settings={
+                "pipelineVersion": "full-page-v1",
+                "readingSliceHeight": 3000,
+                "readingSliceHeightRatio": 4.2,
+            },
+            page_indexes=[0],
+            kind="normal",
+        )
+        bundle_key = harness.cache.ensure_chapter_bundle("legacy", "chapter-1")
+        content = make_png((1, 2, 3))
+        paths = ("chapters/legacy/translated.png", "chapters/legacy/display-parts/0.png")
+        for path, kind in zip(paths, ("translated", "display_part"), strict=True):
+            media = harness.cache.put_bytes(
+                bundle_key=bundle_key,
+                bundle_kind="chapter",
+                comic_id="legacy",
+                chapter_id="chapter-1",
+                relative_path=path,
+                entry_kind=kind,
+                content=content,
+                media_type="image/png",
+            )
+        harness.repository.complete_page(
+            generation_id,
+            "legacy",
+            "chapter-1",
+            0,
+            translated_path=paths[0],
+            translated_version=media.etag,
+            width=120,
+            height=180,
+            display_parts=[paths[1]],
+        )
+        harness.repository.set_generation_status(generation_id, "completed")
+        part = harness.manager.translated_part_media("legacy", "chapter-1", 0, 0, media.etag)
+        assert part.content == content
+        assert (
+            harness.manager.translated_media("legacy", "chapter-1", 0, media.etag).content
+            == content
+        )
+    finally:
+        await harness.close()
+
+
+@pytest.mark.asyncio
 async def test_default_ratio_plan_splits_images_below_old_pixel_threshold(tmp_path: Path) -> None:
     harness = create_harness(tmp_path, page_count=1, image_size=(720, 6000))
     try:
@@ -311,6 +362,7 @@ async def test_default_ratio_plan_splits_images_below_old_pixel_threshold(tmp_pa
         assert semantic["ocrSliceHeightRatio"] == 2.2
         assert semantic["ocrSliceOverlapRatio"] == 0.28
         assert "longImageThreshold" not in semantic
+        assert "readingSliceHeightRatio" not in semantic
     finally:
         await harness.close()
 

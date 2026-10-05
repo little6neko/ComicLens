@@ -165,7 +165,6 @@ class FastPipeline:
             translated_bytes=rendered_bytes,
             width=rendered.width,
             height=rendered.height,
-            display_parts=[rendered_bytes],
         )
 
 

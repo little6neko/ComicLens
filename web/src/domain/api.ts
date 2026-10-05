@@ -157,7 +157,6 @@ export interface ServerSettings {
   proxyPassword: SensitiveSettingState;
   ocrSliceHeightRatio: number;
   ocrSliceOverlapRatio: number;
-  readingSliceHeightRatio: number;
   cacheMaxMb: number;
   accessPasswordEnabled: boolean;
   publicListenerWarning: boolean;

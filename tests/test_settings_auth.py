@@ -170,7 +170,7 @@ def test_new_settings_use_auto_ocr_without_auth_and_sync_example_url(tmp_path: P
     assert "realtimeTranslationDefault" not in payload
     assert payload["ocrSliceHeightRatio"] == 2.2
     assert payload["ocrSliceOverlapRatio"] == 0.28
-    assert payload["readingSliceHeightRatio"] == 4.2
+    assert "readingSliceHeightRatio" not in payload
     assert "longImageThreshold" not in payload
     assert "ocrSliceHeight" not in payload
     assert payload["translationService"] == "deepl"
@@ -395,7 +395,7 @@ def test_v5_settings_drop_realtime_translation_default_and_preserve_other_values
     assert migrated["page_direction"] == "rtl"
     assert migrated["ocr_concurrency"] == 1
     assert migrated["ocr_token"] == "preserved-secret"
-    assert schema_version == "8"
+    assert schema_version == "9"
 
 
 @pytest.mark.parametrize("custom", [False, True])
@@ -423,7 +423,7 @@ def test_v7_pixel_settings_migrate_once_and_remove_pixel_keys(tmp_path: Path, cu
         values = settings.values(include_secrets=True)
         assert values["ocr_slice_height_ratio"] == (3 if custom else 2.2)
         assert values["ocr_slice_overlap_ratio"] == (0.5 if custom else 0.28)
-        assert values["reading_slice_height_ratio"] == (5 if custom else 4.2)
+        assert "reading_slice_height_ratio" not in values
         assert (
             database.scalar("SELECT count(*) FROM app_settings WHERE key = 'long_image_threshold'")
             == 0
@@ -436,6 +436,42 @@ def test_v7_pixel_settings_migrate_once_and_remove_pixel_keys(tmp_path: Path, cu
         assert reopened["ocr_slice_overlap_ratio"] == 0.19
     finally:
         database.close()
+
+
+def test_v8_settings_remove_reading_slice_keys_and_preserve_other_values(tmp_path: Path) -> None:
+    config = config_for(tmp_path, initial_settings={"ocr_token": "preserved-secret"})
+    database = Database(config.database_path)
+    try:
+        cipher = SecretCipher(config.secrets_path, database)
+        settings = SettingsService(database, cipher, config)
+        settings.patch(ServerSettingsPatch(ocr_slice_height_ratio=3.1, cache_max_mb=2048))
+        before = settings.values(include_secrets=True)
+        before.pop("reading_slice_height_ratio", None)
+        for key, value in (("reading_slice_height", "3000"), ("reading_slice_height_ratio", "4.2")):
+            database.execute(
+                "INSERT OR REPLACE INTO app_settings(key, value, is_secret, updated_at) "
+                "VALUES (?, ?, 0, 0)",
+                (key, value),
+            )
+        database.execute(
+            "UPDATE app_metadata SET value = '8' WHERE key = 'settings_schema_version'"
+        )
+        migrated = SettingsService(database, cipher, config)
+        assert migrated.values(include_secrets=True) == before
+        assert (
+            database.scalar(
+                "SELECT COUNT(*) FROM app_settings WHERE key IN "
+                "('reading_slice_height', 'reading_slice_height_ratio')"
+            )
+            == 0
+        )
+        assert SettingsService(database, cipher, config).values(include_secrets=True) == before
+    finally:
+        database.close()
+
+
+def test_settings_reject_removed_reading_slice_parameter(client: TestClient) -> None:
+    assert client.patch("/api/settings", json={"readingSliceHeightRatio": 4.2}).status_code == 422
 
 
 def test_pixel_settings_migrate_to_width_ratios(tmp_path: Path) -> None:
@@ -648,7 +684,7 @@ def test_v4_settings_drop_fallback_proxy_without_copying_its_value(
     assert migrated["proxy_url"] == expected_proxy_url
     assert "fallback_proxy_url" not in stored_keys
     assert "proxy_url" in stored_keys
-    assert schema_version == "8"
+    assert schema_version == "9"
 
 
 def test_v6_settings_convert_urls_to_plaintext_without_rewriting_values(
@@ -695,7 +731,7 @@ def test_v6_settings_convert_urls_to_plaintext_without_rewriting_values(
     assert rows["proxy_username"]["is_secret"] == 0
     assert rows["proxy_password"]["is_secret"] == 1
     assert rows["ocr_token"]["is_secret"] == 1
-    assert schema_version == "8"
+    assert schema_version == "9"
 
 
 def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> None:

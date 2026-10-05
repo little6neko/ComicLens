@@ -192,7 +192,6 @@ async def test_pipeline_processes_long_image_as_one_source_page() -> None:
             long_image_aspect_ratio=2,
             ocr_slice_height=700,
             ocr_slice_overlap=100,
-            reading_slice_height=800,
         ),
     )
 
@@ -204,7 +203,7 @@ async def test_pipeline_processes_long_image_as_one_source_page() -> None:
     assert all(block.translation == "ZH:Hello" for block in translation_output.blocks)
     assert render_output.width == 300
     assert render_output.height == 2400
-    assert len(render_output.display_parts) > 1
+    assert not hasattr(render_output, "display_parts")
     with Image.open(io.BytesIO(render_output.translated_bytes)) as translated:
         assert translated.size == (300, 2400)
 
