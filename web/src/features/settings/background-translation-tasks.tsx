@@ -41,6 +41,7 @@ interface TaskIdentity {
 
 export function BackgroundTranslationTasks() {
   const queryClient = useQueryClient();
+  const [open, setOpen] = useState(true);
   const [stopping, setStopping] = useState<Set<string>>(() => new Set());
   const [retryingFailed, setRetryingFailed] = useState<Set<string>>(() => new Set());
   const [retranslating, setRetranslating] = useState<Set<string>>(() => new Set());
@@ -180,8 +181,12 @@ export function BackgroundTranslationTasks() {
 
   return (
     <section aria-labelledby="background-translation-heading">
-      <div className="divide-y overflow-hidden rounded-3xl border bg-card shadow-sm">
-        <div className="flex items-center gap-3 p-4 sm:p-5">
+      <details
+        open={open}
+        onToggle={(event) => setOpen(event.currentTarget.open)}
+        className="group/background-tasks divide-y overflow-hidden rounded-3xl border bg-card shadow-sm"
+      >
+        <summary className="flex cursor-pointer list-none items-center gap-3 p-4 sm:p-5 [&::-webkit-details-marker]:hidden">
           <span className="flex size-10 items-center justify-center rounded-2xl bg-muted">
             <ScanTextIcon className="size-4" />
           </span>
@@ -197,7 +202,11 @@ export function BackgroundTranslationTasks() {
               aria-label="后台任务处理中"
             />
           )}
-        </div>
+          <span className="shrink-0 text-xs font-normal text-muted-foreground">
+            <span className="group-open/background-tasks:hidden">展开</span>
+            <span className="hidden group-open/background-tasks:inline">收起</span>
+          </span>
+        </summary>
 
         {(tasks.isError || batches.isError) && (
           <div className="flex items-center gap-2 bg-amber-500/10 px-4 py-3 text-sm text-amber-950 sm:px-5 dark:text-amber-100">
@@ -277,7 +286,7 @@ export function BackgroundTranslationTasks() {
             />
           );
         })}
-      </div>
+      </details>
     </section>
   );
 }

@@ -586,14 +586,18 @@ function SettingsSection({
   defaultOpen?: boolean;
 }) {
   return (
-    <details open={defaultOpen} className="group rounded-3xl border bg-card shadow-sm">
+    <details
+      open={defaultOpen}
+      className="group/settings-section rounded-3xl border bg-card shadow-sm"
+    >
       <summary className="flex cursor-pointer list-none items-center gap-3 p-5 font-semibold [&::-webkit-details-marker]:hidden">
         <span className="flex size-9 items-center justify-center rounded-xl bg-muted [&>svg]:size-4">
           {icon}
         </span>
         {title}
-        <span className="ml-auto text-xs font-normal text-muted-foreground group-open:hidden">
-          展开
+        <span className="ml-auto shrink-0 text-xs font-normal text-muted-foreground">
+          <span className="group-open/settings-section:hidden">展开</span>
+          <span className="hidden group-open/settings-section:inline">收起</span>
         </span>
       </summary>
       <div className="grid gap-5 border-t p-5 sm:grid-cols-2">{children}</div>
