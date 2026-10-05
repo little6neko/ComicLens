@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import {
   BookOpenTextIcon,
   CheckIcon,
@@ -216,8 +217,12 @@ function ChapterAction({
 }) {
   if (!chapter) return <RoundAction label={label} icon={icon} disabled />;
   return (
-    <a
-      href={`/reader/${encodeURIComponent(comicId)}/${encodeURIComponent(chapter.chapterId)}`}
+    <Link
+      to="/reader/$comicId/$chapterId"
+      params={{ comicId, chapterId: chapter.chapterId }}
+      search={{ page: 1 }}
+      replace
+      reloadDocument
       className="group flex min-w-14 flex-col items-center gap-1 text-[10px] text-zinc-400 transition-colors hover:text-white"
       title={`${label}：${chapter.title}`}
     >
@@ -225,7 +230,7 @@ function ChapterAction({
         {icon}
       </span>
       <span>{label}</span>
-    </a>
+    </Link>
   );
 }
 

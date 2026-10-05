@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import { Dialog } from "radix-ui";
 import { XIcon } from "lucide-react";
 import { useEffect, useMemo, useRef } from "react";
@@ -67,9 +68,13 @@ export function ReaderChapterDirectory({
                 const current = chapter.chapterId === chapterId;
                 const wasRead = readSet.has(chapter.chapterId);
                 return (
-                  <a
+                  <Link
                     key={chapter.chapterId}
-                    href={`/reader/${encodeURIComponent(comicId)}/${encodeURIComponent(chapter.chapterId)}`}
+                    to="/reader/$comicId/$chapterId"
+                    params={{ comicId, chapterId: chapter.chapterId }}
+                    search={{ page: 1 }}
+                    replace
+                    reloadDocument
                     data-current-chapter={current ? "true" : undefined}
                     aria-current={current ? "page" : undefined}
                     aria-label={`${chapter.title}${wasRead ? "（已读）" : ""}`}
@@ -85,7 +90,7 @@ export function ReaderChapterDirectory({
                       {index + 1}
                     </span>
                     <span className="min-w-0 flex-1 truncate">{chapter.title}</span>
-                  </a>
+                  </Link>
                 );
               })}
             </div>
