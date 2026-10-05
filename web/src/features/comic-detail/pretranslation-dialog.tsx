@@ -63,6 +63,7 @@ export function PretranslationDialog({
   onRetry: () => void;
 }) {
   const batch = overview?.batch ?? null;
+  const [portalContainer, setPortalContainer] = useState<HTMLDivElement | null>(null);
   const previousBatchId = useRef<string | null>(null);
 
   useEffect(() => {
@@ -78,7 +79,10 @@ export function PretranslationDialog({
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className={overlayClass} />
-        <Dialog.Content className="fixed inset-0 z-[80] flex h-[100dvh] w-screen flex-col overflow-hidden bg-background outline-none sm:top-1/2 sm:left-1/2 sm:h-auto sm:max-h-[min(48rem,calc(100dvh-2rem))] sm:w-[min(44rem,calc(100vw-2rem))] sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-3xl sm:border sm:shadow-2xl">
+        <Dialog.Content
+          ref={setPortalContainer}
+          className="fixed inset-0 z-[80] flex h-[100dvh] w-screen flex-col overflow-hidden bg-background outline-none sm:top-1/2 sm:left-1/2 sm:h-auto sm:max-h-[min(48rem,calc(100dvh-2rem))] sm:w-[min(44rem,calc(100vw-2rem))] sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-3xl sm:border sm:shadow-2xl"
+        >
           <div className="flex shrink-0 items-start gap-3 border-b px-4 py-4 sm:px-6 sm:py-5">
             <span className="flex size-10 shrink-0 items-center justify-center rounded-2xl bg-primary/10 text-primary">
               <SparklesIcon className="size-4" />
@@ -120,6 +124,7 @@ export function PretranslationDialog({
               comicId={comicId}
               overview={overview}
               onOpenChange={onOpenChange}
+              portalContainer={portalContainer}
             />
           ) : null}
         </Dialog.Content>
@@ -163,11 +168,13 @@ function BatchSelection({
   comicId,
   overview,
   onOpenChange,
+  portalContainer,
 }: {
   open: boolean;
   comicId: string;
   overview: ComicTranslationOverview;
   onOpenChange: (open: boolean) => void;
+  portalContainer: HTMLDivElement | null;
 }) {
   const queryClient = useQueryClient();
   const chapters = overview.chapters;
@@ -277,6 +284,7 @@ function BatchSelection({
                 options={options}
                 onValueChange={setFromChapterId}
                 ariaLabel="选择预先翻译的起始章节"
+                portalContainer={portalContainer}
               />
               <p className="text-xs text-muted-foreground">
                 包含所选章节，以及目录中所有比它更新的章节。
@@ -294,6 +302,7 @@ function BatchSelection({
                     options={options}
                     onValueChange={setRangeStart}
                     ariaLabel="选择区间的第一个边界章节"
+                    portalContainer={portalContainer}
                   />
                   <span className="hidden text-xs text-muted-foreground sm:inline">至</span>
                   <Select
@@ -301,6 +310,7 @@ function BatchSelection({
                     options={options}
                     onValueChange={setRangeEnd}
                     ariaLabel="选择区间的第二个边界章节"
+                    portalContainer={portalContainer}
                   />
                   <Button
                     type="button"

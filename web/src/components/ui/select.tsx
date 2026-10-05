@@ -13,6 +13,7 @@ export function Select({
   ariaLabel,
   className,
   disabled = false,
+  portalContainer,
 }: {
   value: string;
   options: readonly SelectOption[];
@@ -20,6 +21,7 @@ export function Select({
   ariaLabel: string;
   className?: string;
   disabled?: boolean;
+  portalContainer?: HTMLElement | null;
 }) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -55,13 +57,14 @@ export function Select({
         <ChevronDownIcon className="settings-select-trigger-icon ml-auto size-4 shrink-0 text-muted-foreground transition-transform duration-150 group-data-[state=open]:rotate-180" />
       </DropdownMenu.Trigger>
 
-      <DropdownMenu.Portal>
+      <DropdownMenu.Portal container={portalContainer}>
         <DropdownMenu.Content
           ref={contentRef}
           side="bottom"
           align="start"
           sideOffset={6}
           collisionPadding={8}
+          collisionBoundary={portalContainer ?? undefined}
           hideWhenDetached
           loop
           onPointerDownOutside={(event) => {
