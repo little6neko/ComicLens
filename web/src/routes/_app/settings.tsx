@@ -379,15 +379,6 @@ function SettingsPage() {
             step={0.01}
             onChange={(value) => patch("ocrSliceOverlapRatio", value)}
           />
-          <NumberField
-            label="阅读分片高度（宽度倍率）"
-            hint="仅兼容旧整页译图任务；新任务直接按 OCR 分片逐片显示。"
-            value={draft.readingSliceHeightRatio}
-            min={0.5}
-            max={50}
-            step={0.1}
-            onChange={(value) => patch("readingSliceHeightRatio", value)}
-          />
         </SettingsSection>
 
         <SettingsSection icon={<LanguagesIcon />} title="翻译">
