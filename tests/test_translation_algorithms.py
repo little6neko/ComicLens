@@ -15,6 +15,7 @@ from app.observability import short_ref
 from app.translation.image_renderer import render_translated_image, sanitize_image
 from app.translation.image_segments import (
     dedupe_text_blocks,
+    plan_ratio_slices,
     plan_vertical_slices,
     shift_text_blocks,
 )
@@ -48,6 +49,33 @@ def image_bytes(width: int, height: int) -> bytes:
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     return buffer.getvalue()
+
+
+@pytest.mark.parametrize("width", [360, 720, 1440])
+def test_ratio_slices_scale_with_source_width_and_cover_image(width: int) -> None:
+    image = Image.new("RGB", (width, width * 8), "white")
+    slices = plan_ratio_slices(image)
+    assert len(slices) > 1
+    assert slices[0].top == 0
+    assert slices[-1].bottom == image.height
+    assert all(part.height > 0 for part in slices)
+    assert slices[0].height / width == pytest.approx(2.2, abs=0.26)
+    for previous, current in zip(slices, slices[1:], strict=False):
+        assert previous.top < current.top < previous.bottom
+        assert previous.bottom - current.top == round(width * 0.28)
+
+
+def test_ratio_slices_short_images_and_short_tail() -> None:
+    assert len(plan_ratio_slices(Image.new("RGB", (720, 1584)))) == 1
+    # An extra strip of a few pixels should not become its own OCR request.
+    assert len(plan_ratio_slices(Image.new("RGB", (720, 1590)))) == 1
+    assert len(plan_ratio_slices(Image.new("RGB", (720, 6000)))) > 1
+
+
+@pytest.mark.parametrize("height,overlap", [(0, 0), (2.2, 2.2), (2.2, -1), (float("nan"), 0)])
+def test_ratio_slices_reject_invalid_geometry(height: float, overlap: float) -> None:
+    with pytest.raises(ValueError):
+        plan_ratio_slices(Image.new("RGB", (720, 2000)), height, overlap)
 
 
 class FakeOCR:
@@ -775,8 +803,7 @@ async def test_deepl_selects_free_or_pro_and_maps_languages() -> None:
     assert requests[0].headers["authorization"] == "DeepL-Auth-Key free-key:fx"
     assert requests[0].url.host == "api-free.deepl.com"
     assert requests[0].read().decode() == (
-        '{"text":["source-0","source-1"],"target_lang":"ZH-HANS",'
-        '"model_type":"quality_optimized"}'
+        '{"text":["source-0","source-1"],"target_lang":"ZH-HANS","model_type":"quality_optimized"}'
     )
     assert requests[1].url.host == "api.deepl.com"
     assert json.loads(requests[1].read()) == {

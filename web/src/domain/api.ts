@@ -155,10 +155,9 @@ export interface ServerSettings {
   proxyUrl: string;
   proxyUsername: string;
   proxyPassword: SensitiveSettingState;
-  longImageThreshold: number;
-  ocrSliceHeight: number;
-  ocrSliceOverlap: number;
-  readingSliceHeight: number;
+  ocrSliceHeightRatio: number;
+  ocrSliceOverlapRatio: number;
+  readingSliceHeightRatio: number;
   cacheMaxMb: number;
   accessPasswordEnabled: boolean;
   publicListenerWarning: boolean;

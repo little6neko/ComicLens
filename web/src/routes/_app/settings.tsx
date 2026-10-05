@@ -347,33 +347,31 @@ function SettingsPage() {
           defaultOpen={false}
         >
           <NumberField
-            label="长图阈值（px）"
-            value={draft.longImageThreshold}
-            min={1000}
-            max={100000}
-            onChange={(value) => patch("longImageThreshold", value)}
+            label="OCR 分片高度（宽度倍率）"
+            hint="默认 2.2 倍原图宽度。超过目标高度即切片，切点优先选择附近空白处，过短尾片会合并。"
+            value={draft.ocrSliceHeightRatio}
+            min={0.5}
+            max={50}
+            step={0.1}
+            onChange={(value) => patch("ocrSliceHeightRatio", value)}
           />
           <NumberField
-            label="OCR 分片高度（px）"
-            value={draft.ocrSliceHeight}
-            min={500}
-            max={50000}
-            onChange={(value) => patch("ocrSliceHeight", value)}
-          />
-          <NumberField
-            label="OCR 分片重叠（px）"
-            value={draft.ocrSliceOverlap}
+            label="OCR 分片重叠（宽度倍率）"
+            hint="默认 0.28 倍原图宽度，须小于分片高度倍率。"
+            value={draft.ocrSliceOverlapRatio}
             min={0}
-            max={5000}
-            onChange={(value) => patch("ocrSliceOverlap", value)}
+            max={10}
+            step={0.01}
+            onChange={(value) => patch("ocrSliceOverlapRatio", value)}
           />
           <NumberField
-            label="阅读分片高度（px）"
+            label="阅读分片高度（宽度倍率）"
             hint="仅兼容旧整页译图任务；新任务直接按 OCR 分片逐片显示。"
-            value={draft.readingSliceHeight}
-            min={500}
-            max={50000}
-            onChange={(value) => patch("readingSliceHeight", value)}
+            value={draft.readingSliceHeightRatio}
+            min={0.5}
+            max={50}
+            step={0.1}
+            onChange={(value) => patch("readingSliceHeightRatio", value)}
           />
         </SettingsSection>
 

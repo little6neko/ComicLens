@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from io import BytesIO
@@ -26,6 +27,50 @@ class VerticalSlice:
             "bottom": self.bottom,
             "height": self.height,
         }
+
+
+def plan_ratio_slices(
+    image: Image.Image,
+    height_ratio: float = 2.2,
+    overlap_ratio: float = 0.28,
+) -> list[VerticalSlice]:
+    """Plan slices in units of source width, rounding only at crop boundaries."""
+    if not math.isfinite(height_ratio) or height_ratio <= 0:
+        raise ValueError("分片高度倍率必须大于 0")
+    if not math.isfinite(overlap_ratio) or not 0 <= overlap_ratio < height_ratio:
+        raise ValueError("分片重叠倍率必须小于高度倍率")
+    width, height = image.size
+    target = max(1, round(width * height_ratio))
+    if height <= target:
+        return [VerticalSlice(index=1, top=0, bottom=height)]
+    overlap = min(target - 1, round(width * overlap_ratio))
+    tail = max(1, round(target / 3))
+    gray = image.convert("L")
+    slices: list[VerticalSlice] = []
+    top = 0
+    while top < height:
+        bottom = min(height, top + target)
+        if height - bottom < tail:
+            bottom = height
+        if bottom < height:
+            bottom = _find_cut_position(
+                gray,
+                bottom,
+                min(height, top + max(overlap + 1, round(target / 2))),
+                height - tail,
+                max(1, round(width * 0.25)),
+                max(1, round(width * 0.014)),
+                search_step=max(1, round(width * 0.011)),
+                distance_weight=57.6 / width,
+            )
+            bottom = min(height, max(top + overlap + 1, bottom))
+            if height - bottom < tail:
+                bottom = height
+        slices.append(VerticalSlice(index=len(slices) + 1, top=top, bottom=bottom))
+        if bottom == height:
+            break
+        top = bottom - overlap
+    return slices
 
 
 def plan_vertical_slices(
@@ -137,6 +182,8 @@ def _find_cut_position(
     max_y: int,
     search_radius: int,
     band_height: int,
+    search_step: int = 8,
+    distance_weight: float = 0.08,
 ) -> int:
     height = grayscale.height
     min_y = max(band_height, min_y)
@@ -151,7 +198,7 @@ def _find_cut_position(
 
     best_y = max(min_y, min(max_y, target_y))
     best_score: float | None = None
-    for y in range(search_start, search_end + 1, 8):
+    for y in range(search_start, search_end + 1, search_step):
         band = grayscale.crop(
             (
                 0,
@@ -161,7 +208,7 @@ def _find_cut_position(
             )
         )
         brightness = ImageStat.Stat(band).mean[0]
-        distance_penalty = abs(y - target_y) * 0.08
+        distance_penalty = abs(y - target_y) * distance_weight
         score = brightness - distance_penalty
         if best_score is None or score > best_score:
             best_score = score

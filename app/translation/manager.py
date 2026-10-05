@@ -1972,11 +1972,10 @@ class TranslationManager:
             "ocrModel": runtime["ocr_model"],
             "ocrProtocol": ocr_protocol,
             "translationService": runtime["translation_service"],
-            "longImageThreshold": runtime["long_image_threshold"],
-            "ocrSliceHeight": runtime["ocr_slice_height"],
-            "ocrSliceOverlap": runtime["ocr_slice_overlap"],
-            "readingSliceHeight": runtime["reading_slice_height"],
-            "longImageAspectRatio": 2.6,
+            "ocrSliceHeightRatio": runtime["ocr_slice_height_ratio"],
+            "ocrSliceOverlapRatio": runtime["ocr_slice_overlap_ratio"],
+            "readingSliceHeightRatio": runtime["reading_slice_height_ratio"],
+            "sliceOptionsVersion": "width-ratio-v1",
             "pipelineVersion": PROGRESSIVE_PIPELINE_VERSION,
             "ocrOptionsVersion": "text-block-ocr-v2",
             "rendererVersion": RENDERER_VERSION,
@@ -2029,10 +2028,18 @@ class TranslationManager:
             translator,
             PipelineSettings(
                 source_language=str(semantic["sourceLanguage"]),
-                long_image_threshold=int(semantic["longImageThreshold"]),
-                ocr_slice_height=int(semantic["ocrSliceHeight"]),
-                ocr_slice_overlap=int(semantic["ocrSliceOverlap"]),
-                reading_slice_height=int(semantic["readingSliceHeight"]),
+                # Old persisted generations retain their original pixel plans.
+                long_image_threshold=int(semantic.get("longImageThreshold", 8000)),
+                ocr_slice_height=int(semantic["ocrSliceHeight"])
+                if "ocrSliceHeight" in semantic
+                else None,
+                ocr_slice_overlap=int(semantic.get("ocrSliceOverlap", 200)),
+                reading_slice_height=int(semantic["readingSliceHeight"])
+                if "readingSliceHeight" in semantic
+                else None,
+                ocr_slice_height_ratio=float(semantic.get("ocrSliceHeightRatio", 2.2)),
+                ocr_slice_overlap_ratio=float(semantic.get("ocrSliceOverlapRatio", 0.28)),
+                reading_slice_height_ratio=float(semantic.get("readingSliceHeightRatio", 4.2)),
             ),
         )
 

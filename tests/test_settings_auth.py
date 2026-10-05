@@ -132,9 +132,7 @@ def test_pretranslation_migration_preserves_existing_database(tmp_path: Path) ->
         generation = migrated.fetchone(
             "SELECT * FROM translation_generations WHERE generation_id = 'legacy-generation'"
         )
-        setting = migrated.fetchone(
-            "SELECT value FROM app_settings WHERE key = 'target_language'"
-        )
+        setting = migrated.fetchone("SELECT value FROM app_settings WHERE key = 'target_language'")
         versions = {
             int(row["version"])
             for row in migrated.fetchall("SELECT version FROM schema_migrations")
@@ -170,8 +168,11 @@ def test_new_settings_use_auto_ocr_without_auth_and_sync_example_url(tmp_path: P
     assert payload["ocrTimeoutSeconds"] == 180.0
     assert payload["ocrConcurrency"] == 2
     assert "realtimeTranslationDefault" not in payload
-    assert payload["ocrSliceHeight"] == 1600
-    assert payload["ocrSliceOverlap"] == 200
+    assert payload["ocrSliceHeightRatio"] == 2.2
+    assert payload["ocrSliceOverlapRatio"] == 0.28
+    assert payload["readingSliceHeightRatio"] == 4.2
+    assert "longImageThreshold" not in payload
+    assert "ocrSliceHeight" not in payload
     assert payload["translationService"] == "deepl"
     assert payload["deeplApiKey"] == {"configured": False, "masked": None}
     assert payload["translationTimeoutSeconds"] == 30.0
@@ -211,9 +212,7 @@ def test_new_url_and_proxy_credential_storage_matches_visibility_rules(
     cipher = SecretCipher(config.secrets_path, database)
     rows = {
         str(row["key"]): row
-        for row in database.fetchall(
-            "SELECT key, value, is_secret FROM app_settings ORDER BY key"
-        )
+        for row in database.fetchall("SELECT key, value, is_secret FROM app_settings ORDER BY key")
     }
     database.close()
 
@@ -286,9 +285,7 @@ def test_saved_comic_proxy_updates_running_source_provider_immediately(tmp_path:
             "configured": True,
             "masked": "••••word",
         }
-        assert source._proxy_url() == (
-            "http://new%20user:new%40password@proxy.example:8080"
-        )
+        assert source._proxy_url() == ("http://new%20user:new%40password@proxy.example:8080")
 
         username_cleared = client.patch(
             "/api/settings",
@@ -398,27 +395,73 @@ def test_v5_settings_drop_realtime_translation_default_and_preserve_other_values
     assert migrated["page_direction"] == "rtl"
     assert migrated["ocr_concurrency"] == 1
     assert migrated["ocr_token"] == "preserved-secret"
-    assert schema_version == "7"
+    assert schema_version == "8"
 
 
-def test_v2_settings_migrate_only_the_old_default_slice_height(tmp_path: Path) -> None:
+@pytest.mark.parametrize("custom", [False, True])
+def test_v7_pixel_settings_migrate_once_and_remove_pixel_keys(tmp_path: Path, custom: bool) -> None:
+    config = config_for(tmp_path)
+    database = Database(config.database_path)
+    try:
+        cipher = SecretCipher(config.secrets_path, database)
+        SettingsService(database, cipher, config)
+        database.execute("DELETE FROM app_settings WHERE key LIKE '%_ratio'")
+        for key, value in {
+            "long_image_threshold": 8000,
+            "ocr_slice_height": 2160 if custom else 1600,
+            "ocr_slice_overlap": 360 if custom else 200,
+            "reading_slice_height": 3600 if custom else 3000,
+        }.items():
+            database.execute(
+                "INSERT INTO app_settings(key, value, is_secret, updated_at) VALUES (?, ?, 0, 0)",
+                (key, str(value)),
+            )
+        database.execute(
+            "UPDATE app_metadata SET value = '7' WHERE key = 'settings_schema_version'"
+        )
+        settings = SettingsService(database, cipher, config)
+        values = settings.values(include_secrets=True)
+        assert values["ocr_slice_height_ratio"] == (3 if custom else 2.2)
+        assert values["ocr_slice_overlap_ratio"] == (0.5 if custom else 0.28)
+        assert values["reading_slice_height_ratio"] == (5 if custom else 4.2)
+        assert (
+            database.scalar("SELECT count(*) FROM app_settings WHERE key = 'long_image_threshold'")
+            == 0
+        )
+        settings.patch(
+            ServerSettingsPatch(ocr_slice_height_ratio=2.7, ocr_slice_overlap_ratio=0.19)
+        )
+        reopened = SettingsService(database, cipher, config).values(include_secrets=True)
+        assert reopened["ocr_slice_height_ratio"] == 2.7
+        assert reopened["ocr_slice_overlap_ratio"] == 0.19
+    finally:
+        database.close()
+
+
+def test_pixel_settings_migrate_to_width_ratios(tmp_path: Path) -> None:
     config = config_for(tmp_path)
     database = Database(config.database_path)
     cipher = SecretCipher(config.secrets_path, database)
     settings = SettingsService(database, cipher, config)
-    settings.patch(ServerSettingsPatch(source_language="EN", ocr_slice_height=4000))
+    settings.patch(ServerSettingsPatch(source_language="EN"))
+    database.execute(
+        "INSERT INTO app_settings(key, value, is_secret, updated_at) VALUES (?, ?, 0, 0)",
+        ("ocr_slice_height", "4000"),
+    )
     database.execute(
         "UPDATE app_metadata SET value = '2' WHERE key = ?",
         ("settings_schema_version",),
     )
 
     migrated = SettingsService(database, cipher, config).values(include_secrets=True)
-    assert migrated["ocr_slice_height"] == 1600
-    assert migrated["ocr_slice_overlap"] == 200
+    assert migrated["ocr_slice_height_ratio"] == 2.2
+    assert migrated["ocr_slice_overlap_ratio"] == 0.28
+    assert "ocr_slice_height" not in migrated
     assert migrated["source_language"] == "EN"
 
     database.execute(
-        "UPDATE app_settings SET value = '2400' WHERE key = 'ocr_slice_height'"
+        "INSERT INTO app_settings(key, value, is_secret, updated_at) "
+        "VALUES ('ocr_slice_height', '2400', 0, 0)"
     )
     database.execute(
         "UPDATE app_metadata SET value = '2' WHERE key = ?",
@@ -427,7 +470,7 @@ def test_v2_settings_migrate_only_the_old_default_slice_height(tmp_path: Path) -
     preserved = SettingsService(database, cipher, config).values(include_secrets=True)
     database.close()
 
-    assert preserved["ocr_slice_height"] == 2400
+    assert preserved["ocr_slice_height_ratio"] == pytest.approx(2400 / 720, abs=0.0001)
 
 
 def test_legacy_settings_migrate_once_and_preserve_ocr_auth_and_deeplx(
@@ -605,7 +648,7 @@ def test_v4_settings_drop_fallback_proxy_without_copying_its_value(
     assert migrated["proxy_url"] == expected_proxy_url
     assert "fallback_proxy_url" not in stored_keys
     assert "proxy_url" in stored_keys
-    assert schema_version == "7"
+    assert schema_version == "8"
 
 
 def test_v6_settings_convert_urls_to_plaintext_without_rewriting_values(
@@ -623,9 +666,7 @@ def test_v6_settings_convert_urls_to_plaintext_without_rewriting_values(
             "UPDATE app_settings SET value = ?, is_secret = 1 WHERE key = ?",
             (cipher.encrypt(serialized), key),
         )
-    database.execute(
-        "DELETE FROM app_settings WHERE key IN ('proxy_username', 'proxy_password')"
-    )
+    database.execute("DELETE FROM app_settings WHERE key IN ('proxy_username', 'proxy_password')")
     database.execute(
         "UPDATE app_metadata SET value = '6' WHERE key = ?",
         ("settings_schema_version",),
@@ -634,9 +675,7 @@ def test_v6_settings_convert_urls_to_plaintext_without_rewriting_values(
     migrated = SettingsService(database, cipher, config).values(include_secrets=True)
     rows = {
         str(row["key"]): row
-        for row in database.fetchall(
-            "SELECT key, value, is_secret FROM app_settings ORDER BY key"
-        )
+        for row in database.fetchall("SELECT key, value, is_secret FROM app_settings ORDER BY key")
     }
     schema_version = database.scalar(
         "SELECT value FROM app_metadata WHERE key = ?",
@@ -656,7 +695,7 @@ def test_v6_settings_convert_urls_to_plaintext_without_rewriting_values(
     assert rows["proxy_username"]["is_secret"] == 0
     assert rows["proxy_password"]["is_secret"] == 1
     assert rows["ocr_token"]["is_secret"] == 1
-    assert schema_version == "7"
+    assert schema_version == "8"
 
 
 def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> None:
@@ -721,12 +760,8 @@ def test_settings_encrypt_mask_and_persist_sensitive_values(tmp_path: Path) -> N
         "configured": True,
         "masked": "••••y:fx",
     }
-    assert updated.json()["ocrApiUrl"] == (
-        "https://ocr.example/layout-parsing?key=visible-value"
-    )
-    assert updated.json()["proxyUrl"] == (
-        "http://url-user:url-password@proxy.example:8080"
-    )
+    assert updated.json()["ocrApiUrl"] == ("https://ocr.example/layout-parsing?key=visible-value")
+    assert updated.json()["proxyUrl"] == ("http://url-user:url-password@proxy.example:8080")
     assert updated.json()["proxyUsername"] == "proxy-user"
     assert updated.json()["proxyPassword"] == {
         "configured": True,
@@ -784,7 +819,7 @@ def test_settings_reject_invalid_secret_protocol_and_slice_geometry(
         )
         invalid_overlap = client.patch(
             "/api/settings",
-            json={"ocrSliceHeight": 1000, "ocrSliceOverlap": 1000},
+            json={"ocrSliceHeightRatio": 2.2, "ocrSliceOverlapRatio": 2.2},
         )
 
     assert missing_value.status_code == 422

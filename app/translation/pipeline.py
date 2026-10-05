@@ -14,6 +14,7 @@ from app.translation.image_segments import (
     crop_vertical_slice,
     dedupe_text_blocks,
     image_to_png_bytes,
+    plan_ratio_slices,
     plan_vertical_slices,
     shift_text_blocks,
 )
@@ -40,9 +41,12 @@ class PipelineSettings:
     source_language: str = "AUTO"
     long_image_threshold: int = 2800
     long_image_aspect_ratio: float = 2.6
-    ocr_slice_height: int = 1600
+    ocr_slice_height: int | None = None
     ocr_slice_overlap: int = 180
-    reading_slice_height: int = 1800
+    reading_slice_height: int | None = None
+    ocr_slice_height_ratio: float = 2.2
+    ocr_slice_overlap_ratio: float = 0.28
+    reading_slice_height_ratio: float = 4.2
     font_path: str = ""
 
 
@@ -82,13 +86,22 @@ class ImageTranslationPipeline:
 
     async def run_ocr(self, original_bytes: bytes) -> OCROutput:
         image, sanitized_bytes = await asyncio.to_thread(sanitize_image, original_bytes)
-        slices = await asyncio.to_thread(
-            plan_vertical_slices,
-            image,
-            self.settings.ocr_slice_height,
-            self.settings.ocr_slice_overlap,
-            self.settings.long_image_threshold,
-            self.settings.long_image_aspect_ratio,
+        slices = (
+            await asyncio.to_thread(
+                plan_vertical_slices,
+                image,
+                self.settings.ocr_slice_height,
+                self.settings.ocr_slice_overlap,
+                self.settings.long_image_threshold,
+                self.settings.long_image_aspect_ratio,
+            )
+            if self.settings.ocr_slice_height is not None
+            else await asyncio.to_thread(
+                plan_ratio_slices,
+                image,
+                self.settings.ocr_slice_height_ratio,
+                self.settings.ocr_slice_overlap_ratio,
+            )
         )
 
         if len(slices) == 1:
@@ -199,13 +212,22 @@ class ImageTranslationPipeline:
         )
         translated_bytes = await asyncio.to_thread(rendered_png_bytes, rendered)
         display_parts: list[bytes] = []
-        display_slices = await asyncio.to_thread(
-            plan_vertical_slices,
-            rendered,
-            self.settings.reading_slice_height,
-            0,
-            self.settings.long_image_threshold,
-            self.settings.long_image_aspect_ratio,
+        display_slices = (
+            await asyncio.to_thread(
+                plan_vertical_slices,
+                rendered,
+                self.settings.reading_slice_height,
+                0,
+                self.settings.long_image_threshold,
+                self.settings.long_image_aspect_ratio,
+            )
+            if self.settings.reading_slice_height is not None
+            else await asyncio.to_thread(
+                plan_ratio_slices,
+                rendered,
+                self.settings.reading_slice_height_ratio,
+                0,
+            )
         )
         if len(display_slices) > 1:
             for display_slice in display_slices:

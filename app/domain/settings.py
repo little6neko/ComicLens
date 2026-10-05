@@ -47,10 +47,9 @@ class ServerSettings(ComicModel):
     proxy_url: str
     proxy_username: str
     proxy_password: SensitiveSettingState
-    long_image_threshold: int
-    ocr_slice_height: int
-    ocr_slice_overlap: int
-    reading_slice_height: int
+    ocr_slice_height_ratio: float
+    ocr_slice_overlap_ratio: float
+    reading_slice_height_ratio: float
     cache_max_mb: int
     access_password_enabled: bool
     public_listener_warning: bool
@@ -79,10 +78,11 @@ class ServerSettingsPatch(ComicModel):
     proxy_url: str | None = None
     proxy_username: str | None = Field(default=None, max_length=200)
     proxy_password: SensitiveSettingPatch | None = None
-    long_image_threshold: int | None = Field(default=None, ge=1000, le=100000)
-    ocr_slice_height: int | None = Field(default=None, ge=500, le=50000)
-    ocr_slice_overlap: int | None = Field(default=None, ge=0, le=5000)
-    reading_slice_height: int | None = Field(default=None, ge=500, le=50000)
+    ocr_slice_height_ratio: float | None = Field(default=None, ge=0.5, le=50, allow_inf_nan=False)
+    ocr_slice_overlap_ratio: float | None = Field(default=None, ge=0, le=10, allow_inf_nan=False)
+    reading_slice_height_ratio: float | None = Field(
+        default=None, ge=0.5, le=50, allow_inf_nan=False
+    )
     cache_max_mb: int | None = Field(default=None, ge=128, le=102400)
 
 

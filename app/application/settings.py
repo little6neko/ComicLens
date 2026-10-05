@@ -19,7 +19,7 @@ from app.security.secrets import SecretCipher
 DEFAULT_OCR_API_URL = "http://example.com/layout-parsing"
 DEFAULT_OCR_MODEL = "PaddleOCR-VL-1.6"
 SETTINGS_SCHEMA_KEY = "settings_schema_version"
-SETTINGS_SCHEMA_VERSION = 7
+SETTINGS_SCHEMA_VERSION = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,10 +49,9 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
     "proxy_url": SettingDefinition(""),
     "proxy_username": SettingDefinition(""),
     "proxy_password": SettingDefinition("", True),
-    "long_image_threshold": SettingDefinition(8000),
-    "ocr_slice_height": SettingDefinition(1600),
-    "ocr_slice_overlap": SettingDefinition(200),
-    "reading_slice_height": SettingDefinition(3000),
+    "ocr_slice_height_ratio": SettingDefinition(2.2),
+    "ocr_slice_overlap_ratio": SettingDefinition(0.28),
+    "reading_slice_height_ratio": SettingDefinition(4.2),
     "cache_max_mb": SettingDefinition(5120),
 }
 
@@ -228,8 +227,20 @@ class SettingsService:
                 if key in old_values:
                     values[key] = old_values[key]
 
-        if version < 3 and int(values.get("ocr_slice_height") or 0) == 4000:
-            values["ocr_slice_height"] = 1600
+        if version < 8:
+            # Legacy pixels have no source width; use the historical 720px baseline.
+            for old_key, new_key, old_default, minimum, maximum in (
+                ("ocr_slice_height", "ocr_slice_height_ratio", 1600, 0.5, 50),
+                ("ocr_slice_overlap", "ocr_slice_overlap_ratio", 200, 0, 10),
+                ("reading_slice_height", "reading_slice_height_ratio", 3000, 0.5, 50),
+            ):
+                old = old_values.get(old_key)
+                if old is not None and float(old) != old_default:
+                    if old_key == "ocr_slice_height" and version < 3 and float(old) == 4000:
+                        continue
+                    values[new_key] = min(maximum, max(minimum, round(float(old) / 720, 4)))
+            if float(values["ocr_slice_overlap_ratio"]) >= float(values["ocr_slice_height_ratio"]):
+                values["ocr_slice_overlap_ratio"] = float(values["ocr_slice_height_ratio"]) / 8
         if version < 4:
             old_mode = str(old_values.get("ocr_mode") or "").strip().lower()
             values["ocr_mode"] = old_mode if old_mode in {"auto", "direct", "job"} else "auto"
@@ -288,7 +299,7 @@ class SettingsService:
 
     @staticmethod
     def _validate_cross_fields(values: Mapping[str, object]) -> None:
-        slice_height = int(values["ocr_slice_height"])
-        overlap = int(values["ocr_slice_overlap"])
+        slice_height = float(values["ocr_slice_height_ratio"])
+        overlap = float(values["ocr_slice_overlap_ratio"])
         if overlap >= slice_height:
-            raise ValueError("OCR 分片重叠必须小于分片高度")
+            raise ValueError("OCR 分片重叠倍率必须小于分片高度倍率")

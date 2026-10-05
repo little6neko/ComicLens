@@ -297,6 +297,24 @@ async def wait_for(predicate, timeout: float = 3.0) -> None:
     await asyncio.wait_for(poll(), timeout)
 
 
+@pytest.mark.asyncio
+async def test_default_ratio_plan_splits_images_below_old_pixel_threshold(tmp_path: Path) -> None:
+    harness = create_harness(tmp_path, page_count=1, image_size=(720, 6000))
+    try:
+        started = await harness.manager.start("alpha", "chapter-1")
+        await wait_for(lambda: harness.manager.state("alpha", "chapter-1").status == "completed")
+        state = harness.manager.state("alpha", "chapter-1")
+        assert state.total_segments > 1
+        assert state.completed_segments == state.total_segments
+        generation = harness.repository.generation(str(started.generation_id))
+        semantic = harness.repository.decode_semantic_settings(generation)
+        assert semantic["ocrSliceHeightRatio"] == 2.2
+        assert semantic["ocrSliceOverlapRatio"] == 0.28
+        assert "longImageThreshold" not in semantic
+    finally:
+        await harness.close()
+
+
 def test_repository_commits_segment_plan_and_publishes_atomic_layer(tmp_path: Path) -> None:
     harness = create_harness(tmp_path, page_count=1)
     try:
@@ -1119,9 +1137,8 @@ async def test_streaming_segment_denominator_grows_from_five_to_ten(
         image_size=(120, 8000),
         translation_settings={
             "ocr_concurrency": 1,
-            "long_image_threshold": 1000,
-            "ocr_slice_height": 1800,
-            "ocr_slice_overlap": 200,
+            "ocr_slice_height_ratio": 1800 / 120,
+            "ocr_slice_overlap_ratio": 200 / 120,
         },
     )
     harness.source.block_page_index = 1
@@ -1213,9 +1230,8 @@ async def test_retry_failed_after_force_stop_uses_current_ocr_mode(tmp_path: Pat
         translation_settings={
             "ocr_mode": "job",
             "ocr_concurrency": 1,
-            "long_image_threshold": 1000,
-            "ocr_slice_height": 700,
-            "ocr_slice_overlap": 100,
+            "ocr_slice_height_ratio": 700 / 300,
+            "ocr_slice_overlap_ratio": 100 / 300,
         },
     )
     pipeline_builds: list[tuple[str | None, str]] = []
@@ -1283,9 +1299,8 @@ async def test_long_page_has_exact_segment_total_before_first_ocr_and_publishes_
         page_count=1,
         image_size=(300, 2400),
         translation_settings={
-            "long_image_threshold": 1000,
-            "ocr_slice_height": 700,
-            "ocr_slice_overlap": 100,
+            "ocr_slice_height_ratio": 700 / 300,
+            "ocr_slice_overlap_ratio": 100 / 300,
         },
     )
     harness.pipeline.block_first_ocr = True
@@ -1325,9 +1340,8 @@ async def test_ocr_prefetch_finishes_out_of_order_but_translates_in_order(
         image_size=(300, 2400),
         translation_settings={
             "ocr_concurrency": 3,
-            "long_image_threshold": 1000,
-            "ocr_slice_height": 700,
-            "ocr_slice_overlap": 100,
+            "ocr_slice_height_ratio": 700 / 300,
+            "ocr_slice_overlap_ratio": 100 / 300,
         },
     )
     harness.pipeline.blocked_ocr_segments.update({(0, 0), (0, 1), (0, 2)})
@@ -1381,9 +1395,8 @@ async def test_running_generation_uses_increased_ocr_concurrency_immediately(
         image_size=(300, 2400),
         translation_settings={
             "ocr_concurrency": 1,
-            "long_image_threshold": 1000,
-            "ocr_slice_height": 700,
-            "ocr_slice_overlap": 100,
+            "ocr_slice_height_ratio": 700 / 300,
+            "ocr_slice_overlap_ratio": 100 / 300,
         },
     )
     harness.pipeline.blocked_ocr_calls.update({1, 2, 3})
@@ -1416,9 +1429,8 @@ async def test_one_prefetched_ocr_failure_does_not_cancel_other_segments(
         image_size=(300, 2400),
         translation_settings={
             "ocr_concurrency": 3,
-            "long_image_threshold": 1000,
-            "ocr_slice_height": 700,
-            "ocr_slice_overlap": 100,
+            "ocr_slice_height_ratio": 700 / 300,
+            "ocr_slice_overlap_ratio": 100 / 300,
         },
     )
     harness.pipeline.fail_ocr_segments.add((0, 1))
@@ -1778,9 +1790,8 @@ async def test_retry_failed_finishes_current_segment_then_prioritizes_earlier_fa
         image_size=(300, 2400),
         translation_settings={
             "ocr_concurrency": 1,
-            "long_image_threshold": 1000,
-            "ocr_slice_height": 700,
-            "ocr_slice_overlap": 100,
+            "ocr_slice_height_ratio": 700 / 300,
+            "ocr_slice_overlap_ratio": 100 / 300,
         },
     )
     harness.pipeline.fail_ocr_segments.add((0, 0))
@@ -1861,9 +1872,8 @@ async def test_lower_ocr_concurrency_waits_for_existing_permits_to_finish(
         image_size=(300, 2400),
         translation_settings={
             "ocr_concurrency": 3,
-            "long_image_threshold": 1000,
-            "ocr_slice_height": 700,
-            "ocr_slice_overlap": 100,
+            "ocr_slice_height_ratio": 700 / 300,
+            "ocr_slice_overlap_ratio": 100 / 300,
         },
     )
     harness.pipeline.blocked_ocr_calls.update({1, 2, 3, 4})
@@ -1899,9 +1909,8 @@ async def test_multiple_chapters_share_one_ocr_concurrency_limit(tmp_path: Path)
         image_size=(300, 2400),
         translation_settings={
             "ocr_concurrency": 2,
-            "long_image_threshold": 1000,
-            "ocr_slice_height": 700,
-            "ocr_slice_overlap": 100,
+            "ocr_slice_height_ratio": 700 / 300,
+            "ocr_slice_overlap_ratio": 100 / 300,
         },
     )
     harness.pipeline.blocked_ocr_calls.update({1, 2, 3, 4})
@@ -1938,9 +1947,8 @@ async def test_pause_keeps_current_ocr_and_cancels_later_prefetch(tmp_path: Path
         image_size=(300, 2400),
         translation_settings={
             "ocr_concurrency": 3,
-            "long_image_threshold": 1000,
-            "ocr_slice_height": 700,
-            "ocr_slice_overlap": 100,
+            "ocr_slice_height_ratio": 700 / 300,
+            "ocr_slice_overlap_ratio": 100 / 300,
         },
     )
     harness.pipeline.blocked_ocr_segments.update({(0, 0), (0, 1), (0, 2)})
@@ -2231,8 +2239,7 @@ async def test_retry_failed_binds_batch_owner_before_resuming(tmp_path: Path) ->
         harness.pipeline.fail_translation_calls.add(1)
         failed = await harness.manager.start("alpha", "chapter-1")
         await wait_for(
-            lambda: harness.manager.state("alpha", "chapter-1").status
-            == "completed_with_errors"
+            lambda: harness.manager.state("alpha", "chapter-1").status == "completed_with_errors"
         )
 
         batches = PretranslationRepository(harness.database)

@@ -18,6 +18,7 @@ from app.translation.image_renderer import sanitize_image
 from app.translation.image_segments import (
     crop_vertical_slice,
     image_to_png_bytes,
+    plan_ratio_slices,
     plan_vertical_slices,
 )
 
@@ -247,13 +248,22 @@ class SegmentPlanner:
         source_unchanged = bool(
             page["original_checksum"] and str(page["original_checksum"]) == normalized_media.etag
         )
-        ocr_slices = await asyncio.to_thread(
-            plan_vertical_slices,
-            image,
-            int(semantic["ocrSliceHeight"]),
-            int(semantic["ocrSliceOverlap"]),
-            int(semantic["longImageThreshold"]),
-            float(semantic.get("longImageAspectRatio", 2.6)),
+        ocr_slices = (
+            await asyncio.to_thread(
+                plan_ratio_slices,
+                image,
+                float(semantic["ocrSliceHeightRatio"]),
+                float(semantic["ocrSliceOverlapRatio"]),
+            )
+            if "ocrSliceHeightRatio" in semantic
+            else await asyncio.to_thread(
+                plan_vertical_slices,
+                image,
+                int(semantic["ocrSliceHeight"]),
+                int(semantic["ocrSliceOverlap"]),
+                int(semantic["longImageThreshold"]),
+                float(semantic.get("longImageAspectRatio", 2.6)),
+            )
         )
         plans: list[PlannedSegment] = []
         previous_bottom = 0
