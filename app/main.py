@@ -96,6 +96,7 @@ def create_app(
         finally:
             await app.state.pretranslation_coordinator.shutdown()
             await app.state.translation_manager.shutdown()
+            await media_cache.wait_for_cleanup()
             if comic_source is None:
                 await source.aclose()
             database.close()

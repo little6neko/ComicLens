@@ -6,6 +6,7 @@ import {
   DatabaseIcon,
   KeyRoundIcon,
   LanguagesIcon,
+  LoaderCircleIcon,
   LogOutIcon,
   NetworkIcon,
   PackageIcon,
@@ -18,7 +19,7 @@ import {
   Trash2Icon,
 } from "lucide-react";
 import { useTheme } from "next-themes";
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { AppPage } from "@/components/app-page";
@@ -77,7 +78,12 @@ function SettingsPage() {
   const [realtimeTranslationDefault, setRealtimeTranslationDefault] =
     useRealtimeTranslationDefault();
   const settings = useQuery({ queryKey: queryKeys.settings, queryFn: api.settings });
-  const cache = useQuery({ queryKey: queryKeys.cache, queryFn: api.cacheStats });
+  const cache = useQuery({
+    queryKey: queryKeys.cache,
+    queryFn: api.cacheStats,
+    refetchInterval: (query) => (query.state.data?.cleanupStatus === "running" ? 1000 : 5000),
+  });
+  const previousCleanupStatus = useRef(cache.data?.cleanupStatus);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [secrets, setSecrets] = useState<Record<SecretKey, SecretDraft>>(emptySecrets);
 
@@ -85,6 +91,15 @@ function SettingsPage() {
     if (!settings.data) return;
     setDraft(toDraft(settings.data));
   }, [settings.data]);
+
+  useEffect(() => {
+    const status = cache.data?.cleanupStatus;
+    if (!status) return;
+    if (previousCleanupStatus.current === "running" && status !== "running") {
+      void clearCachedTranslationAvailability(queryClient);
+    }
+    previousCleanupStatus.current = status;
+  }, [cache.data?.cleanupStatus, queryClient]);
 
   const save = useMutation({
     mutationFn: api.patchSettings,
@@ -489,12 +504,26 @@ function SettingsPage() {
               <p className="mt-2 text-xs text-muted-foreground">
                 {cache.data.bundleCount} 个缓存包 · {cache.data.entryCount} 个文件
               </p>
+              <div aria-live="polite" className="mt-3 text-sm">
+                {cache.data.cleanupStatus === "running" ? (
+                  <p className="flex items-center gap-2 text-muted-foreground" role="status">
+                    <LoaderCircleIcon className="size-4 shrink-0 animate-spin" />
+                    正在后台清理超额缓存，可继续使用网站…
+                  </p>
+                ) : cache.data.cleanupStatus === "failed" ? (
+                  <p className="text-destructive">{cache.data.cleanupError}</p>
+                ) : cache.data.overLimit ? (
+                  <p className="text-muted-foreground">
+                    缓存暂时超过上限；正在阅读或翻译的章节会保留，解除保护后可再次保存设置清理。
+                  </p>
+                ) : null}
+              </div>
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
                 className="mt-4"
-                disabled={clearCache.isPending}
+                disabled={clearCache.isPending || cache.data.cleanupStatus === "running"}
                 onClick={() => {
                   if (window.confirm("清除全部普通缓存？收藏、历史、设置和已读状态不会删除。")) {
                     clearCache.mutate();

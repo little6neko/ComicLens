@@ -169,6 +169,8 @@ export interface CacheStats {
   bundleCount: number;
   entryCount: number;
   overLimit: boolean;
+  cleanupStatus: "idle" | "running" | "failed";
+  cleanupError: string | null;
 }
 
 export type TranslationTaskStatus =

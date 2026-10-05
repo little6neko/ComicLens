@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, Response
@@ -20,7 +21,7 @@ async def cache_stats(cache: CacheDependency) -> CacheStats:
 
 @router.delete("", status_code=204)
 async def clear_cache(cache: CacheDependency) -> Response:
-    cache.clear()
+    await asyncio.to_thread(cache.clear)
     return Response(status_code=204)
 
 
@@ -33,5 +34,5 @@ async def delete_chapter_cache(
     comic_id: Annotated[str, Path(min_length=1, max_length=160)],
     chapter_id: Annotated[str, Path(min_length=1, max_length=160)],
 ) -> Response:
-    cache.remove_chapter(comic_id, chapter_id)
+    await asyncio.to_thread(cache.remove_chapter, comic_id, chapter_id)
     return Response(status_code=204)

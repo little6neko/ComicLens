@@ -31,7 +31,7 @@ async def patch_settings(
         if translation_manager.ocr_concurrency != updated.ocr_concurrency:
             translation_manager.set_ocr_concurrency(updated.ocr_concurrency)
         request.app.state.media_cache.max_bytes = updated.cache_max_mb * 1024 * 1024
-        request.app.state.media_cache.enforce_limit()
+        request.app.state.media_cache.schedule_limit_enforcement()
         return updated
     except ValueError as exc:
         raise AppError("VALIDATION_ERROR", str(exc), 422, False) from exc

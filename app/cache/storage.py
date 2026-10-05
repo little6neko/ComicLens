@@ -3,14 +3,18 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import logging
 import os
+import threading
 import time
 import uuid
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path, PurePosixPath
+from typing import Concatenate, ParamSpec, TypeVar
 
 from PIL import Image, UnidentifiedImageError
 
@@ -19,6 +23,21 @@ from app.errors import AppError
 from app.repositories.database import Database
 
 READING_LEASE_SECONDS = 300
+logger = logging.getLogger("comiclens.cache")
+P = ParamSpec("P")
+T = TypeVar("T")
+
+
+def _cache_locked(
+    method: Callable[Concatenate[MediaCache, P], T],
+) -> Callable[Concatenate[MediaCache, P], T]:
+    @wraps(method)
+    def locked(self: MediaCache, *args: P.args, **kwargs: P.kwargs) -> T:
+        # Serialize one cache operation, not a whole background eviction pass.
+        with self._mutation_lock:
+            return method(self, *args, **kwargs)
+
+    return locked
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +52,11 @@ class MediaCache:
         self.root = root.resolve()
         self.database = database
         self.max_bytes = max_bytes
+        self._mutation_lock = threading.RLock()
+        self._enforcement_lock = threading.Lock()
+        self._cleanup_task: asyncio.Task[None] | None = None
+        self._cleanup_requested = False
+        self._cleanup_error: str | None = None
         self._locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self.root.mkdir(parents=True, exist_ok=True)
         self.reconcile()
@@ -71,6 +95,7 @@ class MediaCache:
                 protect=protect,
             )
 
+    @_cache_locked
     def put_bytes(
         self,
         *,
@@ -174,8 +199,10 @@ class MediaCache:
             verify_image=verify_image,
         )
 
+    @_cache_locked
     def delete_entries(self, relative_paths: list[str]) -> None:
         affected_bundles: set[str] = set()
+        directories: set[Path] = set()
         for relative_path in relative_paths:
             row = self.database.fetchone(
                 "SELECT bundle_key FROM cache_entries WHERE relative_path = ?",
@@ -188,11 +215,14 @@ class MediaCache:
                 "DELETE FROM cache_entries WHERE relative_path = ?", (relative_path,)
             )
             with suppress(OSError, ValueError):
-                self._resolve_relative(relative_path).unlink(missing_ok=True)
+                target = self._resolve_relative(relative_path)
+                target.unlink(missing_ok=True)
+                directories.add(target.parent)
         for bundle_key in affected_bundles:
             self._recalculate_bundle(bundle_key)
-        self._remove_empty_directories()
+        self._prune_directories(directories)
 
+    @_cache_locked
     def set_chapter_active(self, comic_id: str, chapter_id: str, active: bool) -> None:
         self.ensure_chapter_bundle(comic_id, chapter_id)
         self.database.execute(
@@ -203,6 +233,7 @@ class MediaCache:
             (int(active), comic_id, chapter_id),
         )
 
+    @_cache_locked
     def ensure_chapter_bundle(self, comic_id: str, chapter_id: str) -> str:
         from app.cache.keys import chapter_bundle_key
 
@@ -233,8 +264,17 @@ class MediaCache:
             bundle_count=bundles,
             entry_count=entries,
             over_limit=used > self.max_bytes,
+            cleanup_status=(
+                "running"
+                if self._cleanup_task is not None and not self._cleanup_task.done()
+                else "failed"
+                if self._cleanup_error
+                else "idle"
+            ),
+            cleanup_error=self._cleanup_error,
         )
 
+    @_cache_locked
     def lease_chapter(self, comic_id: str, chapter_id: str) -> None:
         self.database.execute(
             """
@@ -250,6 +290,7 @@ class MediaCache:
             ),
         )
 
+    @_cache_locked
     def remove_chapter(self, comic_id: str, chapter_id: str) -> bool:
         row = self.database.fetchone(
             """
@@ -277,11 +318,53 @@ class MediaCache:
         )
         removed = 0
         for row in rows:
-            self._remove_bundle(str(row["bundle_key"]))
-            removed += 1
+            removed += int(self._remove_bundle(str(row["bundle_key"])))
         return removed
 
+    def schedule_limit_enforcement(self) -> None:
+        """Called on the application loop; repeated saves share one worker."""
+        self._cleanup_requested = True
+        if self._cleanup_task is None or self._cleanup_task.done():
+            self._cleanup_error = None
+            self._cleanup_task = asyncio.create_task(self._cleanup_in_background())
+
+    async def _cleanup_in_background(self) -> None:
+        started = time.monotonic()
+        logger.info("cache event=cleanup_started max_bytes=%s", self.max_bytes)
+        try:
+            while self._cleanup_requested:
+                self._cleanup_requested = False
+                await asyncio.to_thread(self._enforce_limit)
+            logger.info(
+                "cache event=cleanup_completed duration_ms=%s used_bytes=%s max_bytes=%s",
+                round((time.monotonic() - started) * 1000),
+                self.stats().used_bytes,
+                self.max_bytes,
+            )
+        except Exception:
+            self._cleanup_error = "缓存清理失败，请检查服务器日志，保存设置可重试。"
+            logger.exception("cache event=cleanup_failed")
+
+    async def wait_for_cleanup(self) -> None:
+        if self._cleanup_task is not None:
+            # A worker thread cannot be cancelled safely; finish before closing SQLite.
+            await asyncio.shield(self._cleanup_task)
+
     def enforce_limit(self, *, exclude_bundle: str | None = None) -> None:
+        if self._cleanup_task is not None and not self._cleanup_task.done():
+            return
+        self._enforce_limit(exclude_bundle=exclude_bundle)
+
+    def _enforce_limit(self, *, exclude_bundle: str | None = None) -> None:
+        # Foreground writes must never wait for an entire background pass.
+        if not self._enforcement_lock.acquire(blocking=False):
+            return
+        try:
+            self._evict_over_limit(exclude_bundle=exclude_bundle)
+        finally:
+            self._enforcement_lock.release()
+
+    def _evict_over_limit(self, *, exclude_bundle: str | None = None) -> None:
         while self.stats().used_bytes > self.max_bytes:
             timestamp = self._timestamp()
             parameters: list[object] = [timestamp]
@@ -346,6 +429,7 @@ class MediaCache:
                     path.unlink()
         self._remove_empty_directories()
 
+    @_cache_locked
     def _read_indexed(
         self,
         relative_path: str,
@@ -386,17 +470,32 @@ class MediaCache:
         )
         return CachedMedia(content=content, media_type=media_type, etag=checksum)
 
-    def _remove_bundle(self, bundle_key: str) -> None:
+    @_cache_locked
+    def _remove_bundle(self, bundle_key: str) -> bool:
         bundle = self.database.fetchone(
-            "SELECT kind, comic_id, chapter_id FROM cache_bundles WHERE bundle_key = ?",
+            """SELECT kind, comic_id, chapter_id, active_task, protected_until
+            FROM cache_bundles WHERE bundle_key = ?""",
             (bundle_key,),
         )
         if bundle is None:
-            return
+            return False
+        # Reading/translation may have started since the LRU candidate was selected.
+        if bundle["active_task"] or int(bundle["protected_until"]) > self._timestamp():
+            return False
         rows = self.database.fetchall(
             "SELECT relative_path FROM cache_entries WHERE bundle_key = ?",
             (bundle_key,),
         )
+        directories: set[Path] = set()
+        for row in rows:
+            try:
+                target = self._resolve_relative(str(row["relative_path"]))
+            except ValueError:
+                # Discard an invalid index without ever touching a path outside the cache.
+                continue
+            # Keep the index if deletion fails, so a later cleanup can retry it.
+            target.unlink(missing_ok=True)
+            directories.add(target.parent)
         with self.database.transaction() as connection:
             connection.execute("DELETE FROM cache_bundles WHERE bundle_key = ?", (bundle_key,))
             if bundle["kind"] == "chapter" and bundle["chapter_id"] is not None:
@@ -407,10 +506,8 @@ class MediaCache:
                     """,
                     (str(bundle["comic_id"]), str(bundle["chapter_id"])),
                 )
-        for row in rows:
-            with suppress(OSError, ValueError):
-                self._resolve_relative(str(row["relative_path"])).unlink(missing_ok=True)
-        self._remove_empty_directories()
+        self._prune_directories(directories)
+        return True
 
     def _recalculate_bundle(self, bundle_key: str) -> None:
         byte_size = int(
@@ -476,6 +573,17 @@ class MediaCache:
             with suppress(OSError):
                 temporary.unlink()
             raise
+
+    def _prune_directories(self, directories: set[Path]) -> None:
+        # Only visit ancestors of removed files, never unrelated cache chapters.
+        candidates: set[Path] = set()
+        for directory in directories:
+            while directory != self.root and self.root in directory.parents:
+                candidates.add(directory)
+                directory = directory.parent
+        for directory in sorted(candidates, key=lambda path: len(path.parts), reverse=True):
+            with suppress(OSError):
+                directory.rmdir()
 
     def _remove_empty_directories(self) -> None:
         directories = sorted(
