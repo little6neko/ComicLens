@@ -17,6 +17,7 @@ import { ReaderChapterDirectory } from "@/features/reader/reader-panels";
 import { ReaderTopBar } from "@/features/reader/reader-top-bar";
 import type { EffectiveReaderPage, ReadingMode } from "@/features/reader/types";
 import { useReaderChrome } from "@/features/reader/use-reader-chrome";
+import { useStripChapterAdvance } from "@/features/reader/use-strip-chapter-advance";
 import { api } from "@/lib/api-client";
 import { formatReaderChapterTitle } from "@/lib/chapter-title";
 import { queryKeys, queryTimes } from "@/lib/query-keys";
@@ -328,6 +329,15 @@ function ReaderPageView() {
     if (readingMode === "strip") pageElements.current.get(target)?.scrollIntoView();
   }
 
+  const currentChapterIndex =
+    comic.data?.chapters.findIndex((item) => item.chapterId === chapterId) ?? -1;
+  const nextChapter =
+    currentChapterIndex > 0 ? comic.data?.chapters[currentChapterIndex - 1] : undefined;
+  const stripChapterAdvance = useStripChapterAdvance(
+    comicId,
+    readingMode === "strip" && totalPages > 0 && !heldOpen ? nextChapter?.chapterId : undefined,
+  );
+
   if (manifest.isPending) {
     return (
       <main className="min-h-dvh bg-zinc-950 text-zinc-100">
@@ -352,21 +362,10 @@ function ReaderPageView() {
     );
   }
 
-  const currentChapterIndex = comic.data?.chapters.findIndex(
-    (item) => item.chapterId === chapterId,
-  );
   const currentChapter =
-    currentChapterIndex !== undefined && currentChapterIndex >= 0
-      ? comic.data?.chapters[currentChapterIndex]
-      : undefined;
-  const nextChapter =
-    currentChapterIndex !== undefined && currentChapterIndex > 0
-      ? comic.data?.chapters[currentChapterIndex - 1]
-      : undefined;
+    currentChapterIndex >= 0 ? comic.data?.chapters[currentChapterIndex] : undefined;
   const previousChapter =
-    currentChapterIndex !== undefined && currentChapterIndex >= 0
-      ? comic.data?.chapters[currentChapterIndex + 1]
-      : undefined;
+    currentChapterIndex >= 0 ? comic.data?.chapters[currentChapterIndex + 1] : undefined;
   const visiblePages = getVisiblePages(effectivePages, clampedCurrent, readingMode, pageDirection);
   const retryingSegment = retrySegment.isPending
     ? `${retrySegment.variables?.pageIndex}:${retrySegment.variables?.segmentIndex}`
@@ -418,7 +417,7 @@ function ReaderPageView() {
       )}
 
       {readingMode === "strip" ? (
-        <section className="mx-auto flex max-w-[72rem] flex-col items-center pb-28">
+        <section className="flex flex-col items-center pb-28" {...stripChapterAdvance}>
           {effectivePages.map((page) => (
             <ReaderPageImage
               key={page.index}
@@ -435,6 +434,9 @@ function ReaderPageView() {
               }}
             />
           ))}
+          {nextChapter && totalPages > 0 && (
+            <p className="pt-4 text-sm text-zinc-400">滚动进入下一话</p>
+          )}
         </section>
       ) : (
         <section className="flex h-dvh items-center justify-center overflow-hidden p-2 sm:p-4">
